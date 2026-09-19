@@ -126,6 +126,44 @@ pub fn humanize_secs(secs: u64) -> String {
     }
 }
 
+/// 高峰积压队列：记录哪些 scope 因为撞上高峰而被推迟。
+///
+/// 抽成小结构体是为了能测「补跑」语义。这段逻辑原本写在 daemon 主循环里，
+/// 出错的表现（该补的没补、或者反复补跑重活）都不容易从日志里看出来。
+#[derive(Debug, Default)]
+pub struct DeferQueue {
+    scopes: Vec<String>,
+}
+
+impl DeferQueue {
+    /// 积压一个 scope。
+    ///
+    /// 返回 `true` 表示这是**首次**积压 —— 调用方据此只打一次日志，
+    /// 否则主循环每 30 秒就会重复刷一条同样的提示。
+    pub fn defer(&mut self, scope: &str) -> bool {
+        if self.scopes.iter().any(|s| s == scope) {
+            return false;
+        }
+        self.scopes.push(scope.to_string());
+        true
+    }
+
+    /// 高峰结束后取走全部待补跑的 scope（队列随之清空）。
+    ///
+    /// 仍在高峰、或队列本来就空时返回空列表 —— 前者的意思是「时候未到」。
+    pub fn take_ready(&mut self, peak: bool) -> Vec<String> {
+        if peak || self.scopes.is_empty() {
+            return Vec::new();
+        }
+        std::mem::take(&mut self.scopes)
+    }
+
+    /// 队列是否为空。
+    pub fn is_empty(&self) -> bool {
+        self.scopes.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -226,6 +264,19 @@ mod tests {
             "闲时不该延后 —— 那只是白白晚交作业"
         );
         assert!(!should_defer(true, ds, "", true, peak), "法定节假日不延后");
+    }
+
+    #[test]
+    fn defer_queue_dedupes_and_flushes_on_offpeak() {
+        let mut q = DeferQueue::default();
+        assert!(q.defer("morning"), "首次积压返回 true（调用方据此打日志）");
+        assert!(!q.defer("morning"), "同一个 scope 不重复记，否则日志会刷屏");
+        assert!(!q.is_empty());
+        assert!(q.take_ready(true).is_empty(), "还在高峰就不该取走");
+        assert!(!q.is_empty(), "没取走说明它还留着，下轮还能补跑");
+        assert_eq!(q.take_ready(false), vec!["morning".to_string()]);
+        assert!(q.is_empty(), "取走后清空，避免重复补跑同一批重活");
+        assert!(q.take_ready(false).is_empty(), "空队列再取还是空");
     }
 
     #[test]

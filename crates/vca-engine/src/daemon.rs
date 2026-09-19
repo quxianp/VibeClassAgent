@@ -83,7 +83,7 @@ pub struct Daemon {
     ///
     /// 只记在内存里、不落盘：作业本身还躺在 `pending()` 里，daemon 重启后
     /// 下一个处理窗口照样会捞到它们；落盘反而要额外处理失效与过期。
-    pub deferred_scopes: Vec<String>,
+    pub defer_queue: vca_core::peak::DeferQueue,
 }
 
 impl Daemon {
@@ -145,7 +145,7 @@ impl Daemon {
             python_dir,
             weekend_entries,
             weekend_note,
-            deferred_scopes: Vec::new(),
+            defer_queue: vca_core::peak::DeferQueue::default(),
         })
     }
 
@@ -285,6 +285,16 @@ impl Daemon {
             tracing::info!("处理窗口 {} 个：{}", pws.len(), names.join(" / "));
         }
 
+        // 处理窗口与上课时段重叠：几乎总是填错了（或时间表没标休息段）。
+        // 不致命 —— 正在录的那节课会被跳过 —— 但那一轮窗口等于白开。
+        if let Some(tt) = &self.timetable {
+            for m in windows::overlaps_class(&pws, tt) {
+                tracing::warn!(
+                    "{m}：这一轮会跳过正在录制的课（等它录完再处理），建议把窗口挪进休息段"
+                );
+            }
+        }
+
         // DeepSeek 错峰：这是**静默延迟**行为 —— 不在启动时说清楚，
         // 用户看到作业迟迟没处理，只会以为程序坏了。
         if self.settings.llm.defer_on_peak
@@ -421,6 +431,21 @@ impl Daemon {
                     self.overlay_windows(&ls).len(),
                     self.processing_windows().len()
                 );
+                // 「载入 0 节课」本身是对的（单双周、起止日期都会过滤），
+                // 但用户看到的只有这个 0，容易以为课表压根没读进来。
+                if ls.is_empty() {
+                    let declared = self
+                        .schedule
+                        .plan_for_weekday(today.weekday())
+                        .entries
+                        .len();
+                    if declared > 0 {
+                        tracing::info!(
+                            "  今天课表里有 {declared} 条条目，但都不在本周周期内\
+                             （单双周或起止日期），所以今天不录"
+                        );
+                    }
+                }
             }
 
             let lessons = self.lessons_today(today);
@@ -638,7 +663,7 @@ impl Daemon {
                     if peak {
                         // 高峰时段调用模型要多花一倍的钱，先把这批积压下来。
                         // 注意**不**把 key 记进 handled_windows —— 这轮并没有真的处理。
-                        if !self.deferred_scopes.contains(&w.scope) {
+                        if self.defer_queue.defer(&w.scope) {
                             let wait = vca_core::peak::humanize_secs(
                                 vca_core::peak::secs_until_offpeak_now(self.peak_holiday(today)),
                             );
@@ -647,7 +672,6 @@ impl Daemon {
                                  本轮积压（{wait}后进入闲时，届时自动补跑）",
                                 w.name
                             );
-                            self.deferred_scopes.push(w.scope.clone());
                         }
                     } else {
                         handled_windows.push(key);
@@ -660,11 +684,9 @@ impl Daemon {
             }
 
             // ---------- 3b) 高峰过去了：把积压的补上 ----------
-            if !self.deferred_scopes.is_empty() && !peak {
-                for scope in std::mem::take(&mut self.deferred_scopes) {
-                    tracing::info!("高峰已结束，补跑积压的课后处理（scope={scope}）");
-                    let _ = self.process_scope(&scope, &lessons, today, current_job.as_deref());
-                }
+            for scope in self.defer_queue.take_ready(peak) {
+                tracing::info!("高峰已结束，补跑积压的课后处理（scope={scope}）");
+                let _ = self.process_scope(&scope, &lessons, today, current_job.as_deref());
             }
 
             // ---------- 4) 清理 ----------

@@ -197,9 +197,69 @@ pub fn is_meal_break(slot: &TimetableSlot) -> bool {
     }
 }
 
+/// 检查处理窗口是否与上课时段重叠。
+///
+/// 重叠本身不致命（正在录的那节课会被跳过，见 `process_scope`），但那一轮窗口
+/// 等于白开 —— 而且**通常是填错了**：把处理窗口写进了上课时间。
+/// 与其等运行时打一条容易被忽略的 WARN，不如启动时就说清楚。
+pub fn overlaps_class(windows: &[ProcessingWindow], timetable: &Timetable) -> Vec<String> {
+    let mut out = Vec::new();
+    for w in windows {
+        let (Some(ws), Some(we)) = (
+            LocalDateTime::parse_hhmm(&w.start),
+            LocalDateTime::parse_hhmm(&w.end),
+        ) else {
+            continue;
+        };
+        for slot in &timetable.slots {
+            if slot.kind != SlotKind::Class {
+                continue;
+            }
+            let (Some(cs), Some(ce)) = (
+                LocalDateTime::parse_hhmm(&slot.start),
+                LocalDateTime::parse_hhmm(&slot.end),
+            ) else {
+                continue;
+            };
+            if ws < ce && cs < we {
+                out.push(format!(
+                    "处理窗口「{}」({}-{}) 与上课时段 {}-{} 重叠",
+                    w.name, w.start, w.end, slot.start, slot.end
+                ));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_window_overlapping_class() {
+        let t = tt(vec![class(1, "08:00", "08:45")]);
+        let base = ProcessingWindow {
+            name: "早读".into(),
+            start: "08:30".into(),
+            end: "09:00".into(),
+            scope: "morning".into(),
+            max_concurrent: 1,
+        };
+        let bad = vec![base.clone()];
+        assert_eq!(
+            overlaps_class(&bad, &t).len(),
+            1,
+            "08:30-09:00 撞上了 08:00-08:45"
+        );
+
+        let good = vec![ProcessingWindow {
+            start: "12:00".into(),
+            end: "13:00".into(),
+            ..base
+        }];
+        assert!(overlaps_class(&good, &t).is_empty());
+    }
 
     #[test]
     fn prefers_lunch_and_dinner_breaks() {

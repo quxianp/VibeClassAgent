@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     构建并运行 VibeClassAgent（开发用）。
 
@@ -81,6 +81,36 @@ if (Test-Path $selfContained) {
         }
     }
     $env:PATH = "$selfContained;$env:PATH"
+}
+
+# ---- 4) 给 cc-rs 指定 C 编译器（ring 等依赖需要） ----
+# 背景：rustls/ring 含 C 与汇编，编译期需要 C 编译器（cc-rs 先看 CC 再找 gcc）。
+# 但 rustup 的 GNU 工具链只带一个 gcc 驱动的**链接器壳**，没有 cc1，编不了 C；
+# 所以必须借一个外部 MinGW 的 gcc。
+#
+# 关键约束：**不能把它放进 PATH**。它的 ld/gcc 会被 rustc 当成链接器，
+# 结果就是 "ld: cannot find crt2.o / -lwinhttp / -luser32"（实测踩过）。
+# 正确做法：PATH 里剔除它，只用 CC/AR/RANLIB 环境变量告诉 cc-rs 去哪找。
+$ccCandidates = @(
+    (Join-Path $root ".toolchain\mingw-cc\gcc.exe"),
+    "D:\Dev-Cpp\MinGW64\bin\gcc.exe",
+    "C:\mingw64\bin\gcc.exe"
+)
+foreach ($cand in $ccCandidates) {
+    if (Test-Path $cand) {
+        $env:CC = $cand
+        $ccDir = Split-Path -Parent $cand
+        foreach ($tool in @('AR', 'RANLIB')) {
+            $p = Join-Path $ccDir "$($tool.ToLower()).exe"
+            if (Test-Path $p) { Set-Item -Path "env:$tool" -Value $p }
+        }
+        Write-Host "[info] C 依赖编译器(CC): $cand" -ForegroundColor DarkGray
+        break
+    }
+}
+if (-not $env:CC) {
+    Write-Host "[warn] 未找到 C 编译器。若报 'failed to find tool gcc.exe'（ring 等），" -ForegroundColor Yellow
+    Write-Host "       请安装一个 MinGW-w64 并把 gcc.exe 放到 .toolchain\mingw-cc\ 下。" -ForegroundColor Yellow
 }
 
 Push-Location $root

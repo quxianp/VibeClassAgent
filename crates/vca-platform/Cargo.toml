@@ -13,6 +13,7 @@ thiserror.workspace = true
 tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+ureq = { version = "3.4.2", features = ["json"] }
 
 [target.'cfg(windows)'.dependencies]
 # WASAPI 音频采集（系统回环 + 麦克风）等 Win32 调用。

@@ -53,10 +53,16 @@ pub fn doctor(layout: &Layout, fix: bool, profile: Option<&str>) -> Result<()> {
             );
         } else {
             for d in &rep.created_dirs {
-                println!("  + 新建目录  {d}");
+                println!(
+                    "{}",
+                    vca_core::i18n::tf("cmd.out.  + 新建目录  {d}", &[("d", &(d).to_string())])
+                );
             }
             for f in &rep.created_files {
-                println!("  + 生成文件  {f}");
+                println!(
+                    "{}",
+                    vca_core::i18n::tf("cmd.out.  + 生成文件  {f}", &[("f", &(f).to_string())])
+                );
             }
         }
         if !rep.fixed.is_empty() {
@@ -137,12 +143,20 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
         println!("{}", vca_core::i18n::t("cmd.out.目录与配置已就绪"));
     } else {
         for f in rep.created_files.iter().take(5) {
-            println!("      + 已生成 {f}");
+            println!(
+                "{}",
+                vca_core::i18n::tf("cmd.out.      + 已生成 {f}", &[("f", &(f).to_string())])
+            );
         }
         println!(
-            "       已补齐 {} 个目录 / {} 个文件",
-            rep.created_dirs.len(),
-            rep.created_files.len()
+            "{}",
+            vca_core::i18n::tf(
+                "cmd.out.       已补齐 {p1} 个目录 / {p2} 个文件",
+                &[
+                    ("p1", &(rep.created_dirs.len()).to_string()),
+                    ("p2", &(rep.created_files.len()).to_string())
+                ]
+            )
         );
     }
 
@@ -199,13 +213,41 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
                         &week,
                         &imp.schedule,
                     );
-                    println!("       导入成功：{} 条课程", imp.report.entry_count);
-                    println!("        时间表 {}", tt.display());
-                    println!("        课程表 {}", sc.display());
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.       导入成功：{p1} 条课程",
+                            &[("p1", &(imp.report.entry_count).to_string())]
+                        )
+                    );
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.        时间表 {p1}",
+                            &[("p1", &(tt.display()).to_string())]
+                        )
+                    );
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.        课程表 {p1}",
+                            &[("p1", &(sc.display()).to_string())]
+                        )
+                    );
                     if !imp.report.teachers_missing.is_empty() {
                         println!(
-                            "        ! 这些科目没填教师：{}",
-                            imp.report.teachers_missing.join("、")
+                            "{}",
+                            vca_core::i18n::tf(
+                                "cmd.out.        ! 这些科目没填教师：{p1}",
+                                &[(
+                                    "p1",
+                                    &(imp
+                                        .report
+                                        .teachers_missing
+                                        .join(vca_core::i18n::t("cmd.list_sep").as_str()))
+                                    .to_string()
+                                )]
+                            )
                         );
                     }
                     println!();
@@ -220,7 +262,10 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
                         println!("{}", vca_core::i18n::t("cmd.out.已把所有课设为recordt"));
                     }
                 }
-                Err(e) => println!("       导入失败：{e}"),
+                Err(e) => println!(
+                    "{}",
+                    vca_core::i18n::tf("cmd.out.       导入失败：{e}", &[("e", &(e).to_string())])
+                ),
             }
         }
     }
@@ -260,9 +305,18 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
             };
             let _ =
                 vca_core::setup::patch_settings_line(&settings_path, "term.first_week_parity", par);
+            // 「单/双」也是要显示给人看的字，同样不该写死在代码里
+            let par_word = vca_core::i18n::t(if par == "even" {
+                "cmd.word.even"
+            } else {
+                "cmd.word.odd"
+            });
             println!(
-                "       已写入（第 1 周为{}周）",
-                if par == "even" { "双" } else { "单" }
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.       已写入（第 1 周为{p1}周）",
+                    &[("p1", &par_word)]
+                )
             );
         } else {
             println!("{}", vca_core::i18n::t("cmd.out.日期格式不对应为YYYY-M"));
@@ -316,11 +370,23 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
                 Ok(()) => {
                     // 立刻注入，这样下面就能直接拿它拉模型列表
                     std::env::set_var("VCA_LLM_API_KEY", &key);
-                    println!("       已写入 {}", sp.display());
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.       已写入 {p1}",
+                            &[("p1", &(sp.display()).to_string())]
+                        )
+                    );
                     println!("{}", vca_core::i18n::t("cmd.out.这个文件含密钥已被gitig"));
                 }
                 Err(e) => {
-                    println!("       写入失败：{e}");
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.       写入失败：{e}",
+                            &[("e", &(e).to_string())]
+                        )
+                    );
                     println!("{}", vca_core::i18n::t("cmd.out.可手动设置环境变量VCA_L"));
                 }
             }
@@ -341,13 +407,25 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
             let _ = std::io::stdout().flush();
             match vca_platform::llm::list_models(&cfg) {
                 Ok(models) if !models.is_empty() => {
-                    println!(" 找到 {} 个", models.len());
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out. 找到 {p1} 个",
+                            &[("p1", &(models.len()).to_string())]
+                        )
+                    );
                     let show = models.len().min(20);
                     for (i, m) in models.iter().take(show).enumerate() {
                         println!("        {:>2}) {m}", i + 1);
                     }
                     if models.len() > show {
-                        println!("         …（共 {} 个，也可以直接输入模型名）", models.len());
+                        println!(
+                            "{}",
+                            vca_core::i18n::tf(
+                                "cmd.out.         …（共 {p1} 个，也可以直接输入模型名）",
+                                &[("p1", &(models.len()).to_string())]
+                            )
+                        );
                     }
                     print!("      选择模型 [1-{show}，回车跳过]：");
                     let _ = std::io::stdout().flush();
@@ -358,8 +436,11 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
                         _ => {}
                     }
                 }
-                Ok(_) => println!(" 服务端没有返回模型列表"),
-                Err(e) => println!(" 失败：{e}"),
+                Ok(_) => println!("{}", vca_core::i18n::t("cmd.out. 服务端没有返回模型列表")),
+                Err(e) => println!(
+                    "{}",
+                    vca_core::i18n::tf("cmd.out. 失败：{e}", &[("e", &(e).to_string())])
+                ),
             }
         }
 
@@ -379,7 +460,13 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
                 "llm.model",
                 &format!("\"{model}\""),
             );
-            println!("      已写入配置：{} / {model}", p.name);
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.      已写入配置：{p1} / {model}",
+                    &[("p1", (p.name)), ("model", &(model).to_string())]
+                )
+            );
         }
     } else {
         println!("{}", vca_core::i18n::t("cmd.out.已跳过之后可用model配置"));
@@ -403,7 +490,10 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
             "push.provider",
             &format!("\"{pv}\""),
         );
-        println!("       已选：{pv}");
+        println!(
+            "{}",
+            vca_core::i18n::tf("cmd.out.       已选：{pv}", &[("pv", (pv))])
+        );
         println!("{}", vca_core::i18n::t("cmd.out.推送地址同样走环境变量"));
         println!("        setx VCA_PUSH_ENDPOINT \"你的Webhook地址\"");
     } else {
@@ -418,8 +508,20 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
     println!("{}", vca_core::i18n::t("cmd.out.引导完成"));
     println!("================================================================");
     println!();
-    println!("  配置目录：{}", layout.config_root.display());
-    println!("  数据目录：{}", layout.data_root.display());
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.  配置目录：{p1}",
+            &[("p1", &(layout.config_root.display()).to_string())]
+        )
+    );
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.  数据目录：{p1}",
+            &[("p1", &(layout.data_root.display()).to_string())]
+        )
+    );
     println!();
     println!("{}", vca_core::i18n::t("cmd.out.接下来建议按顺序做"));
     println!("{}", vca_core::i18n::t("cmd.out.1vcadoctor--fi"));
@@ -442,7 +544,13 @@ pub fn reset_setup(layout: &Layout) -> Result<()> {
         "{}",
         vca_core::i18n::t("cmd.out.已清除初始化标记下次运行vc")
     );
-    println!("配置目录：{}", layout.config_root.display());
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.配置目录：{p1}",
+            &[("p1", &(layout.config_root.display()).to_string())]
+        )
+    );
     Ok(())
 }
 
@@ -533,8 +641,20 @@ fn mark_all_record(schedule_path: &std::path::Path) -> Result<()> {
 pub fn config(layout: &Layout, action: &str, _args: &[String]) -> Result<()> {
     match action {
         "path" => {
-            println!("配置目录 : {}", layout.config_root.display());
-            println!("数据目录 : {}", layout.data_root.display());
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.配置目录 : {p1}",
+                    &[("p1", &(layout.config_root.display()).to_string())]
+                )
+            );
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.数据目录 : {p1}",
+                    &[("p1", &(layout.data_root.display()).to_string())]
+                )
+            );
             Ok(())
         }
         _ => not_implemented("config", action, "策划书第 9 章 用户配置项"),
@@ -619,8 +739,17 @@ pub fn plugin(layout: &Layout, action: &str, target: Option<&str>) -> Result<()>
         "list" | "discover" => {
             let mut host = vca_plugin_host::host::PluginHost::new().with_plugins_dir(&dir);
             let n = host.discover()?;
-            println!("插件目录：{}", dir.display());
-            println!("已加载 {n} 个插件：");
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.插件目录：{p1}",
+                    &[("p1", &(dir.display()).to_string())]
+                )
+            );
+            println!(
+                "{}",
+                vca_core::i18n::tf("cmd.out.已加载 {n} 个插件：", &[("n", &(n).to_string())])
+            );
             println!("{:<28} {:<12} {:<10} 名称", "ID", "类型", "版本");
             for h in host.list() {
                 println!(
@@ -639,20 +768,71 @@ pub fn plugin(layout: &Layout, action: &str, target: Option<&str>) -> Result<()>
             host.discover()?;
             match host.list().iter().find(|h| h.manifest.plugin.id == id) {
                 Some(h) => {
-                    println!("插件 id   : {}", h.manifest.plugin.id);
-                    println!("名称      : {}", h.manifest.plugin.name);
-                    println!("版本      : {}", h.manifest.plugin.version);
-                    println!("接口版本  : {}", h.manifest.plugin.api_version);
-                    println!("运行模式  : {}", h.manifest.runtime.r#type);
-                    println!("入口      : {}", h.manifest.runtime.entry);
-                    println!("目录      : {}", h.dir.display());
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.插件 id   : {p1}",
+                            &[("p1", &(h.manifest.plugin.id).to_string())]
+                        )
+                    );
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.名称      : {p1}",
+                            &[("p1", &(h.manifest.plugin.name).to_string())]
+                        )
+                    );
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.版本      : {p1}",
+                            &[("p1", &(h.manifest.plugin.version).to_string())]
+                        )
+                    );
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.接口版本  : {p1}",
+                            &[("p1", &(h.manifest.plugin.api_version).to_string())]
+                        )
+                    );
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.运行模式  : {p1}",
+                            &[("p1", &(h.manifest.runtime.r#type).to_string())]
+                        )
+                    );
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.入口      : {p1}",
+                            &[("p1", &(h.manifest.runtime.entry).to_string())]
+                        )
+                    );
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.目录      : {p1}",
+                            &[("p1", &(h.dir.display()).to_string())]
+                        )
+                    );
                     if let Some(r) = &h.manifest.plugin.risk_note {
-                        println!("风险提示  : {r}");
+                        println!(
+                            "{}",
+                            vca_core::i18n::tf(
+                                "cmd.out.风险提示  : {r}",
+                                &[("r", &(r).to_string())]
+                            )
+                        );
                     }
                     Ok(())
                 }
                 None => {
-                    println!("未找到插件：{id}");
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf("cmd.out.未找到插件：{id}", &[("id", (id))])
+                    );
                     Ok(())
                 }
             }
@@ -668,21 +848,57 @@ pub fn plugin(layout: &Layout, action: &str, target: Option<&str>) -> Result<()>
                 vca_plugin_host::market::MarketSource::LocalDir(std::path::PathBuf::from(src));
             match market.install(&source, &dir, false) {
                 Ok(out) => {
-                    println!("插件已安装：{}", out.plugin_id);
-                    println!("安装位置  ：{}", out.installed_to.display());
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.插件已安装：{p1}",
+                            &[("p1", &(out.plugin_id).to_string())]
+                        )
+                    );
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.安装位置  ：{p1}",
+                            &[("p1", &(out.installed_to.display()).to_string())]
+                        )
+                    );
                     // 权限与风险必须显式展示给用户确认（策划书 4.2）
                     if !out.network.is_empty() {
-                        println!("网络权限  : {}", out.network.join(", "));
+                        println!(
+                            "{}",
+                            vca_core::i18n::tf(
+                                "cmd.out.网络权限  : {p1}",
+                                &[("p1", &(out.network.join(", ")).to_string())]
+                            )
+                        );
                     }
                     if !out.filesystem.is_empty() {
-                        println!("文件权限  : {}", out.filesystem.join(", "));
+                        println!(
+                            "{}",
+                            vca_core::i18n::tf(
+                                "cmd.out.文件权限  : {p1}",
+                                &[("p1", &(out.filesystem.join(", ")).to_string())]
+                            )
+                        );
                     }
                     if !out.env.is_empty() {
-                        println!("需要的环境变量: {}", out.env.join(", "));
+                        println!(
+                            "{}",
+                            vca_core::i18n::tf(
+                                "cmd.out.需要的环境变量: {p1}",
+                                &[("p1", &(out.env.join(", ")).to_string())]
+                            )
+                        );
                     }
                     if let Some(risk) = &out.risk_note {
                         println!();
-                        println!(" 风险提示：{risk}");
+                        println!(
+                            "{}",
+                            vca_core::i18n::tf(
+                                "cmd.out. 风险提示：{risk}",
+                                &[("risk", &(risk).to_string())]
+                            )
+                        );
                         println!(
                             "{}",
                             vca_core::i18n::t("cmd.out.启用前请自行评估；本项目不对")
@@ -696,7 +912,10 @@ pub fn plugin(layout: &Layout, action: &str, target: Option<&str>) -> Result<()>
                     Ok(())
                 }
                 Err(e) => {
-                    eprintln!("安装失败：{e}");
+                    eprintln!(
+                        "{}",
+                        vca_core::i18n::tf("cmd.out.安装失败：{e}", &[("e", &(e).to_string())])
+                    );
                     Ok(())
                 }
             }
@@ -710,12 +929,24 @@ pub fn plugin(layout: &Layout, action: &str, target: Option<&str>) -> Result<()>
             let market = vca_plugin_host::market::LocalMarket::new();
             match market.uninstall(id, &dir) {
                 Ok(p) => {
-                    println!("已卸载：{id}");
-                    println!("删除目录：{}", p.display());
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf("cmd.out.已卸载：{id}", &[("id", (id))])
+                    );
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.删除目录：{p1}",
+                            &[("p1", &(p.display()).to_string())]
+                        )
+                    );
                     Ok(())
                 }
                 Err(e) => {
-                    eprintln!("卸载失败：{e}");
+                    eprintln!(
+                        "{}",
+                        vca_core::i18n::tf("cmd.out.卸载失败：{e}", &[("e", &(e).to_string())])
+                    );
                     Ok(())
                 }
             }
@@ -746,12 +977,24 @@ pub fn profile(_layout: &Layout, action: &str, _name: Option<&str>) -> Result<()
 
 /// 统一的「预留」提示。
 fn not_implemented(cmd: &str, action: &str, reference: &str) -> Result<()> {
-    println!("[预留] {cmd} {action}");
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.[预留] {cmd} {action}",
+            &[("cmd", (cmd)), ("action", (action))]
+        )
+    );
     println!(
         "{}",
         vca_core::i18n::t("cmd.out.该子命令尚未实现；当前功能已")
     );
-    println!("  设计依据：{reference}");
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.  设计依据：{reference}",
+            &[("reference", (reference))]
+        )
+    );
     Ok(())
 }
 
@@ -772,7 +1015,13 @@ pub fn overlay(_layout: &Layout, action: &str, arg: Option<&str>) -> Result<()> 
             let (win, handle) = match overlay::spawn(style) {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!("创建悬浮窗失败：{e}");
+                    eprintln!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.创建悬浮窗失败：{e}",
+                            &[("e", &(e).to_string())]
+                        )
+                    );
                     eprintln!(
                         "{}",
                         vca_core::i18n::t("cmd.out.提示无图形会话如远程服务会话")
@@ -782,7 +1031,13 @@ pub fn overlay(_layout: &Layout, action: &str, arg: Option<&str>) -> Result<()> 
             };
             println!("窗口句柄 = 0x{:X}", win.raw());
             win.show();
-            println!("已显示，保持 {secs} 秒后自动关闭...");
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.已显示，保持 {secs} 秒后自动关闭...",
+                    &[("secs", &(secs).to_string())]
+                )
+            );
             std::thread::sleep(std::time::Duration::from_secs(secs));
             win.close();
             let _ = handle.join();
@@ -796,7 +1051,13 @@ pub fn overlay(_layout: &Layout, action: &str, arg: Option<&str>) -> Result<()> 
             let file = match vca_core::config::load_schedule_file(&path) {
                 Ok(f) => f,
                 Err(e) => {
-                    eprintln!("读取课程表失败：{e}");
+                    eprintln!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.读取课程表失败：{e}",
+                            &[("e", &(e).to_string())]
+                        )
+                    );
                     return Ok(());
                 }
             };
@@ -812,14 +1073,24 @@ pub fn overlay(_layout: &Layout, action: &str, arg: Option<&str>) -> Result<()> 
             );
             let windows = vca_core::schedule::overlay_windows(&lessons, settings.timing());
 
-            println!("日期：{today}（星期{}）", today.weekday() + 1);
-            println!("悬浮窗文本：{}", settings.text);
             println!(
-                "规则：下课后 {} 分钟显示，上课前 {} 分钟关闭；无后续课程时兜底 {} 分钟",
-                settings.show_delay_minutes,
-                settings.hide_before_minutes,
-                settings.fallback_minutes
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.日期：{today}（星期{p1}）",
+                    &[
+                        ("today", &(today).to_string()),
+                        ("p1", &(today.weekday() + 1).to_string())
+                    ]
+                )
             );
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.悬浮窗文本：{p1}",
+                    &[("p1", &(settings.text).to_string())]
+                )
+            );
+            println!("{}", vca_core::i18n::tf("cmd.out.规则：下课后 {p1} 分钟显示，上课前 {p2} 分钟关闭；无后续课程时兜底 {p3} 分钟", &[("p1", &(settings.show_delay_minutes).to_string()), ("p2", &(settings.hide_before_minutes).to_string()), ("p3", &(settings.fallback_minutes).to_string())]));
             println!("{}", "-".repeat(62));
             if lessons.is_empty() {
                 println!("{}", vca_core::i18n::t("cmd.out.当天没有课程"));
@@ -853,7 +1124,13 @@ pub fn overlay(_layout: &Layout, action: &str, arg: Option<&str>) -> Result<()> 
             Ok(())
         }
         "show" | "hide" => {
-            println!("[{action}] 需要宿主进程持有窗口句柄；请用 `vca overlay demo` 验证。");
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.[{action}] 需要宿主进程持有窗口句柄；请用 `vca overlay demo` 验证。",
+                    &[("action", (action))]
+                )
+            );
             Ok(())
         }
         _ => not_implemented("overlay", action, "策划书 1.4 悬浮窗时序"),
@@ -923,13 +1200,28 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
                             "录制端（麦克风）"
                         };
                         println!("{label}");
-                        println!("  格式 : {}", ep.format);
-                        println!("  端点 : {}", ep.id);
+                        println!(
+                            "{}",
+                            vca_core::i18n::tf(
+                                "cmd.out.  格式 : {p1}",
+                                &[("p1", &(ep.format).to_string())]
+                            )
+                        );
+                        println!(
+                            "{}",
+                            vca_core::i18n::tf(
+                                "cmd.out.  端点 : {p1}",
+                                &[("p1", &(ep.id).to_string())]
+                            )
+                        );
                     }
                     Ok(())
                 }
                 Err(e) => {
-                    println!("探测失败：{e}");
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf("cmd.out.探测失败：{e}", &[("e", &(e).to_string())])
+                    );
                     Ok(())
                 }
             }
@@ -948,14 +1240,26 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
 
             println!("{}", vca_core::i18n::t("cmd.out.转写冒烟测试"));
             println!("{}", "-".repeat(62));
-            println!("输入 : {}", media.display());
             println!(
-                "本地 : {}",
-                if vca_platform::stt::local_available(&Default::default()) {
-                    "可用"
-                } else {
-                    "不可用（缺 whisper-cli.exe 或模型，可运行 scripts/fetch-deps.py）"
-                }
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.输入 : {p1}",
+                    &[("p1", &(media.display()).to_string())]
+                )
+            );
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.本地 : {p1}",
+                    &[(
+                        "p1",
+                        (if vca_platform::stt::local_available(&Default::default()) {
+                            "可用"
+                        } else {
+                            "不可用（缺 whisper-cli.exe 或模型，可运行 scripts/fetch-deps.py）"
+                        })
+                    )]
+                )
             );
             println!();
 
@@ -963,10 +1267,28 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
             let t0 = std::time::Instant::now();
             match vca_platform::stt::transcribe(&cfg, &media, &work) {
                 Ok(t) => {
-                    println!("引擎     : {}", t.engine);
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.引擎     : {p1}",
+                            &[("p1", &(t.engine).to_string())]
+                        )
+                    );
                     println!("耗时     : {:.1}s（含转码）", t.seconds);
-                    println!("分段     : {} 段", t.segments.len());
-                    println!("文本长度 : {} 字", t.text.chars().count());
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.分段     : {p1} 段",
+                            &[("p1", &(t.segments.len()).to_string())]
+                        )
+                    );
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.文本长度 : {p1} 字",
+                            &[("p1", &(t.text.chars().count()).to_string())]
+                        )
+                    );
                     println!();
                     println!("{}", vca_core::i18n::t("cmd.out.---转写内容前500字--"));
                     let preview: String = t.text.chars().take(500).collect();
@@ -976,7 +1298,10 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
                     }
                 }
                 Err(e) => {
-                    println!("转写失败：{e}");
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf("cmd.out.转写失败：{e}", &[("e", &(e).to_string())])
+                    );
                 }
             }
             println!();
@@ -1030,13 +1355,22 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
                 Ok(s) => s.with_shot_dir(shots.clone()),
                 Err(e) => {
                     println!();
-                    println!("   录制初始化失败：{e}");
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.   录制初始化失败：{e}",
+                            &[("e", &(e).to_string())]
+                        )
+                    );
                     return Ok(());
                 }
             };
             if let Err(e) = sess.start() {
                 println!();
-                println!("   录制启动失败：{e}");
+                println!(
+                    "{}",
+                    vca_core::i18n::tf("cmd.out.   录制启动失败：{e}", &[("e", &(e).to_string())])
+                );
                 return Ok(());
             }
             std::thread::sleep(std::time::Duration::from_secs(secs as u64));
@@ -1045,22 +1379,36 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
                 Ok(o) => o,
                 Err(e) => {
                     println!();
-                    println!("   收尾失败：{e}");
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf("cmd.out.   收尾失败：{e}", &[("e", &(e).to_string())])
+                    );
                     return Ok(());
                 }
             };
             println!(
-                "   → 视频 {} / 音频 {} 路 / 截图 {} 张",
-                if outcome.video.is_some() {
-                    "有"
-                } else {
-                    "无"
-                },
-                outcome.audio.len(),
-                outcome.screenshots.len()
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.   → 视频 {p1} / 音频 {p2} 路 / 截图 {p3} 张",
+                    &[
+                        (
+                            "p1",
+                            (if outcome.video.is_some() {
+                                "有"
+                            } else {
+                                "无"
+                            })
+                        ),
+                        ("p2", &(outcome.audio.len()).to_string()),
+                        ("p3", &(outcome.screenshots.len()).to_string())
+                    ]
+                )
             );
             for n in &outcome.notes {
-                println!("     备注：{n}");
+                println!(
+                    "{}",
+                    vca_core::i18n::tf("cmd.out.     备注：{n}", &[("n", &(n).to_string())])
+                );
             }
 
             // ---- 2) 建作业 ----
@@ -1110,7 +1458,10 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
                 println!("   ⚠ {w}");
             }
             if let Some(e) = &res.error {
-                println!("   ✗ 失败：{e}");
+                println!(
+                    "{}",
+                    vca_core::i18n::tf("cmd.out.   ✗ 失败：{e}", &[("e", &(e).to_string())])
+                );
             }
 
             // ---- 4) 产物清单 ----
@@ -1145,7 +1496,13 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
 
             println!("{}", vca_core::i18n::t("cmd.out.录制冒烟测试"));
             println!("{}", "-".repeat(62));
-            println!("输出目录 : {}", out_dir.display());
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.输出目录 : {p1}",
+                    &[("p1", &(out_dir.display()).to_string())]
+                )
+            );
             println!("{}", vca_core::i18n::t("cmd.out.时长10秒8fps720p每"));
             println!();
 
@@ -1160,11 +1517,20 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
             let mut sess = match CaptureSession::new(params, &out) {
                 Ok(s) => s.with_shot_dir(shots.clone()),
                 Err(e) => {
-                    println!("初始化失败：{e}");
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf("cmd.out.初始化失败：{e}", &[("e", &(e).to_string())])
+                    );
                     return Ok(());
                 }
             };
-            println!("录制引擎 : {}", sess.engine_label());
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.录制引擎 : {p1}",
+                    &[("p1", &(sess.engine_label()).to_string())]
+                )
+            );
             println!();
 
             print!("{}", vca_core::i18n::t("cmd.out.正在录制"));
@@ -1172,7 +1538,10 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
             let _ = std::io::stdout().flush();
             if let Err(e) = sess.start() {
                 println!();
-                println!("启动失败：{e}");
+                println!(
+                    "{}",
+                    vca_core::i18n::tf("cmd.out.启动失败：{e}", &[("e", &(e).to_string())])
+                );
                 return Ok(());
             }
             for _ in 0..10 {
@@ -1190,40 +1559,121 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
                     match &o.video {
                         Some(v) => {
                             let kb = std::fs::metadata(v).map(|m| m.len() / 1024).unwrap_or(0);
-                            println!(" 收尾产物：{} ({} KB)", v.display(), kb);
+                            println!(
+                                "{}",
+                                vca_core::i18n::tf(
+                                    "cmd.out. 收尾产物：{p1} ({p2} KB)",
+                                    &[
+                                        ("p1", &(v.display()).to_string()),
+                                        ("p2", &(kb).to_string())
+                                    ]
+                                )
+                            );
                         }
-                        None => println!(" 没有产出最终 mp4（见下方备注）"),
+                        None => println!(
+                            "{}",
+                            vca_core::i18n::t("cmd.out. 没有产出最终 mp4（见下方备注）")
+                        ),
                     }
-                    println!(" 音频轨  ：{} 路", o.audio.len());
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out. 音频轨  ：{p1} 路",
+                            &[("p1", &(o.audio.len()).to_string())]
+                        )
+                    );
                     for a in &o.audio {
                         println!("            {}", a.display());
                     }
-                    println!(" 截图    ：{} 张", o.screenshots.len());
+                    println!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out. 截图    ：{p1} 张",
+                            &[("p1", &(o.screenshots.len()).to_string())]
+                        )
+                    );
                     if let Some(raw) = &o.raw_video {
-                        println!(" 中间视频：{}", raw.display());
+                        println!(
+                            "{}",
+                            vca_core::i18n::tf(
+                                "cmd.out. 中间视频：{p1}",
+                                &[("p1", &(raw.display()).to_string())]
+                            )
+                        );
                     }
                     for n in &o.notes {
-                        println!(" 备注    ：{n}");
+                        println!(
+                            "{}",
+                            vca_core::i18n::tf(
+                                "cmd.out. 备注    ：{n}",
+                                &[("n", &(n).to_string())]
+                            )
+                        );
                     }
                 }
-                Err(e) => println!(" 收尾失败：{e}"),
+                Err(e) => println!(
+                    "{}",
+                    vca_core::i18n::tf("cmd.out. 收尾失败：{e}", &[("e", &(e).to_string())])
+                ),
             }
             Ok(())
         }
         "crash-info" => {
-            println!("崩溃日志 : {}", handler.log_path().display());
-            println!("已记录次数: {}", handler.crash_count());
-            println!("退出码    : {}", vca_platform::crash::CRASH_EXIT_CODE);
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.崩溃日志 : {p1}",
+                    &[("p1", &(handler.log_path().display()).to_string())]
+                )
+            );
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.已记录次数: {p1}",
+                    &[("p1", &(handler.crash_count()).to_string())]
+                )
+            );
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.退出码    : {p1}",
+                    &[("p1", &(vca_platform::crash::CRASH_EXIT_CODE).to_string())]
+                )
+            );
             Ok(())
         }
         "paths" => {
-            println!("配置目录 : {}", layout.config_root.display());
-            println!("数据目录 : {}", layout.data_root.display());
-            println!("日志目录 : {}", log_dir.display());
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.配置目录 : {p1}",
+                    &[("p1", &(layout.config_root.display()).to_string())]
+                )
+            );
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.数据目录 : {p1}",
+                    &[("p1", &(layout.data_root.display()).to_string())]
+                )
+            );
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.日志目录 : {p1}",
+                    &[("p1", &(log_dir.display()).to_string())]
+                )
+            );
             Ok(())
         }
         _ => {
-            println!("[debug] 未知动作: {action}");
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.[debug] 未知动作: {action}",
+                    &[("action", (action))]
+                )
+            );
             Ok(())
         }
     }
@@ -1233,20 +1683,53 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
 pub fn clean(layout: &Layout, dry_run: bool) -> Result<()> {
     let root = layout.data_root.clone();
     let now = vca_platform::clock::now_local();
-    println!("清理扫描：{}（现在 {now}）", root.display());
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.清理扫描：{p1}（现在 {now}）",
+            &[
+                ("p1", &(root.display()).to_string()),
+                ("now", &(now).to_string())
+            ]
+        )
+    );
     if !root.exists() {
         println!("{}", vca_core::i18n::t("cmd.out.数据目录不存在无需清理"));
         return Ok(());
     }
     let rep = vca_core::cleanup::sweep(&root, now, dry_run);
     println!("{}", "-".repeat(62));
-    println!("扫描到计划 : {}", rep.scanned);
-    println!("已删除     : {}", rep.deleted.len());
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.扫描到计划 : {p1}",
+            &[("p1", &(rep.scanned).to_string())]
+        )
+    );
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.已删除     : {p1}",
+            &[("p1", &(rep.deleted.len()).to_string())]
+        )
+    );
     for d in &rep.deleted {
         println!("   - {d}");
     }
-    println!("跳过(未到期): {}", rep.skipped.len());
-    println!("删除失败   : {}", rep.failed.len());
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.跳过(未到期): {p1}",
+            &[("p1", &(rep.skipped.len()).to_string())]
+        )
+    );
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.删除失败   : {p1}",
+            &[("p1", &(rep.failed.len()).to_string())]
+        )
+    );
     for (f, e) in &rep.failed {
         println!("   ! {f}: {e}");
     }
@@ -1273,7 +1756,13 @@ pub fn import(
                 "csv" => print!("{}", vca_core::import::csv_template()),
                 "timetable" => print!("{}", vca_core::import::timetable_template()),
                 other => {
-                    eprintln!("未知模板类型: {other}（支持 csv / timetable）");
+                    eprintln!(
+                        "{}",
+                        vca_core::i18n::tf(
+                            "cmd.out.未知模板类型: {other}（支持 csv / timetable）",
+                            &[("other", (other))]
+                        )
+                    );
                 }
             }
             Ok(())
@@ -1288,7 +1777,10 @@ pub fn import(
             let imp = match vca_core::import::import_classisland(&path, timetable_hint) {
                 Ok(v) => v,
                 Err(e) => {
-                    eprintln!("导入失败: {e}");
+                    eprintln!(
+                        "{}",
+                        vca_core::i18n::tf("cmd.out.导入失败: {e}", &[("e", &(e).to_string())])
+                    );
                     return Ok(());
                 }
             };
@@ -1318,9 +1810,30 @@ pub fn import(
             print_report(&imp.report);
             println!();
             println!("{}", vca_core::i18n::t("cmd.out.已写入"));
-            println!("  时间表 : {}", tt.display());
-            println!("  课程表 : {}", sc.display());
-            println!("  存档   : {} / {}", tt_arch.display(), sc_arch.display());
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.  时间表 : {p1}",
+                    &[("p1", &(tt.display()).to_string())]
+                )
+            );
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.  课程表 : {p1}",
+                    &[("p1", &(sc.display()).to_string())]
+                )
+            );
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.  存档   : {p1} / {p2}",
+                    &[
+                        ("p1", &(tt_arch.display()).to_string()),
+                        ("p2", &(sc_arch.display()).to_string())
+                    ]
+                )
+            );
             println!();
             println!(
                 "{}",
@@ -1336,7 +1849,10 @@ pub fn import(
             let rows = match vca_core::import::parse_csv(&text) {
                 Ok(r) => r,
                 Err(e) => {
-                    eprintln!("解析失败: {e}");
+                    eprintln!(
+                        "{}",
+                        vca_core::i18n::tf("cmd.out.解析失败: {e}", &[("e", &(e).to_string())])
+                    );
                     return Ok(());
                 }
             };
@@ -1350,12 +1866,24 @@ pub fn import(
             )?;
             print_report(&imp.report);
             println!();
-            println!("已写入存档：{}", sc.display());
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.已写入存档：{p1}",
+                    &[("p1", &(sc.display()).to_string())]
+                )
+            );
             println!("{}", vca_core::i18n::t("cmd.out.提示CSV导入只更新课程表；"));
             Ok(())
         }
         other => {
-            eprintln!("未知来源: {other}（支持 classisland / csv / template）");
+            eprintln!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.未知来源: {other}（支持 classisland / csv / template）",
+                    &[("other", (other))]
+                )
+            );
             Ok(())
         }
     }
@@ -1364,16 +1892,51 @@ pub fn import(
 fn print_report(r: &vca_core::import::ImportReport) {
     println!("{}", "-".repeat(62));
     println!("{}", vca_core::i18n::t("cmd.out.导入报告"));
-    println!("  来源      : {}", r.source);
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.  来源      : {p1}",
+            &[("p1", &(r.source).to_string())]
+        )
+    );
     if !r.timetable_name.is_empty() {
-        println!("  时间表    : {}", r.timetable_name);
+        println!(
+            "{}",
+            vca_core::i18n::tf(
+                "cmd.out.  时间表    : {p1}",
+                &[("p1", &(r.timetable_name).to_string())]
+            )
+        );
     }
-    println!("  课程表份数: {}", r.class_plan_count);
-    println!("  课程条目  : {}", r.entry_count);
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.  课程表份数: {p1}",
+            &[("p1", &(r.class_plan_count).to_string())]
+        )
+    );
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.  课程条目  : {p1}",
+            &[("p1", &(r.entry_count).to_string())]
+        )
+    );
     if r.teachers_missing.is_empty() {
         println!("{}", vca_core::i18n::t("cmd.out.教师全部已填写"));
     } else {
-        println!("  待补全教师: {}", r.teachers_missing.join("、"));
+        println!(
+            "{}",
+            vca_core::i18n::tf(
+                "cmd.out.  待补全教师: {p1}",
+                &[(
+                    "p1",
+                    &(r.teachers_missing
+                        .join(vca_core::i18n::t("cmd.list_sep").as_str()))
+                    .to_string()
+                )]
+            )
+        );
         println!("{}", vca_core::i18n::t("cmd.out.已归入unassigned可"));
     }
     for w in &r.warnings {
@@ -1392,7 +1955,13 @@ pub fn run(layout: &Layout, schedule: Option<&str>, dry_run: bool) -> Result<()>
             let dst_dir = layout.config_root.join("schedule");
             std::fs::create_dir_all(&dst_dir)?;
             let _ = std::fs::copy(&src, dst_dir.join("current.yaml"));
-            println!("已载入课程表: {}", src.display());
+            println!(
+                "{}",
+                vca_core::i18n::tf(
+                    "cmd.out.已载入课程表: {p1}",
+                    &[("p1", &(src.display()).to_string())]
+                )
+            );
         }
     }
 
@@ -1404,9 +1973,27 @@ pub fn run(layout: &Layout, schedule: Option<&str>, dry_run: bool) -> Result<()>
 
     let mut d = Daemon::load(layout.clone(), cfg)?;
     println!("{}", vca_core::i18n::t("cmd.out.守护进程启动CtrlC退出"));
-    println!("配置目录 : {}", layout.config_root.display());
-    println!("数据目录 : {}", layout.data_root.display());
-    println!("Python   : {}", d.python_dir.display());
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.配置目录 : {p1}",
+            &[("p1", &(layout.config_root.display()).to_string())]
+        )
+    );
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.数据目录 : {p1}",
+            &[("p1", &(layout.data_root.display()).to_string())]
+        )
+    );
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.Python   : {p1}",
+            &[("p1", &(d.python_dir.display()).to_string())]
+        )
+    );
     if dry_run {
         println!("{}", vca_core::i18n::t("cmd.out.模式dry-run不真正录制"));
     }

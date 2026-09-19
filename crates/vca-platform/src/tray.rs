@@ -693,4 +693,43 @@ mod tests {
         let n = std::mem::size_of::<NotifyIconDataW>();
         assert_eq!(n, 976, "NOTIFYICONDATAW 大小应为 976，实际 {n}");
     }
+
+    #[test]
+    fn bundled_icon_loads_when_present() {
+        // 这条测试针对一个很隐蔽的坑：图标文件存在但格式不对时，
+        // LoadImageW 会返回 0，托盘**不报错、只是显示成一块空白**，
+        // 从日志上完全看不出问题。所以在开发机上就把它卡住。
+        let Some(p) = icon_path() else {
+            // 没有资源文件时走代码绘制的兜底，不算失败
+            eprintln!("（跳过：没找到 assets/icon.ico，将使用内置绘制图标）");
+            return;
+        };
+        let h = load_icon_from_file();
+        assert!(
+            h.is_some(),
+            "图标文件存在但加载失败（格式可能不对）：{}",
+            p.display()
+        );
+        // 载入成功要负责释放，避免测试泄漏 GDI 句柄
+        unsafe {
+            extern "system" {
+                fn DestroyIcon(h: Hicon) -> Bool;
+            }
+            let _ = DestroyIcon(h.unwrap());
+        }
+    }
+
+    #[test]
+    fn builtin_fallback_always_draws_something() {
+        // 没有资源文件时也必须能画出一个图标：
+        // 托盘没有图标会显示成空白，比一个不好看的图标更让人困惑。
+        let h = make_icon_builtin();
+        assert_ne!(h, 0, "内置绘制的图标不该失败");
+        unsafe {
+            extern "system" {
+                fn DestroyIcon(h: Hicon) -> Bool;
+            }
+            let _ = DestroyIcon(h);
+        }
+    }
 }

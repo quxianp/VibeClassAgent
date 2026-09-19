@@ -218,6 +218,13 @@ def main() -> int:
     (out / "首次设置.cmd").write_text(SETUP_CMD, encoding="utf-8")
     (out / "README.txt").write_text(README_TXT, encoding="utf-8")
 
+    # ---- 资源与语言文件 ----
+    # 图标是独立文件：拿到正式 LOGO 后直接覆盖 assets/icon.ico 即可，代码不用动。
+    # 语言文件同理：改文案不必重新编译。
+    n_icon = copy_tree(ROOT / "assets", out / "assets", "*.ico")
+    n_locale = copy_tree(ROOT / "locales", out / "locales", "*.json")
+    log(f"      图标 {n_icon} 个 / 语言文件 {n_locale} 个")
+
     # ---- 运行时组件 ----
     log("[3/4] 收集运行时组件")
     ff = copy_tree(ROOT / "tools" / "ffmpeg", out / "tools" / "ffmpeg", "ffmpeg.exe")

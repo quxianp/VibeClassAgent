@@ -275,8 +275,8 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
     println!();
 
     // ---------- 第 4 步：模型 API ----------
-    println!("[4/5] 模型 API（把转写文字提炼成课堂要点）");
-    println!("      语音转写是本地完成的、不需要 Key；这里配的是「要点提取」用的接口。");
+    println!("{}", vca_core::i18n::t("setup.step_model"));
+    println!("      {}", vca_core::i18n::t("setup.step_model_note"));
     println!();
 
     // 4.1 选服务商：用内置预设，省得用户去翻各家文档
@@ -284,12 +284,15 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
         .iter()
         .filter(|p| !p.base_url.is_empty())
         .collect();
-    println!("      选择服务商：");
+    println!("      {}", vca_core::i18n::t("setup.ask_provider"));
     for (i, p) in presets.iter().enumerate() {
         println!("        {:>2}) {:<20} {}", i + 1, p.name, p.note);
     }
-    println!("         0) 跳过（之后可用 /model 配置）");
-    print!("      请选择 [0-{}，回车=0]：", presets.len());
+    println!("         {}", vca_core::i18n::t("setup.provider_skip"));
+    print!(
+        "      {}",
+        vca_core::i18n::tf("setup.provider_pick", &[("n", &presets.len().to_string())])
+    );
     let _ = std::io::stdout().flush();
     let idx: usize = read_line().trim().parse().unwrap_or(0);
 

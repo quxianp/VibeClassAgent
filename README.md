@@ -209,7 +209,72 @@ Pending → Recorded → Transcribed → Extracted → Linked → DocReady → P
 
 ---
 
-## 六、已知限制与待确认项
+## 六、定制与二次修改
+
+### 改界面文案 / 加语种
+
+界面上的固定文字**全部在语言文件里**，不用改代码、不用重新编译：
+
+```
+locales/zh-CN.json     简体中文（内置兜底，编译进 exe）
+locales/en-US.json     英文
+```
+
+- 放在程序目录的 `locales/` 下即可生效，**按 key 覆盖内置内容** ——
+  只写要改的那几条就行，不必抄全；
+- 键名是点分层的（`welcome.hint`、`status.ffmpeg`），支持嵌套对象与数组
+  （数组会接成多行文本，ASCII logo 就是这么放的）；
+- 缺 key 时界面会显示 key 本身（比如 `welcome.hint`），一眼能看出漏翻了；
+- 换启动界面的 ASCII 画：改 `welcome.logo` 数组即可。
+
+### 换程序图标
+
+```
+assets/icon.ico        16 / 32 / 48 / 256 四个尺寸
+```
+
+托盘优先加载这个文件，缺失才回退到代码现场绘制。
+**拿到正式 LOGO 后直接覆盖它，一行代码都不用改。**
+占位图可用 `python scripts/make-icon.py` 重新生成。
+
+### 数据放在哪
+
+**默认不碰 C 盘用户目录。** 解析顺序：
+
+1. 命令行 `--data-dir` / `--config-dir`
+2. 环境变量 `VCA_DATA_DIR` / `VCA_CONFIG_DIR`
+3. **引导文件** `vca.paths.json`（记录你在 `/paths set` 里选的位置）
+4. **便携布局**：程序目录下的 `data/` 与 `config/`（默认走这条）
+5. 程序目录不可写时才退到 `%LOCALAPPDATA%`，并且会明确告知
+
+在交互界面里用 `/paths` 看当前来源，`/paths set D:\课堂数据` 换位置。
+整个文件夹拷走就能换机器用。
+
+### 密钥从哪来
+
+`secrets.env`（放在配置目录里）与真环境变量都认，
+**环境变量优先级更高**，文件只补缺失的那些键。
+首次引导里填的 API Key 就写进这个文件，不必再去改系统环境变量。
+该文件已被 `.gitignore` 排除。
+
+### 模型名不用手打
+
+`/model` 会直接问 API 的 `/v1/models` 要列表，按序号挑；首次引导里同理。
+模型名最容易被拼错，而拼错的代价是**课后处理时才发现调用失败**，那时课已经录完了。
+
+### 打包发布
+
+```bash
+python scripts/package.py                  # 完整包（含模型）
+python scripts/package.py --no-model       # 不带模型，转写走云端
+```
+
+产出 `dist/VibeClassAgent/`：程序 + ffmpeg + whisper + 模型 + 图标 + 语言文件 +
+配置模板 + 双击即用的启动脚本，**整个目录拷到一体机上就能跑**。
+
+---
+
+## 七、已知限制与待确认项
 
 - **PDF 生成依赖系统 Edge/Chrome**。原理是 HTML → 浏览器无头打印（中文渲染零配置、
   体积小）。若浏览器不可用，会**保留 HTML** 并在备注里说明，可用浏览器打开后另存为 PDF。
@@ -225,7 +290,7 @@ Pending → Recorded → Transcribed → Extracted → Linked → DocReady → P
 
 ---
 
-## 七、开发
+## 八、开发
 
 ```bash
 scripts\dev.cmd doctor              # 自检
@@ -242,7 +307,7 @@ cargo clippy --all-targets -- -D warnings
 
 ---
 
-## 八、安全
+## 九、安全
 
 1. **凭据零入库**：所有 token / webhook / password 只走环境变量；
    `.gitignore` 覆盖 `.env`、`*.pem`、`*.key`、`*credentials*`、`*secrets*`、`*_rsa`；

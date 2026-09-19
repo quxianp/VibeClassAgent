@@ -125,15 +125,29 @@
 
   "setup": {
     "title": "First-time setup",
-    "step_model": "Model API",
+    "step_env": "[1/5] Environment check and auto repair",
+    "step_schedule": "[2/5] Class schedule",
+    "step_term": "[3/5] Term alignment (how odd/even weeks are counted)",
+    "step_model": "[4/5] Model API (turns the transcript into lesson highlights)",
+    "step_push": "[5/5] Push channel (sends documents to WeChat / QQ)",
+    "step_model_note": "Speech-to-text runs locally and needs no key; this configures the highlight extraction API.",
     "ask_base_url": "Model service base URL (OpenAI compatible, empty to skip):",
     "ask_api_key": "API key (empty to skip; you can also set VCA_LLM_API_KEY later):",
     "ask_provider": "Choose a provider:",
-    "fetching_models": "Fetching available models …",
-    "pick_model": "Pick a model (enter its number):",
-    "manual_model": "Type the model name:",
-    "saved": "Saved to config.",
-    "skipped": "Skipped — you can configure it later with /model."
+    "provider_skip": "0) Skip (configure later with /model)",
+    "provider_pick": "Pick [0-{n}, enter=0]: ",
+    "key_saved": "Saved to {file}",
+    "key_saved_note": "That file holds a secret, is git-ignored, and should not be shared.",
+    "key_failed": "Write failed: {err}",
+    "key_failed_note": "You can set the VCA_LLM_API_KEY environment variable manually.",
+    "fetching_models": "Fetching model list …",
+    "models_found": " found {n}",
+    "models_more": "… ({n} total; you can also type a model name)",
+    "pick_model": "Pick a model [1-{n}, enter to skip]: ",
+    "no_models": " the server returned no model list",
+    "ask_model_manual": "Model name (e.g. {hint}): ",
+    "saved_model": "Saved: {provider} / {model}",
+    "skipped": "Skipped — configure later with /model."
   },
 
   "doctor": {

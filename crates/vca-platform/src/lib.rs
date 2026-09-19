@@ -26,10 +26,12 @@
 #![warn(missing_docs)]
 
 pub mod audio;
+pub mod browser_bot;
 pub mod capture;
 pub mod clock;
 pub mod crash;
 pub mod doctor;
+pub mod docgen;
 pub mod http;
 pub mod llm;
 pub mod overlay;

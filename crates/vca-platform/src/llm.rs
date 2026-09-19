@@ -25,9 +25,165 @@ pub struct LessonSummary {
     pub keywords: Vec<String>,
 }
 
+/// 提取模式：用户自己选花钱还是免费。
+///
+/// | 模式 | 成本 | 稳定性 | 说明 |
+/// |---|---|---|---|
+/// | [`LlmMode::PaidApi`] | 按量计费 | 高 | 官方付费接口 |
+/// | [`LlmMode::FreeApi`] | 0 | 高 | 官方**免费额度**（同一套协议，只是换了模型名） |
+/// | [`LlmMode::BrowserBot`] | 0 | 中低 | 驱动网页版聊天机器人，见 [`crate::browser_bot`] |
+///
+/// 前两者共用同一条 HTTP 代码路径，差别只是 base_url 与 model —— 这也是
+/// 「免费」里唯一真正稳的一条：厂商改政策你改个模型名就行，不用改代码。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LlmMode {
+    /// 官方付费接口（默认）。
+    #[default]
+    PaidApi,
+    /// 官方免费额度模型。
+    FreeApi,
+    /// 浏览器自动化驱动网页版聊天机器人（实验特性，需显式确认风险）。
+    BrowserBot,
+}
+
+impl LlmMode {
+    /// 从配置字符串解析。
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "free-api" | "free_api" | "freeapi" | "免费api" => Self::FreeApi,
+            "browser-bot" | "browser_bot" | "browser" | "chatbot" | "网页" => Self::BrowserBot,
+            _ => Self::PaidApi,
+        }
+    }
+
+    /// 配置字符串。
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PaidApi => "paid-api",
+            Self::FreeApi => "free-api",
+            Self::BrowserBot => "browser-bot",
+        }
+    }
+}
+
+/// 厂商预设：帮用户把 base_url 与常见模型名填好，省得查文档。
+///
+/// 说明：这些地址与模型名**以厂商当前文档为准**，各家调整频繁；
+/// 预设只作为起点，用户随时可以在配置里覆盖。
+#[derive(Debug, Clone, Copy)]
+pub struct ProviderPreset {
+    /// 配置里写的 id。
+    pub id: &'static str,
+    /// 显示名。
+    pub name: &'static str,
+    /// OpenAI 兼容的 base url。
+    pub base_url: &'static str,
+    /// 常见的付费模型。
+    pub paid_models: &'static [&'static str],
+    /// 有免费额度（或本身免费）的模型。
+    pub free_models: &'static [&'static str],
+    /// 说明。
+    pub note: &'static str,
+}
+
+/// 内置厂商预设表。
+pub const PROVIDERS: &[ProviderPreset] = &[
+    ProviderPreset {
+        id: "deepseek",
+        name: "DeepSeek",
+        base_url: "https://api.deepseek.com/v1",
+        paid_models: &["deepseek-chat", "deepseek-reasoner"],
+        free_models: &[],
+        note: "价格低，中文课堂纪要表现好",
+    },
+    ProviderPreset {
+        id: "zhipu",
+        name: "智谱 GLM",
+        base_url: "https://open.bigmodel.cn/api/paas/v4",
+        paid_models: &["glm-4-plus", "glm-4-air"],
+        free_models: &["glm-4-flash"],
+        note: "glm-4-flash 免费，适合日常纪要",
+    },
+    ProviderPreset {
+        id: "dashscope",
+        name: "阿里通义千问",
+        base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        paid_models: &["qwen-plus", "qwen-max"],
+        free_models: &["qwen-turbo"],
+        note: "通义系列有免费额度",
+    },
+    ProviderPreset {
+        id: "moonshot",
+        name: "月之暗面 Kimi",
+        base_url: "https://api.moonshot.cn/v1",
+        paid_models: &["moonshot-v1-8k", "moonshot-v1-32k"],
+        free_models: &[],
+        note: "长文本能力强",
+    },
+    ProviderPreset {
+        id: "siliconflow",
+        name: "硅基流动",
+        base_url: "https://api.siliconflow.cn/v1",
+        paid_models: &["deepseek-ai/DeepSeek-V3"],
+        free_models: &["Qwen/Qwen2.5-7B-Instruct"],
+        note: "聚合平台，有免费模型",
+    },
+    ProviderPreset {
+        id: "openai",
+        name: "OpenAI",
+        base_url: "https://api.openai.com/v1",
+        paid_models: &["gpt-4o-mini", "gpt-4o"],
+        free_models: &[],
+        note: "国内直连需代理",
+    },
+    ProviderPreset {
+        id: "groq",
+        name: "Groq",
+        base_url: "https://api.groq.com/openai/v1",
+        paid_models: &[],
+        free_models: &["llama-3.3-70b-versatile"],
+        note: "有较宽松的免费额度，国内直连需代理",
+    },
+    ProviderPreset {
+        id: "openrouter",
+        name: "OpenRouter",
+        base_url: "https://openrouter.ai/api/v1",
+        paid_models: &["anthropic/claude-3.5-sonnet"],
+        free_models: &["deepseek/deepseek-r1:free"],
+        note: "聚合平台，:free 后缀的模型免费",
+    },
+    ProviderPreset {
+        id: "ollama",
+        name: "Ollama（本机）",
+        base_url: "http://127.0.0.1:11434/v1",
+        paid_models: &[],
+        free_models: &["qwen2.5:7b", "llama3.1:8b"],
+        note: "完全离线、零成本，需要本机已装 Ollama 且内存足够",
+    },
+    ProviderPreset {
+        id: "custom",
+        name: "自定义（任何 OpenAI 兼容服务）",
+        base_url: "",
+        paid_models: &[],
+        free_models: &[],
+        note: "自己填 base_url 与 model；one-api / new-api 网关也走这里",
+    },
+];
+
+/// 按 id 查预设。
+pub fn provider_preset(id: &str) -> Option<&'static ProviderPreset> {
+    PROVIDERS
+        .iter()
+        .find(|p| p.id.eq_ignore_ascii_case(id.trim()))
+}
+
 /// LLM 配置。
 #[derive(Debug, Clone, Default)]
 pub struct LlmConfig {
+    /// 提取模式。
+    pub mode: LlmMode,
+    /// 厂商 id（用于查预设；留空则直接用下面的 base_url / model）。
+    pub provider: String,
     /// OpenAI 兼容 base url，例如 `https://api.deepseek.com/v1`。
     pub base_url: String,
     /// API Key。
@@ -38,22 +194,43 @@ pub struct LlmConfig {
     pub timeout_ms: i32,
     /// 单次请求最大字符数（超出则分段）。
     pub max_chars: usize,
+    /// 浏览器自动化配置（仅 [`LlmMode::BrowserBot`] 使用）。
+    pub browser: crate::browser_bot::BrowserBotConfig,
 }
 
 impl LlmConfig {
-    /// 是否已配置完整。
+    /// 是否已配置完整（按模式判断）。
     pub fn is_configured(&self) -> bool {
-        !self.base_url.trim().is_empty()
-            && !self.api_key.trim().is_empty()
-            && !self.model.trim().is_empty()
+        match self.mode {
+            LlmMode::BrowserBot => self.browser.is_ready(),
+            _ => {
+                !self.effective_base_url().trim().is_empty()
+                    && !self.api_key.trim().is_empty()
+                    && !self.model.trim().is_empty()
+            }
+        }
+    }
+
+    /// 实际使用的 base_url：显式填了就用，否则从预设取。
+    pub fn effective_base_url(&self) -> String {
+        let own = self.base_url.trim();
+        if !own.is_empty() {
+            return own.to_string();
+        }
+        provider_preset(&self.provider)
+            .map(|p| p.base_url.to_string())
+            .unwrap_or_default()
     }
 
     /// 补全 `/chat/completions` 端点。
     pub fn endpoint(&self) -> String {
-        format!(
-            "{}/chat/completions",
-            self.base_url.trim().trim_end_matches('/')
-        )
+        let base = self.effective_base_url();
+        let base = base.trim().trim_end_matches('/');
+        if base.ends_with("/chat/completions") {
+            base.to_string()
+        } else {
+            format!("{base}/chat/completions")
+        }
     }
 }
 
@@ -152,8 +329,24 @@ pub fn parse_summary(v: &serde_json::Value) -> LessonSummary {
     }
 }
 
-/// 单次调用 LLM。
+/// 单次调用 LLM（按 [`LlmConfig::mode`] 分派）。
 pub fn complete(cfg: &LlmConfig, system: &str, user: &str) -> Result<String, LlmError> {
+    match cfg.mode {
+        // 网页版聊天机器人：不花 API 钱，但要驱动浏览器，慢且脆弱，
+        // 所以它是一条独立路径，出问题时也只影响这一个模式。
+        LlmMode::BrowserBot => {
+            if !cfg.browser.is_ready() {
+                return Err(LlmError::NotConfigured);
+            }
+            crate::browser_bot::ask(&cfg.browser, system, user)
+                .map_err(|e| LlmError::Api(format!("浏览器模式失败: {e}")))
+        }
+        _ => complete_api(cfg, system, user),
+    }
+}
+
+/// 走 HTTP 的单次调用（付费接口与免费额度共用这一条路径）。
+fn complete_api(cfg: &LlmConfig, system: &str, user: &str) -> Result<String, LlmError> {
     if !cfg.is_configured() {
         return Err(LlmError::NotConfigured);
     }

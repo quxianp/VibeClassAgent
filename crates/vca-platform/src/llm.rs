@@ -232,6 +232,72 @@ impl LlmConfig {
             format!("{base}/chat/completions")
         }
     }
+
+    /// 补全 `/models` 端点（用于拉取可用模型名）。
+    pub fn models_endpoint(&self) -> String {
+        let base = self.effective_base_url();
+        let base = base.trim().trim_end_matches('/');
+        // 有的服务把 base_url 直接写到了 /chat/completions，这里要剥回去
+        let base = base.strip_suffix("/chat/completions").unwrap_or(base);
+        format!("{base}/models")
+    }
+}
+
+/// 拉取可用模型列表。
+///
+/// # 为什么需要这个
+///
+/// 模型名是最容易填错的一项：`deepseek-chat` 少个横杠、把 `glm-4-flash`
+/// 写成 `glm4-flash`，后果是**课后处理时才发现调用失败** —— 而那时课已经录完了。
+/// 直接问服务端要列表让用户挑，从源头上就没有拼错的机会。
+///
+/// # 兼容性
+///
+/// OpenAI 兼容服务的标准响应是 `{"data":[{"id":"..."}]}`；
+/// 少数实现会包成 `{"models":[{"id"/"name":...}]}`，或者直接给字符串数组，
+/// 这里都认。拉不到就返回空列表，由调用方决定是否退回手填。
+pub fn list_models(cfg: &LlmConfig) -> Result<Vec<String>, LlmError> {
+    if cfg.api_key.trim().is_empty() || cfg.effective_base_url().trim().is_empty() {
+        return Err(LlmError::NotConfigured);
+    }
+    let headers = format!("Authorization: Bearer {}\r\n", cfg.api_key.trim());
+    let resp = http::request("GET", &cfg.models_endpoint(), &headers, b"", 30_000)?;
+    if !resp.is_success() {
+        return Err(LlmError::Api(format!(
+            "HTTP {}: {}",
+            resp.status,
+            resp.body.chars().take(200).collect::<String>()
+        )));
+    }
+    let v: serde_json::Value =
+        serde_json::from_str(&resp.body).map_err(|e| LlmError::Parse(e.to_string()))?;
+
+    let mut out: Vec<String> = Vec::new();
+    for key in ["data", "models"] {
+        let Some(arr) = v.get(key).and_then(|d| d.as_array()) else {
+            continue;
+        };
+        for item in arr {
+            // 三种常见形状：{"id":..} / {"name":..} / 直接是字符串
+            let name = item
+                .get("id")
+                .or_else(|| item.get("name"))
+                .and_then(|x| x.as_str())
+                .or_else(|| item.as_str());
+            if let Some(n) = name {
+                let n = n.trim();
+                if !n.is_empty() {
+                    out.push(n.to_string());
+                }
+            }
+        }
+        if !out.is_empty() {
+            break;
+        }
+    }
+    out.sort();
+    out.dedup();
+    Ok(out)
 }
 
 /// 提取失败原因。

@@ -1,0 +1,158 @@
+{
+  "app": {
+    "name": "VibeClassAgent",
+    "short": "VCA",
+    "tagline": "Silent classroom recorder and lesson summarizer",
+    "version_label": "version"
+  },
+
+  "welcome": {
+    "logo": [
+      " ██╗   ██╗ ██████╗ █████╗ ",
+      " ██║   ██║██╔════╝██╔══██╗",
+      " ██║   ██║██║     ███████║",
+      " ╚██╗ ██╔╝██║     ██╔══██║",
+      "  ╚████╔╝ ╚██████╗██║  ██║",
+      "   ╚═══╝   ╚═════╝╚═╝  ╚═╝"
+    ],
+    "label": {
+      "config": "config",
+      "data": "data",
+      "profile": "profile",
+      "model": "model",
+      "stt": "speech",
+      "push": "push",
+      "lang": "lang"
+    },
+    "not_configured": "not configured",
+    "need_setup": "No config yet. Run /doctor fix to create it.",
+    "hint": "Type /help for commands, /quit to exit.",
+    "stt_ready": "local whisper.cpp({model}) ready",
+    "stt_missing": "local model missing (run scripts/fetch-deps.py)",
+    "paths_source": "locations from: {source}"
+  },
+
+  "cmd": {
+    "help_title": "Commands",
+    "help_footer": "Tip: the same features work as `vca <subcommand>` for scheduled tasks.",
+    "status": "Overview: jobs, component readiness, config",
+    "jobs": "List every job and its state",
+    "process": "Process pending jobs (transcribe → extract → document → push)",
+    "process_dry": "Dry run: never actually pushes",
+    "doctor": "Environment check; add fix to create missing dirs/config",
+    "config": "Show config dir / generate templates",
+    "paths": "Show or change data & config locations (defaults next to the program, never on C:)",
+    "model": "Show or pick the extraction model (can fetch the list from the API)",
+    "record": "Recording status; record start / stop for manual control",
+    "audio": "Probe WASAPI audio endpoints (system sound / microphone)",
+    "record_test": "10-second recording smoke test (with screenshots and muxing)",
+    "transcribe_test": "Transcribe the last recording as a smoke test",
+    "e2e": "End-to-end: record 15s and run the whole pipeline (documents + push dry run)",
+    "clean": "Preview expired cleanup; add run to actually delete",
+    "logs": "Show logs",
+    "clear": "Clear screen",
+    "quit": "Quit (same as Ctrl+D)",
+    "unknown": "Unknown command {cmd}. Type /help for the full list.",
+    "only_commands": "This only accepts commands. Type /help, or /status for the current state.",
+    "ctrl_c": "(Ctrl+C) type /quit to exit, /help for commands",
+    "bye": "Bye.",
+    "error_prefix": "Failed: {msg}",
+    "no_terminal": "Cannot start interactive input ({err}). Use subcommands instead: vca --help"
+  },
+
+  "status": {
+    "title": "Status",
+    "jobs_total": "{n} job(s) in total",
+    "jobs_empty": "(no jobs yet — recording starts automatically during class hours)",
+    "pending": "{n} pending — run /process",
+    "ffmpeg": "ffmpeg: {state}",
+    "ffmpeg_ready": "ready",
+    "ffmpeg_missing": "missing (run scripts/fetch-deps.py)",
+    "stt": "local speech: {state}",
+    "stt_ready": "ready ({model})",
+    "stt_missing": "model missing, will use cloud if configured",
+    "llm": "extraction: {state}",
+    "llm_ready": "{model} ({mode})",
+    "llm_missing": "not configured, will fall back to raw transcript",
+    "push": "push channel: {state}",
+    "push_missing": "not configured (dry-run)"
+  },
+
+  "jobs": {
+    "title": "Jobs ({n})",
+    "last_error": "last error: {msg}"
+  },
+
+  "process": {
+    "title": "Processing {n} job(s){mode}",
+    "dry_note": " (dry run, no push)",
+    "none": "Nothing pending.",
+    "step_prefix": "",
+    "done_state": "done, state {state}",
+    "failed": "failed: {msg}",
+    "finished": "All done in {secs}s"
+  },
+
+  "paths": {
+    "title": "Locations (from: {source})",
+    "data": "data",
+    "config": "config",
+    "bootstrap": "bootstrap",
+    "how_to_change": "To move: /paths set <data dir> [config dir]",
+    "example": "e.g.   /paths set D:\\ClassData",
+    "restart_note": "Restart the program for the change to take effect.",
+    "saved": "Saved your choice",
+    "note": "Recorded in {file}",
+    "move_note": "Note: existing data is NOT moved automatically — copy it yourself.",
+    "unwritable": "Cannot write to {dir}",
+    "unwritable_hint": "Pick another location, or create the folder first.",
+    "write_failed": "Failed to write bootstrap file: {err}",
+    "usage": "Usage: /paths [show | set <data dir> [config dir]]"
+  },
+
+  "model": {
+    "title": "Extraction model",
+    "current": "current: {model} ({provider}, {mode})",
+    "fetching": "Fetching model list from {url} …",
+    "fetched": "Found {n} model(s):",
+    "pick": "Enter a number to pick, or type a model name; empty cancels:",
+    "set_ok": "Switched to {model}",
+    "set_failed": "Failed to write config: {err}",
+    "fetch_failed": "Fetch failed: {err}",
+    "need_key": "Configure an API key first (env VCA_LLM_API_KEY) and a base_url.",
+    "usage": "Usage: /model [list | set <model>]"
+  },
+
+  "setup": {
+    "title": "First-time setup",
+    "step_model": "Model API",
+    "ask_base_url": "Model service base URL (OpenAI compatible, empty to skip):",
+    "ask_api_key": "API key (empty to skip; you can also set VCA_LLM_API_KEY later):",
+    "ask_provider": "Choose a provider:",
+    "fetching_models": "Fetching available models …",
+    "pick_model": "Pick a model (enter its number):",
+    "manual_model": "Type the model name:",
+    "saved": "Saved to config.",
+    "skipped": "Skipped — you can configure it later with /model."
+  },
+
+  "doctor": {
+    "title": "Environment check",
+    "fix_title": "Auto repair",
+    "nothing_to_fix": "Directories and config are all in place",
+    "created_dir": "created dir",
+    "created_file": "created file",
+    "need_input": "Still need from you:",
+    "legend": "Legend: [SKIP] means it is optional (a fallback exists); [MISS] needs attention."
+  },
+
+  "err": {
+    "read_input": "Failed to read input: {err}",
+    "unknown": "unknown error"
+  },
+
+  "hint": {
+    "fetch_deps": "Run scripts/fetch-deps.py to fetch runtime components",
+    "env_key": "Credentials live in environment variables, never in config files"
+  }
+}

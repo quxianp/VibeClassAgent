@@ -169,7 +169,22 @@ fn main() -> Result<()> {
     }
 
     let cli = Cli::parse();
-    let layout = build_layout(&cli);
+    let (layout, path_source) = build_layout(&cli);
+
+    // 载入本地凭据文件（secrets.env）。放在这里、且在任何命令之前：
+    // 后面所有模块读的都是环境变量，少一处加载就会有一个功能悄悄降级。
+    // 只补缺失的键，真环境变量优先级更高。
+    let _ = vca_core::secrets::load_into_env(&vca_core::secrets::default_path(&layout.config_root));
+
+    // 只在「不是便携模式」时提醒一次位置，避免每次启动都刷屏；
+    // 用户需要知道自己的录像到底躺哪儿。
+    if matches!(path_source, vca_core::paths::PathSource::UserFallback) {
+        eprintln!(
+            "注意：程序所在目录不可写，数据已放到 {}\n\
+             如需换位置，用 --data-dir 指定，或运行 vca setup 重新选择。",
+            layout.data_root.display()
+        );
+    }
 
     match cli.command {
         // 不带子命令时进入交互界面：像 Claude Code 那样敲 `vca` 就直接开始用。
@@ -289,16 +304,47 @@ fn init_tracing() {
     let _ = fmt().with_env_filter(filter).with_target(false).try_init();
 }
 
-/// 依据命令行覆盖项构造目录布局。
-fn build_layout(cli: &Cli) -> Layout {
-    let mut layout = Layout::default_windows();
-    if let Some(d) = &cli.data_dir {
-        layout.data_root = std::path::PathBuf::from(d);
+/// 依据命令行与环境变量覆盖目录布局，并说明最终位置的来源。
+///
+/// 默认**不落 C 盘用户目录**：优先用程序所在目录（便携模式），
+/// 其次才用用户之前选过的位置。完整优先级见 `vca_core::paths` 模块文档。
+fn build_layout(cli: &Cli) -> (Layout, vca_core::paths::PathSource) {
+    use vca_core::paths::PathSource;
+
+    let env = |k: &str| {
+        std::env::var(k)
+            .ok()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    };
+
+    // 命令行最高：便于脚本化部署与多实例
+    if cli.data_dir.is_some() || cli.config_dir.is_some() {
+        let mut l = Layout::resolve().0;
+        if let Some(d) = &cli.data_dir {
+            l.data_root = std::path::PathBuf::from(d);
+        }
+        if let Some(c) = &cli.config_dir {
+            l.config_root = std::path::PathBuf::from(c);
+        }
+        return (l, PathSource::Cli);
     }
-    if let Some(c) = &cli.config_dir {
-        layout.config_root = std::path::PathBuf::from(c);
+
+    // 环境变量次之
+    let (ed, ec) = (env("VCA_DATA_DIR"), env("VCA_CONFIG_DIR"));
+    if ed.is_some() || ec.is_some() {
+        let mut l = Layout::resolve().0;
+        if let Some(d) = ed {
+            l.data_root = std::path::PathBuf::from(d);
+        }
+        if let Some(c) = ec {
+            l.config_root = std::path::PathBuf::from(c);
+        }
+        return (l, PathSource::Env);
     }
-    layout
+
+    // 其余交给 resolve：引导文件 → 便携 → 兜底
+    Layout::resolve()
 }
 
 /// 打印产品名（供 banner 使用）。

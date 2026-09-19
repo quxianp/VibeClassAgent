@@ -1,18 +1,25 @@
 //! 交互式命令行界面。
 //!
-//! # 观感参照 Claude Code
+//! # 观感
 //!
-//! - 启动时一个方框，把「我在哪、我用什么配置」一次讲清；
+//! 参照 Claude Code：
+//!
+//! - 顶端用 **ASCII 字符画**打出程序缩写 `VCA`（内容取自语言文件的
+//!   `welcome.logo`，想换造型改语言文件即可，不必动代码）；
+//! - 主色是陶土橙（Claude 品牌色），配暗色终端；次要信息压成灰色；
 //! - `> ` 提示符 + 行编辑（历史、左右移动、Ctrl+C 中断）；
-//! - 斜杠命令（`/status` `/process` …），输入 `/` 有补全提示；
 //! - 每个动作以 `⏺` 起头，结果用 `⎿` 缩进挂在下面，末尾给耗时；
-//! - 全部输出走 ANSI 颜色，深色终端下可读。
+//! - 留白偏宽松，一屏只讲一件事。
+//!
+//! # 文案
+//!
+//! 界面上的**每一句固定文字都走 [`vca_core::i18n`]**，没有硬编码。
+//! 改词、加语种只动 `locales/*.json`，不用重新编译。
 //!
 //! # 为什么不用全屏 TUI
 //!
-//! 全屏 TUI（ratatui 那类）会把历史输出盖掉，而课堂场景里
-//! 「刚才那节课处理到哪一步了」是要能往上翻的。Claude Code 那种
-//! 「滚动式对话 + 行内结果」更适合这种「跑一件事、看结果、再跑下一件」的用法。
+//! 全屏 TUI 会把历史输出盖掉，而课堂场景里「刚才那节课处理到哪一步了」
+//! 是要能往上翻的。滚动式输出更适合这种「跑一件事、看结果、再跑下一件」的用法。
 
 use std::io::Write;
 
@@ -20,29 +27,34 @@ use anyhow::Result;
 use rustyline::error::ReadlineError;
 
 use vca_core::config::load_settings;
+use vca_core::i18n::{t, tf};
 use vca_core::paths::Layout;
 use vca_core::store::JobStore;
 
-/// ANSI 颜色。Windows 10 以后的终端都支持。
+/// 配色与字形。取 Claude Code 的调子：陶土橙主色 + 灰阶次要信息。
 mod c {
     /// 重置。
     pub const RESET: &str = "\x1b[0m";
-    /// 暗色。
-    pub const DIM: &str = "\x1b[2m";
     /// 加粗。
     pub const BOLD: &str = "\x1b[1m";
-    /// 品牌蓝。
-    pub const BLUE: &str = "\x1b[38;5;39m";
-    /// 成功绿。
-    pub const GREEN: &str = "\x1b[38;5;41m";
-    /// 警告黄。
-    pub const YELLOW: &str = "\x1b[38;5;214m";
-    /// 错误红。
-    pub const RED: &str = "\x1b[38;5;203m";
-    /// 次要灰。
-    pub const GRAY: &str = "\x1b[38;5;245m";
-    /// 强调青。
-    pub const CYAN: &str = "\x1b[38;5;44m";
+    /// 压暗。
+    pub const DIM: &str = "\x1b[2m";
+    /// 主色：陶土橙（Claude 品牌色的 256 色近似）。
+    pub const ACCENT: &str = "\x1b[38;5;216m";
+    /// 主色压暗版，用于边框与次要标题。
+    pub const ACCENT_DIM: &str = "\x1b[38;5;173m";
+    /// 正文。
+    pub const TEXT: &str = "\x1b[38;5;253m";
+    /// 次要信息。
+    pub const MUTED: &str = "\x1b[38;5;245m";
+    /// 成功。
+    pub const GREEN: &str = "\x1b[38;5;114m";
+    /// 警告。
+    pub const YELLOW: &str = "\x1b[38;5;221m";
+    /// 错误。
+    pub const RED: &str = "\x1b[38;5;210m";
+    /// 强调（命令名）。
+    pub const CYAN: &str = "\x1b[38;5;116m";
 }
 
 /// 动作标记。
@@ -61,19 +73,21 @@ pub enum Flow {
 
 /// 启动交互界面。
 pub fn run(layout: &Layout, profile: &str) -> Result<()> {
+    vca_core::i18n::install(None);
     print_welcome(layout, profile);
 
     let mut rl = match rustyline::DefaultEditor::new() {
         Ok(r) => r,
         Err(e) => {
-            // 没有可用的终端（比如被重定向）时不要直接崩，
-            // 给一条能看懂的提示并且不要卡住。
-            println!("{}无法启动交互输入（{e}）。改用子命令方式：vca --help{}", c::YELLOW, c::RESET);
+            println!(
+                "{}",
+                tf("cmd.no_terminal", &[("err", &e.to_string())])
+            );
             return Ok(());
         }
     };
 
-    let prompt = format!("{}>{} ", c::BLUE, c::RESET);
+    let prompt = format!("{}>{} ", c::ACCENT, c::RESET);
     loop {
         match rl.readline(&prompt) {
             Ok(line) => {
@@ -86,128 +100,125 @@ pub fn run(layout: &Layout, profile: &str) -> Result<()> {
                     Ok(Flow::Quit) => break,
                     Ok(Flow::Continue) => {}
                     Err(e) => {
-                        println!("{}{} 出错了：{e}{}", c::RED, DOT, c::RESET);
+                        println!(
+                            "{}{} {}{}",
+                            c::RED,
+                            tf("cmd.error_prefix", &[("msg", &e.to_string())]),
+                            DOT,
+                            c::RESET
+                        );
                     }
                 }
             }
             Err(ReadlineError::Interrupted) => {
-                println!("{}(Ctrl+C) 输入 /quit 退出，/help 看命令{}", c::GRAY, c::RESET);
+                println!("{}{} {}{}", c::MUTED, DOT, t("cmd.ctrl_c"), c::RESET);
             }
             Err(ReadlineError::Eof) => break,
             Err(e) => {
-                println!("{}输入读取失败：{e}{}", c::RED, c::RESET);
+                println!(
+                    "{}",
+                    tf("err.read_input", &[("err", &e.to_string())])
+                );
                 break;
             }
         }
     }
 
-    println!("{}{} 已退出。{}", c::GRAY, DOT, c::RESET);
+    println!("{}{} {}{}", c::MUTED, DOT, t("cmd.bye"), c::RESET);
     Ok(())
 }
 
-/// 启动横幅。
+/// 启动横幅：ASCII 字符画 + 一屏交代清楚「在哪、用什么配置」。
 fn print_welcome(layout: &Layout, profile: &str) {
-    let ver = env!("CARGO_PKG_VERSION");
+    let logo = t("welcome.logo");
     println!();
+    for line in logo.lines() {
+        println!("  {}{}{}", c::ACCENT, line, c::RESET);
+    }
     println!(
-        "{}╭──────────────────────────────────────────────────────╮{}",
-        c::BLUE,
+        "  {}{}{}  {}{}{}",
+        c::TEXT,
+        t("app.name"),
+        c::RESET,
+        c::MUTED,
+        format!("v{}", vca_core::VERSION),
         c::RESET
     );
-    println!(
-        "{}│{}  {}VibeClassAgent{}  {}v{ver}{}                              {}│{}",
-        c::BLUE,
-        c::RESET,
-        c::BOLD,
-        c::RESET,
-        c::GRAY,
-        c::RESET,
-        c::BLUE,
-        c::RESET
-    );
-    println!(
-        "{}│{}  {}静默课堂录制与课后总结{}                            {}│{}",
-        c::BLUE,
-        c::RESET,
-        c::DIM,
-        c::RESET,
-        c::BLUE,
-        c::RESET
-    );
-    println!(
-        "{}╰──────────────────────────────────────────────────────╯{}",
-        c::BLUE,
-        c::RESET
-    );
+    println!("  {}{}{}", c::MUTED, t("app.tagline"), c::RESET);
     println!();
 
     let settings_path = layout.profile_config_dir(profile).join("settings.yaml");
     let settings = load_settings(&settings_path).ok();
 
-    println!(
-        "  {}配置{}  {}",
-        c::GRAY,
-        c::RESET,
-        layout.profile_config_dir(profile).display()
+    let row = |k: &str, v: String| {
+        println!("  {}{:<6}{}  {}", c::MUTED, k, c::RESET, v);
+    };
+
+    row(
+        &t("welcome.label.config"),
+        format!("{}", layout.profile_config_dir(profile).display()),
     );
-    println!(
-        "  {}数据{}  {}",
-        c::GRAY,
-        c::RESET,
-        layout.profile_data_dir(profile).display()
+    row(
+        &t("welcome.label.data"),
+        format!("{}", layout.profile_data_dir(profile).display()),
     );
-    println!("  {}身份{}  {profile}", c::GRAY, c::RESET);
+    row(&t("welcome.label.profile"), profile.to_string());
+    row(&t("welcome.label.lang"), vca_core::i18n::lang());
 
     if let Some(s) = &settings {
-        let llm = if s.llm.model.trim().is_empty() {
-            format!("{}未配置{}", c::YELLOW, c::RESET)
+        let mode = if s.llm.mode.trim().is_empty() {
+            "paid-api"
         } else {
-            let mode = if s.llm.mode.trim().is_empty() {
-                "paid-api"
-            } else {
-                s.llm.mode.as_str()
-            };
-            format!("{} / {}（{mode}）", s.llm.model, s.llm.provider)
+            s.llm.mode.as_str()
         };
-        println!("  {}模型{}  {llm}", c::GRAY, c::RESET);
 
-        let stt = if vca_platform::stt::local_available(
-            &vca_platform::stt::LocalSttConfig {
-                model: s.transcriber.model.clone(),
-                ..Default::default()
-            },
-        ) {
+        // 模型：没配就明确说「未配置」，而不是显示空白让人猜
+        let model = if s.llm.model.trim().is_empty() {
+            format!("{}{}{}", c::YELLOW, t("welcome.not_configured"), c::RESET)
+        } else {
+            let prov = if s.llm.provider.trim().is_empty() {
+                "自定义"
+            } else {
+                s.llm.provider.as_str()
+            };
+            format!("{}（{prov} · {mode}）", s.llm.model)
+        };
+        row(&t("welcome.label.model"), model);
+
+        // 本地转写是否就绪：这是「转写要不要花钱」的关键信息
+        let stt_ok = vca_platform::stt::local_available(&vca_platform::stt::LocalSttConfig {
+            model: s.transcriber.model.clone(),
+            ..Default::default()
+        });
+        let stt = if stt_ok {
             format!(
-                "本地 whisper.cpp({}) {}就绪{}",
-                s.transcriber.model,
+                "{}{}{}",
                 c::GREEN,
+                tf("welcome.stt_ready", &[("model", &s.transcriber.model)]),
                 c::RESET
             )
         } else {
-            format!(
-                "{}本地模型缺失（跑 scripts/fetch-deps.py）{}",
-                c::YELLOW,
-                c::RESET
-            )
+            format!("{}{}{}", c::YELLOW, t("welcome.stt_missing"), c::RESET)
         };
-        println!("  {}转写{}  {stt}", c::GRAY, c::RESET);
+        row(&t("welcome.label.stt"), stt);
 
         let push = if s.push.provider.trim().is_empty() {
-            format!("{}未配置{}", c::YELLOW, c::RESET)
+            format!("{}{}{}", c::YELLOW, t("welcome.not_configured"), c::RESET)
         } else {
             s.push.provider.clone()
         };
-        println!("  {}推送{}  {push}", c::GRAY, c::RESET);
+        row(&t("welcome.label.push"), push);
     } else {
         println!(
-            "  {}还没生成配置文件，先跑 /doctor 让它自动补上。{}",
+            "  {}{}{}",
             c::YELLOW,
+            t("welcome.need_setup"),
             c::RESET
         );
     }
 
     println!();
-    println!("  {}输入 /help 查看命令，/quit 退出。{}", c::DIM, c::RESET);
+    println!("  {}{}{}", c::DIM, t("welcome.hint"), c::RESET);
     println!();
 }
 
@@ -215,13 +226,7 @@ fn print_welcome(layout: &Layout, profile: &str) {
 pub fn dispatch(layout: &Layout, profile: &str, line: &str) -> Result<Flow> {
     let line = line.trim();
     if !line.starts_with('/') {
-        // 非斜杠输入：不做自然语言假装，直接指路
-        println!(
-            "{}{} 这里只认命令。输入 /help 看全部，或 /status 看当前状态。{}",
-            c::GRAY,
-            DOT,
-            c::RESET
-        );
+        println!("{}{} {}{}", c::MUTED, DOT, t("cmd.only_commands"), c::RESET);
         return Ok(Flow::Continue);
     }
 
@@ -234,6 +239,8 @@ pub fn dispatch(layout: &Layout, profile: &str, line: &str) -> Result<Flow> {
         "/status" => status(layout, profile)?,
         "/jobs" => jobs(layout, profile)?,
         "/process" => process(layout, profile, &args)?,
+        "/paths" => paths_cmd(layout, &args)?,
+        "/model" => model_cmd(layout, profile, &args)?,
         "/doctor" => {
             crate::cmd::doctor(layout, args.first() == Some(&"fix"), Some(profile))?;
         }
@@ -244,15 +251,15 @@ pub fn dispatch(layout: &Layout, profile: &str, line: &str) -> Result<Flow> {
         "/audio" => crate::cmd::debug(layout, "audio")?,
         "/record-test" => crate::cmd::debug(layout, "record-test")?,
         "/transcribe-test" => crate::cmd::debug(layout, "transcribe")?,
+        "/e2e" => crate::cmd::debug(layout, "e2e")?,
         "/clear" => clear_screen(),
         "/quit" | "/exit" | "/q" => return Ok(Flow::Quit),
         other => {
             println!(
-                "{}{} 未知命令 {}{}{}，输入 /help 看全部。",
+                "{}{} {}{}",
                 c::YELLOW,
                 DOT,
-                c::BOLD,
-                other,
+                tf("cmd.unknown", &[("cmd", &format!("{}{}{}", c::BOLD, other, c::RESET))]),
                 c::RESET
             );
         }
@@ -262,32 +269,31 @@ pub fn dispatch(layout: &Layout, profile: &str, line: &str) -> Result<Flow> {
 
 /// 帮助。
 fn help() {
-    println!("{}{} 命令{}", c::BLUE, DOT, c::RESET);
+    println!("{}{} {}{}", c::ACCENT, DOT, t("cmd.help_title"), c::RESET);
     let rows: &[(&str, &str)] = &[
-        ("/status", "总览：课程、作业、配置、组件就绪情况"),
-        ("/jobs", "列出所有作业及其状态"),
-        ("/process", "处理待办作业（转写 → 提取 → 文档 → 推送）"),
-        ("/process dry", "演练：不真正推送"),
-        ("/doctor [fix]", "环境自检；加 fix 自动建目录补配置"),
-        ("/config [path]", "查看配置目录 / 生成配置模板"),
-        ("/record [status]", "录制状态；record start / stop 手动控制"),
-        ("/audio", "探测 WASAPI 音频端点（系统声 / 麦克风）"),
-        ("/record-test", "录 10 秒冒烟测试（含截图与合并）"),
-        ("/transcribe-test", "对上次录制跑一次转写冒烟测试"),
-        ("/clean [run]", "预览到期清理；加 run 真正删除"),
-        ("/logs [tail]", "查看日志"),
-        ("/clear", "清屏"),
-        ("/quit", "退出（同 Ctrl+D）"),
+        ("/status", "cmd.status"),
+        ("/jobs", "cmd.jobs"),
+        ("/process", "cmd.process"),
+        ("/process dry", "cmd.process_dry"),
+        ("/model", "cmd.model"),
+        ("/paths", "cmd.paths"),
+        ("/doctor [fix]", "cmd.doctor"),
+        ("/config [path]", "cmd.config"),
+        ("/record [status]", "cmd.record"),
+        ("/audio", "cmd.audio"),
+        ("/record-test", "cmd.record_test"),
+        ("/transcribe-test", "cmd.transcribe_test"),
+        ("/e2e", "cmd.e2e"),
+        ("/clean [run]", "cmd.clean"),
+        ("/logs [tail]", "cmd.logs"),
+        ("/clear", "cmd.clear"),
+        ("/quit", "cmd.quit"),
     ];
-    for (k, v) in rows {
-        println!("  {}{:<20}{} {}", c::CYAN, k, c::RESET, v);
+    for (k, key) in rows {
+        println!("  {}{:<20}{} {}", c::CYAN, k, c::RESET, t(key));
     }
     println!();
-    println!(
-        "  {}提示：直接输 `vca <子命令>` 也能用同样的功能，适合写进计划任务。{}",
-        c::DIM,
-        c::RESET
-    );
+    println!("  {}{}{}", c::DIM, t("cmd.help_footer"), c::RESET);
 }
 
 /// 打开配置与作业仓库。
@@ -303,7 +309,7 @@ fn status(layout: &Layout, profile: &str) -> Result<()> {
     let (s, store) = open(layout, profile);
     let all = store.list();
 
-    println!("{}{} 状态{}", c::BLUE, DOT, c::RESET);
+    println!("{}{} {}{}", c::ACCENT, DOT, t("status.title"), c::RESET);
 
     let mut by_state: std::collections::BTreeMap<String, usize> = std::collections::BTreeMap::new();
     for j in &all {
@@ -311,98 +317,106 @@ fn status(layout: &Layout, profile: &str) -> Result<()> {
     }
 
     println!(
-        "  {}{} 作业共 {} 个{}",
-        c::GRAY,
+        "  {}{} {}{}",
+        c::MUTED,
         ELBOW,
-        all.len(),
+        tf("status.jobs_total", &[("n", &all.len().to_string())]),
         c::RESET
     );
     if all.is_empty() {
-        println!("     （还没有作业。录制会在上课时段自动开始）");
+        println!("     {}", t("status.jobs_empty"));
     } else {
         for (k, v) in &by_state {
-            println!("     {k}：{v}");
+            println!("     {k}: {v}");
         }
     }
 
     let pending = store.pending();
     if !pending.is_empty() {
         println!(
-            "  {}{} 待处理 {} 个 —— 用 /process 开始{}",
+            "  {}{} {}{}",
             c::YELLOW,
             ELBOW,
-            pending.len(),
+            tf("status.pending", &[("n", &pending.len().to_string())]),
             c::RESET
         );
     }
 
-    // 组件就绪情况
+    // ---- 组件就绪情况 ----
     let ffmpeg = vca_platform::capture::ffmpeg_available();
-    println!(
-        "  {}{} ffmpeg：{}{}{}",
-        c::GRAY,
-        ELBOW,
-        if ffmpeg { c::GREEN } else { c::YELLOW },
-        if ffmpeg { "就绪" } else { "缺失（跑 scripts/fetch-deps.py）" },
-        c::RESET
+    comp(
+        &t("status.ffmpeg"),
+        ffmpeg,
+        t("status.ffmpeg_ready"),
+        t("status.ffmpeg_missing"),
     );
 
     let stt_ok = vca_platform::stt::local_available(&vca_platform::stt::LocalSttConfig {
         model: s.transcriber.model.clone(),
         ..Default::default()
     });
-    println!(
-        "  {}{} 本地转写：{}{}{}",
-        c::GRAY,
-        ELBOW,
-        if stt_ok { c::GREEN } else { c::YELLOW },
-        if stt_ok {
-            format!("就绪（{}）", s.transcriber.model)
-        } else {
-            "模型缺失，将走云端（若已配置）".to_string()
-        },
-        c::RESET
+    comp(
+        &t("status.stt"),
+        stt_ok,
+        tf("status.stt_ready", &[("model", &s.transcriber.model)]),
+        t("status.stt_missing"),
     );
 
     let llm_ok = !s.llm.model.trim().is_empty();
-    println!(
-        "  {}{} 要点提取：{}{}{}",
-        c::GRAY,
-        ELBOW,
-        if llm_ok { c::GREEN } else { c::YELLOW },
-        if llm_ok {
-            format!("{}（{}）", s.llm.model, s.llm.mode)
-        } else {
-            "未配置，将降级为原文摘要".to_string()
-        },
-        c::RESET
+    comp(
+        &t("status.llm"),
+        llm_ok,
+        tf(
+            "status.llm_ready",
+            &[
+                ("model", &s.llm.model),
+                (
+                    "mode",
+                    &if s.llm.mode.trim().is_empty() {
+                        "paid-api".to_string()
+                    } else {
+                        s.llm.mode.clone()
+                    },
+                ),
+            ],
+        ),
+        t("status.llm_missing"),
     );
 
     let push_ok = !s.push.provider.trim().is_empty();
-    println!(
-        "  {}{} 推送渠道：{}{}{}",
-        c::GRAY,
-        ELBOW,
-        if push_ok { c::GREEN } else { c::YELLOW },
-        if push_ok {
-            s.push.provider.clone()
-        } else {
-            "未配置（dry-run）".to_string()
-        },
-        c::RESET
+    comp(
+        &t("status.push"),
+        push_ok,
+        s.push.provider.clone(),
+        t("status.push_missing"),
     );
 
     Ok(())
+}
+
+/// 打印一行组件状态（`标签：状态`，状态带颜色）。
+fn comp(label: &str, ok: bool, ok_text: String, bad_text: String) {
+    let (color, text) = if ok {
+        (c::GREEN, ok_text)
+    } else {
+        (c::YELLOW, bad_text)
+    };
+    // label 形如 "ffmpeg：{state}"，把 {state} 换成带色文本
+    let line = label.replace("{state}", &format!("{color}{text}{}", c::RESET));
+    println!("  {}{} {}{}", c::MUTED, ELBOW, line, c::RESET);
 }
 
 /// 列作业。
 fn jobs(layout: &Layout, profile: &str) -> Result<()> {
     let (_, store) = open(layout, profile);
     let all = store.list();
-    println!("{}{} 作业列表（{} 个）{}", c::BLUE, DOT, all.len(), c::RESET);
-    if all.is_empty() {
-        return Ok(());
-    }
+    println!(
+        "{}{} {}{}",
+        c::ACCENT,
+        DOT,
+        tf("jobs.title", &[("n", &all.len().to_string())]),
+        c::RESET
+    );
     for j in &all {
         let state = format!("{:?}", j.state);
         let color = match j.state {
@@ -412,10 +426,20 @@ fn jobs(layout: &Layout, profile: &str) -> Result<()> {
         };
         println!(
             "  {}{:<10}{} {} {}  {}{}{}",
-            color, state, c::RESET, j.date, j.course, c::GRAY, j.id, c::RESET
+            color,
+            state,
+            c::RESET,
+            j.date,
+            j.course,
+            c::MUTED,
+            j.id,
+            c::RESET
         );
         if let Some(e) = &j.last_error {
-            println!("     {}上次错误：{e}{}", c::RED, c::RESET);
+            println!(
+                "     {}",
+                tf("jobs.last_error", &[("msg", &format!("{}{e}{}", c::RED, c::RESET))])
+            );
         }
     }
     Ok(())
@@ -428,16 +452,26 @@ fn process(layout: &Layout, profile: &str, args: &[&str]) -> Result<()> {
     let targets = store.pending();
 
     if targets.is_empty() {
-        println!("{}{} 没有待处理的作业。{}", c::GRAY, DOT, c::RESET);
+        println!("{}{} {}{}", c::MUTED, DOT, t("process.none"), c::RESET);
         return Ok(());
     }
 
+    let dry_note = if dry {
+        t("process.dry_note")
+    } else {
+        String::new()
+    };
     println!(
-        "{}{} 开始处理 {} 个作业{}{}",
-        c::BLUE,
+        "{}{} {}{}",
+        c::ACCENT,
         DOT,
-        targets.len(),
-        if dry { "（演练，不推送）" } else { "" },
+        tf(
+            "process.title",
+            &[
+                ("n", &targets.len().to_string()),
+                ("mode", dry_note.as_str()),
+            ]
+        ),
         c::RESET
     );
 
@@ -446,48 +480,265 @@ fn process(layout: &Layout, profile: &str, args: &[&str]) -> Result<()> {
         profile,
         &settings,
         &store,
-        path_or_empty(layout),
+        std::path::PathBuf::new(),
     );
     pipeline.dry_run = dry;
 
     let started = std::time::Instant::now();
     for mut job in targets {
-        let label = format!("{} {}", job.date, job.course);
-        println!("  {}{} {label}{}", c::CYAN, DOT, c::RESET);
+        println!("  {}{} {} {}{}", c::CYAN, DOT, job.date, job.course, c::RESET);
         let outcome = pipeline.process(&mut job);
         for s in &outcome.steps {
-            println!("     {}{} {s}{}", c::GRAY, ELBOW, c::RESET);
+            println!("     {}{} {s}{}", c::MUTED, ELBOW, c::RESET);
         }
         for w in &outcome.warnings {
             println!("     {}{} {w}{}", c::YELLOW, ELBOW, c::RESET);
         }
         if let Some(e) = &outcome.error {
-            println!("     {}{} 失败：{e}{}", c::RED, ELBOW, c::RESET);
+            println!(
+                "     {}{} {}{}",
+                c::RED,
+                ELBOW,
+                tf("process.failed", &[("msg", e)]),
+                c::RESET
+            );
         } else {
             println!(
-                "     {}{} 完成，状态 {}{:?}{}",
+                "     {}{} {}{}",
                 c::GREEN,
                 ELBOW,
-                c::BOLD,
-                outcome.state,
+                tf("process.done_state", &[("state", &format!("{:?}", outcome.state))]),
                 c::RESET
             );
         }
     }
 
     println!(
-        "{}{} 全部结束，用时 {:.1}s{}",
-        c::BLUE,
+        "{}{} {}{}",
+        c::ACCENT,
         DOT,
-        started.elapsed().as_secs_f64(),
+        tf(
+            "process.finished",
+            &[("secs", &format!("{:.1}", started.elapsed().as_secs_f64()))]
+        ),
         c::RESET
     );
     Ok(())
 }
 
-/// `python/` 目录（现在只作为可选插件的载体，缺失不影响主流程）。
-fn path_or_empty(_layout: &Layout) -> std::path::PathBuf {
-    std::path::PathBuf::new()
+/// 查看与修改数据/配置目录。
+///
+/// 默认位置是**程序所在目录**（便携模式），不碰 C 盘用户目录。
+/// 用户想换地方时，选择会写进 exe 同级的 `vca.paths.json` ——
+/// 不能记在待选择的目录里，那是个鸡生蛋问题。
+fn paths_cmd(layout: &Layout, args: &[&str]) -> Result<()> {
+    use std::path::Path;
+
+    if args.is_empty() || args[0] == "show" {
+        let (_, source) = Layout::resolve();
+        println!(
+            "{}{} {}{}",
+            c::ACCENT,
+            DOT,
+            tf("paths.title", &[("source", source.describe())]),
+            c::RESET
+        );
+        println!("  {:<8}  {}", t("paths.data"), layout.data_root.display());
+        println!("  {:<8}  {}", t("paths.config"), layout.config_root.display());
+        println!(
+            "  {:<8}  {}",
+            t("paths.bootstrap"),
+            vca_core::paths::bootstrap_path().display()
+        );
+        println!();
+        println!("  {}{}{}", c::MUTED, t("paths.how_to_change"), c::RESET);
+        println!("  {}{}{}", c::MUTED, t("paths.example"), c::RESET);
+        println!("  {}{}{}", c::MUTED, t("paths.restart_note"), c::RESET);
+        return Ok(());
+    }
+
+    if args[0] == "set" {
+        let Some(data) = args.get(1) else {
+            println!("{}{} {}{}", c::YELLOW, DOT, t("paths.usage"), c::RESET);
+            return Ok(());
+        };
+        let cfg = args
+            .get(2)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("{data}\\config"));
+
+        // 先真写一下试试，别让用户选一个根本写不进去的地方
+        if !vca_core::paths::is_writable(Path::new(data)) {
+            println!(
+                "{}{} {}{}",
+                c::RED,
+                DOT,
+                tf("paths.unwritable", &[("dir", data)]),
+                c::RESET
+            );
+            println!("    {}", t("paths.unwritable_hint"));
+            return Ok(());
+        }
+
+        let choice = vca_core::paths::PathChoice {
+            data_root: data.to_string(),
+            config_root: cfg.clone(),
+        };
+        match vca_core::paths::save_bootstrap(&choice) {
+            Ok(p) => {
+                println!("{}{} {}{}", c::GREEN, DOT, t("paths.saved"), c::RESET);
+                println!("    {:<6}  {data}", t("paths.data"));
+                println!("    {:<6}  {cfg}", t("paths.config"));
+                println!("    {}", tf("paths.note", &[("file", &p.display().to_string())]));
+                println!();
+                println!("  {}{}{}", c::YELLOW, t("paths.move_note"), c::RESET);
+                println!("  {}{}{}", c::MUTED, t("paths.restart_note"), c::RESET);
+            }
+            Err(e) => println!(
+                "{}{} {}{}",
+                c::RED,
+                DOT,
+                tf("paths.write_failed", &[("err", &e.to_string())]),
+                c::RESET
+            ),
+        }
+        return Ok(());
+    }
+
+    println!("{}{} {}{}", c::YELLOW, DOT, t("paths.usage"), c::RESET);
+    Ok(())
+}
+
+/// 查看或选择要点提取用的模型。
+///
+/// 模型名不必手打：`/model list` 会直接问 API 的 `/v1/models` 要列表，
+/// 用户按序号挑即可。这是「自动拉取」的落点。
+fn model_cmd(layout: &Layout, profile: &str, args: &[&str]) -> Result<()> {
+    let (mut settings, _) = open(layout, profile);
+
+    if args.first() == Some(&"set") {
+        let Some(name) = args.get(1) else {
+            println!("{}{} {}{}", c::YELLOW, DOT, t("model.usage"), c::RESET);
+            return Ok(());
+        };
+        settings.llm.model = name.to_string();
+        return save_model(layout, profile, &settings, name);
+    }
+
+    println!("{}{} {}{}", c::ACCENT, DOT, t("model.title"), c::RESET);
+    let provider = if settings.llm.provider.trim().is_empty() {
+        "custom".to_string()
+    } else {
+        settings.llm.provider.clone()
+    };
+    let mode = if settings.llm.mode.trim().is_empty() {
+        "paid-api".to_string()
+    } else {
+        settings.llm.mode.clone()
+    };
+    println!(
+        "  {}",
+        tf(
+            "model.current",
+            &[
+                ("model", &settings.llm.model),
+                ("provider", &provider),
+                ("mode", &mode)
+            ]
+        )
+    );
+
+    // 拉取列表
+    let cfg = crate::cmd::llm_config_from(&settings);
+    if !cfg.is_configured() {
+        println!();
+        println!("  {}{}{}", c::YELLOW, t("model.need_key"), c::RESET);
+        return Ok(());
+    }
+    println!();
+    println!(
+        "  {}{}{}",
+        c::MUTED,
+        tf("model.fetching", &[("url", &cfg.models_endpoint())]),
+        c::RESET
+    );
+
+    match vca_platform::llm::list_models(&cfg) {
+        Ok(models) if models.is_empty() => {
+            println!("  {}", t("model.fetch_failed").replace("{err}", "(空列表)"));
+        }
+        Ok(models) => {
+            println!(
+                "  {}{}{}",
+                c::TEXT,
+                tf("model.fetched", &[("n", &models.len().to_string())]),
+                c::RESET
+            );
+            for (i, m) in models.iter().enumerate() {
+                let mark = if *m == settings.llm.model { "●" } else { " " };
+                println!("   {}{mark}{} {:>3}. {m}", c::ACCENT, c::RESET, i + 1);
+            }
+            println!();
+            println!("  {}{}{}", c::MUTED, t("model.pick"), c::RESET);
+
+            // 交互式选择
+            let mut rl = match rustyline::DefaultEditor::new() {
+                Ok(r) => r,
+                Err(_) => return Ok(()),
+            };
+            let prompt = format!("{}  >{} ", c::ACCENT, c::RESET);
+            if let Ok(line) = rl.readline(&prompt) {
+                let line = line.trim();
+                if line.is_empty() {
+                    return Ok(());
+                }
+                let picked = match line.parse::<usize>() {
+                    Ok(n) if n >= 1 && n <= models.len() => models[n - 1].clone(),
+                    _ => line.to_string(),
+                };
+                settings.llm.model = picked.clone();
+                return save_model(layout, profile, &settings, &picked);
+            }
+        }
+        Err(e) => {
+            println!(
+                "  {}",
+                tf("model.fetch_failed", &[("err", &e.to_string())])
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 把选中的模型写回配置文件。
+fn save_model(
+    layout: &Layout,
+    profile: &str,
+    settings: &vca_core::config::Settings,
+    name: &str,
+) -> Result<()> {
+    let dir = layout.profile_config_dir(profile);
+    let path = dir.join("settings.yaml");
+    match vca_core::config::save_settings(&path, settings) {
+        Ok(()) => {
+            println!(
+                "{}{} {}{}",
+                c::GREEN,
+                DOT,
+                tf("model.set_ok", &[("model", name)]),
+                c::RESET
+            );
+            println!("    {}", path.display());
+        }
+        Err(e) => println!(
+            "{}{} {}{}",
+            c::RED,
+            DOT,
+            tf("model.set_failed", &[("err", &e)]),
+            c::RESET
+        ),
+    }
+    Ok(())
 }
 
 /// 清屏（ANSI）。
@@ -508,7 +759,6 @@ mod tests {
     #[test]
     fn slash_commands_are_dispatched() {
         let l = layout();
-        // 查询类命令不该报错
         assert_eq!(dispatch(&l, "default", "/help").unwrap(), Flow::Continue);
         assert_eq!(dispatch(&l, "default", "/status").unwrap(), Flow::Continue);
         assert_eq!(dispatch(&l, "default", "/jobs").unwrap(), Flow::Continue);
@@ -534,25 +784,52 @@ mod tests {
     #[test]
     fn plain_text_is_not_treated_as_a_command() {
         let l = layout();
-        // 不做自然语言假装：普通输入只是提示，不能退出也不能崩
-        assert_eq!(dispatch(&l, "default", "帮我处理一下").unwrap(), Flow::Continue);
+        assert_eq!(
+            dispatch(&l, "default", "帮我处理一下").unwrap(),
+            Flow::Continue
+        );
     }
 
     #[test]
     fn process_with_no_jobs_is_ok() {
         let l = layout();
         let _ = std::fs::create_dir_all(l.profile_data_dir("default"));
-        assert_eq!(
-            dispatch(&l, "default", "/process").unwrap(),
-            Flow::Continue
-        );
+        assert_eq!(dispatch(&l, "default", "/process").unwrap(), Flow::Continue);
     }
 
     #[test]
-    fn arguments_are_parsed() {
-        let l = layout();
-        // /clean 默认演练（dry-run），传 run 才真删 —— 这里只验证不报错
-        assert_eq!(dispatch(&l, "default", "/clean").unwrap(), Flow::Continue);
-        assert_eq!(dispatch(&l, "default", "/clean run").unwrap(), Flow::Continue);
+    fn all_ui_text_comes_from_locale_files() {
+        // 界面文案一律走语言文件：这些 key 必须都能取到，
+        // 取不到会返回 key 本身（界面上就会出现 "welcome.hint" 这种字面量）。
+        vca_core::i18n::install(None);
+        for key in [
+            "app.name",
+            "welcome.logo",
+            "welcome.hint",
+            "cmd.help_title",
+            "cmd.status",
+            "status.title",
+            "paths.title",
+            "model.title",
+            "process.title",
+        ] {
+            let v = t(key);
+            assert_ne!(v, key, "语言文件缺少 {key}");
+            assert!(!v.trim().is_empty(), "{key} 不该是空的");
+        }
+    }
+
+    #[test]
+    fn logo_is_multiline_ascii_art() {
+        vca_core::i18n::install(None);
+        let logo = t("welcome.logo");
+        assert!(logo.lines().count() >= 4, "logo 应该是多行字符画");
+        // 纯 ASCII/制表符号，不能混入中文，否则对齐会乱
+        for line in logo.lines() {
+            assert!(
+                line.chars().all(|ch| !ch.is_ascii() || ch.is_ascii_graphic() || ch == ' '),
+                "logo 里不该有非 ASCII 的可打印字符以外的东西: {line}"
+            );
+        }
     }
 }

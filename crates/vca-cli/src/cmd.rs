@@ -41,6 +41,31 @@ pub fn print_banner(layout: &Layout, profile: Option<&str>) -> Result<()> {
 ///
 /// `fix = true` 时先做一轮**自动修复**：创建目录、从内置模板生成配置、
 /// 再指出只有用户能提供的项（API Key、课表、推送地址）。
+/// 从配置构造模型客户端配置。
+///
+/// **凭据只从环境变量读**（`VCA_LLM_API_KEY`），配置文件里永远只有地址与模型名。
+pub fn llm_config_from(s: &vca_core::config::Settings) -> vca_platform::llm::LlmConfig {
+    let b = &s.llm.browser;
+    vca_platform::llm::LlmConfig {
+        mode: vca_platform::llm::LlmMode::parse(&s.llm.mode),
+        provider: s.llm.provider.clone(),
+        base_url: s.llm.base_url.clone(),
+        api_key: std::env::var("VCA_LLM_API_KEY").unwrap_or_default(),
+        model: s.llm.model.clone(),
+        timeout_ms: 90_000,
+        max_chars: 6000,
+        browser: vca_platform::browser_bot::BrowserBotConfig {
+            site: b.site.clone(),
+            headless: b.headless,
+            risk_ack: b.risk_ack,
+            user_data_dir: b.user_data_dir.clone().into(),
+            timeout_sec: b.timeout_sec,
+            selectors_override: b.selectors.clone(),
+            ..Default::default()
+        },
+    }
+}
+
 pub fn doctor(layout: &Layout, fix: bool, profile: Option<&str>) -> Result<()> {
     let profile = profile.unwrap_or("default");
 
@@ -78,8 +103,8 @@ pub fn doctor(layout: &Layout, fix: bool, profile: Option<&str>) -> Result<()> {
         println!("{}", it.render());
     }
     println!("{}", "-".repeat(62));
-    println!("说明：[SKIP] 表示「不需要」录制用内置 PyAV，PDF 用内置 fpdf2。");
-    println!("      屏幕与麦克风的真实可用性由 `vca setup` 启动时实测。");
+    println!("说明：[SKIP] 表示该项缺失也不影响主流程（有替代路径），[MISS] 才要处理。");
+    println!("      ffmpeg 缺少就没法录像；本地转写缺失可以改走云端。");
 
     // 配置层面的检查
     let rep = vca_core::setup::repair(layout, profile);
@@ -143,12 +168,9 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
         );
     }
 
-    // 录制能力探测（用内置 Python）
-    let python_dir = std::env::var("VCA_PYTHON_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("python"));
+    // 录制能力探测：直接用 Windows 的音频 API 问，不再绕道 Python
     println!("      正在检测录屏与麦克风（首次可能要几秒）");
-    let probe = probe_recording(&python_dir);
+    let probe = probe_recording();
     for line in probe.lines() {
         println!("      {line}");
     }
@@ -254,30 +276,114 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
 
     // ---------- 第 4 步：模型 API ----------
     println!("[4/5] 模型 API（把转写文字提炼成课堂要点）");
-    println!("      语音转写是本地完成的、不需要 Key；这里填的是「要点提取」用的接口。");
-    print!("      base_url（如 https://api.deepseek.com/v1，回车跳过）：");
+    println!("      语音转写是本地完成的、不需要 Key；这里配的是「要点提取」用的接口。");
+    println!();
+
+    // 4.1 选服务商：用内置预设，省得用户去翻各家文档
+    let presets: Vec<&vca_platform::llm::ProviderPreset> = vca_platform::llm::PROVIDERS
+        .iter()
+        .filter(|p| !p.base_url.is_empty())
+        .collect();
+    println!("      选择服务商：");
+    for (i, p) in presets.iter().enumerate() {
+        println!("        {:>2}) {:<20} {}", i + 1, p.name, p.note);
+    }
+    println!("         0) 跳过（之后可用 /model 配置）");
+    print!("      请选择 [0-{}，回车=0]：", presets.len());
     let _ = std::io::stdout().flush();
-    let base = read_line().trim().to_string();
-    if !base.is_empty() {
+    let idx: usize = read_line().trim().parse().unwrap_or(0);
+
+    if idx >= 1 && idx <= presets.len() {
+        let p = presets[idx - 1];
+        let _ = vca_core::setup::patch_settings_line(
+            &settings_path,
+            "llm.provider",
+            &format!("\"{}\"", p.id),
+        );
         let _ = vca_core::setup::patch_settings_line(
             &settings_path,
             "llm.base_url",
-            &format!("\"{base}\""),
+            &format!("\"{}\"", p.base_url),
         );
-        print!("      模型名（如 deepseek-chat）：");
+
+        // 4.2 API Key：写进本地凭据文件，不动系统环境变量
+        println!();
+        print!("      API Key（回车跳过）：");
         let _ = std::io::stdout().flush();
-        let model = read_line().trim().to_string();
+        let key = read_line().trim().to_string();
+        if !key.is_empty() {
+            let sp = vca_core::secrets::default_path(&layout.config_root);
+            match vca_core::secrets::upsert(&sp, "VCA_LLM_API_KEY", &key) {
+                Ok(()) => {
+                    // 立刻注入，这样下面就能直接拿它拉模型列表
+                    std::env::set_var("VCA_LLM_API_KEY", &key);
+                    println!("       已写入 {}", sp.display());
+                    println!("       这个文件含密钥，已被 .gitignore 排除，别拷给别人。");
+                }
+                Err(e) => {
+                    println!("       写入失败：{e}");
+                    println!("       可手动设置环境变量 VCA_LLM_API_KEY。");
+                }
+            }
+        }
+
+        // 4.3 自动拉模型列表让用户挑 —— 模型名最容易填错，
+        //     而填错的代价是「课后处理时才发现调用失败」，那时课已经录完了。
+        println!();
+        let mut chosen: Option<String> = None;
+        if vca_core::secrets::is_set("VCA_LLM_API_KEY") {
+            let cfg = vca_platform::llm::LlmConfig {
+                provider: p.id.to_string(),
+                base_url: p.base_url.to_string(),
+                api_key: std::env::var("VCA_LLM_API_KEY").unwrap_or_default(),
+                ..Default::default()
+            };
+            print!("      正在拉取模型列表…");
+            let _ = std::io::stdout().flush();
+            match vca_platform::llm::list_models(&cfg) {
+                Ok(models) if !models.is_empty() => {
+                    println!(" 找到 {} 个", models.len());
+                    let show = models.len().min(20);
+                    for (i, m) in models.iter().take(show).enumerate() {
+                        println!("        {:>2}) {m}", i + 1);
+                    }
+                    if models.len() > show {
+                        println!("         …（共 {} 个，也可以直接输入模型名）", models.len());
+                    }
+                    print!("      选择模型 [1-{show}，回车跳过]：");
+                    let _ = std::io::stdout().flush();
+                    let s = read_line().trim().to_string();
+                    match s.parse::<usize>() {
+                        Ok(n) if n >= 1 && n <= show => chosen = Some(models[n - 1].clone()),
+                        _ if !s.is_empty() => chosen = Some(s),
+                        _ => {}
+                    }
+                }
+                Ok(_) => println!(" 服务端没有返回模型列表"),
+                Err(e) => println!(" 失败：{e}"),
+            }
+        }
+
+        // 拉不到列表就退回手填
+        let model = match chosen {
+            Some(m) => m,
+            None => {
+                let hint = p.paid_models.first().copied().unwrap_or("模型名");
+                print!("      模型名（如 {hint}）：");
+                let _ = std::io::stdout().flush();
+                read_line().trim().to_string()
+            }
+        };
         if !model.is_empty() {
             let _ = vca_core::setup::patch_settings_line(
                 &settings_path,
                 "llm.model",
                 &format!("\"{model}\""),
             );
+            println!("      已写入配置：{} / {model}", p.name);
         }
-        println!("       已写入配置");
-        println!();
-        println!("      还需要设置 API Key（密钥只放环境变量，不写进配置文件）：");
-        println!("        setx VCA_LLM_API_KEY \"你的Key\"");
+    } else {
+        println!("      已跳过，之后可用 /model 配置。");
     }
     println!();
 
@@ -342,54 +448,49 @@ fn read_line() -> String {
     s.trim_end_matches(['\r', '\n']).to_string()
 }
 
-/// 探测录制能力（调用内置 Python Worker 的 probe）。
-fn probe_recording(python_dir: &std::path::Path) -> String {
-    let python = {
-        let bundled = python_dir.join("runtime").join("python.exe");
-        if bundled.is_file() {
-            bundled.to_string_lossy().to_string()
-        } else {
-            std::env::var("VCA_PYTHON").unwrap_or_else(|_| "python".to_string())
+/// 探测录制能力。
+///
+/// 这里**直接问 Windows**：音频端点用 WASAPI 枚举，录屏引擎查 ffmpeg，
+/// 本地转写查 whisper.cpp 是否就位。
+///
+/// 旧版本是拉起一个 Python 脚本来问的，那个设计不仅要求机器上有可用的 Python，
+/// 还会在路径不对时吐出一句 `MISS 无法启动 Python（os error 267）`——
+/// 用户完全无从下手。现在同一件事只有 Rust 一处实现，也就没得错。
+fn probe_recording() -> String {
+    let mut lines: Vec<String> = Vec::new();
+
+    // 音频：WASAPI 默认端点。这是「能不能录到系统播放的声音」的判据。
+    match vca_platform::audio::probe_endpoints() {
+        Ok(list) if list.is_empty() => {
+            lines.push("MISS 没有可用的音频端点（会录成无声视频）".into())
         }
-    };
-    let script = r#"import sys,os
-sys.path.insert(0, os.getcwd())
-try:
-    from vca_worker.recorder import probe_capabilities
-    c = probe_capabilities()
-    if not c.get("pyav"):
-        print("MISS 缺少 PyAV（录制模块不可用）"); raise SystemExit
-    if not c.get("screen"):
-        print("MISS 屏幕采集不可用:", c.get("error")); raise SystemExit
-    w,h = c.get("screen_size") or (0,0)
-    a = c.get("audio_selected")
-    print(f"OK 屏幕采集 {w}x{h}" + (" / 麦克风：" + a if a else " / 未找到麦克风（仅录屏）"))
-except Exception as e:
-    print("MISS 探测失败:", type(e).__name__, str(e)[:60])
-"#;
-    match std::process::Command::new(&python)
-        .arg("-c")
-        .arg(script)
-        .current_dir(python_dir)
-        // 关键：Python 的 stdout 接管道时默认用**区域编码（简中是 GBK）**，
-        // 不强制 UTF-8 的话读回来就是乱码。
-        .env("PYTHONIOENCODING", "utf-8")
-        .env("PYTHONUTF8", "1")
-        .output()
-    {
-        Ok(o) => {
-            let t = String::from_utf8_lossy(&o.stdout).trim().to_string();
-            if t.is_empty() {
-                format!(
-                    "MISS 探测无输出（{}）",
-                    String::from_utf8_lossy(&o.stderr).trim()
-                )
-            } else {
-                t
+        Ok(list) => {
+            for ep in list {
+                let role = if ep.role == "render" {
+                    "系统声音（回环）"
+                } else {
+                    "麦克风"
+                };
+                lines.push(format!("OK   {role}：{}", ep.format));
             }
         }
-        Err(e) => format!("MISS 无法启动 Python（{e}）"),
+        Err(e) => lines.push(format!("MISS 音频探测失败：{e}")),
     }
+
+    // 屏幕：ffmpeg 在不在。真正能不能抓到画面，要录一次才算数。
+    match vca_platform::capture::ffmpeg_path() {
+        Some(p) => lines.push(format!("OK   录屏引擎：{}", p.display())),
+        None => lines.push("MISS 找不到 ffmpeg，无法录屏（跑 scripts/fetch-deps.py）".into()),
+    }
+
+    // 本地转写：缺了还能走云端，所以是 SKIP 而不是 MISS
+    if vca_platform::stt::local_available(&Default::default()) {
+        lines.push("OK   本地转写：whisper.cpp 就绪".into());
+    } else {
+        lines.push("SKIP 本地转写未就绪（可改用云端，或跑 scripts/fetch-deps.py）".into());
+    }
+
+    lines.join("\n")
 }
 
 /// 课表是否还是空的。

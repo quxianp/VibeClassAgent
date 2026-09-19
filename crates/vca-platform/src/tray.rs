@@ -290,8 +290,89 @@ impl Tray {
     }
 }
 
-/// 用 GDI 现场画一个 1616 的圆角方块图标（深蓝底 + 白色中心点）。
+/// 图标资源文件的候选位置。
+///
+/// 顺序：`VCA_ICON` 环境变量 → 程序目录下的 `assets/` → 仓库根（开发形态）。
+fn icon_path() -> Option<std::path::PathBuf> {
+    if let Ok(p) = std::env::var("VCA_ICON") {
+        let pb = std::path::PathBuf::from(p);
+        if pb.is_file() {
+            return Some(pb);
+        }
+    }
+    let mut dirs: Vec<std::path::PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(d) = exe.parent() {
+            dirs.push(d.join("assets"));
+            // exe 在 target/debug 或 target/release 时，仓库根在往上两级
+            if let Some(gp) = d.parent().and_then(|x| x.parent()) {
+                dirs.push(gp.join("assets"));
+            }
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        dirs.push(cwd.join("assets"));
+    }
+    dirs.into_iter()
+        .map(|d| d.join("icon.ico"))
+        .find(|p| p.is_file())
+}
+
+/// 从 `assets/icon.ico` 加载图标。
+///
+/// 把图标做成**可替换的资源**而不是写死在代码里：拿到正式 LOGO 后
+/// 直接覆盖那个文件就行，一行代码都不用改。
+fn load_icon_from_file() -> Option<Hicon> {
+    const IMAGE_ICON: u32 = 1;
+    const LR_LOADFROMFILE: u32 = 0x0000_0010;
+    const LR_DEFAULTSIZE: u32 = 0x0000_0040;
+
+    let path = icon_path()?;
+    let wide: Vec<u16> = path
+        .to_string_lossy()
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+
+    extern "system" {
+        fn LoadImageW(
+            hinst: Hinstance,
+            name: Lpcwstr,
+            type_: u32,
+            cx: i32,
+            cy: i32,
+            fuload: u32,
+        ) -> Hicon;
+    }
+
+    // SAFETY: 传的是本函数内构造、生命周期覆盖整个调用的宽字符串；
+    // 返回的句柄由调用方负责 DestroyIcon。
+    let h = unsafe {
+        LoadImageW(
+            0,
+            wide.as_ptr(),
+            IMAGE_ICON,
+            0,
+            0,
+            LR_LOADFROMFILE | LR_DEFAULTSIZE,
+        )
+    };
+    (h != 0).then_some(h)
+}
+
+/// 取托盘图标：优先用资源文件，没有才现场画一个。
 fn make_icon() -> Hicon {
+    if let Some(icon) = load_icon_from_file() {
+        return icon;
+    }
+    make_icon_builtin()
+}
+
+/// 用 GDI 现场画一个 16×16 的圆角方块图标（陶土橙底 + 白色中心点）。
+///
+/// 这是 `assets/icon.ico` 缺失时的兜底 —— 托盘没有图标会显示成一块空白，
+/// 那比一个不好看的图标更让人困惑。
+fn make_icon_builtin() -> Hicon {
     const SZ: i32 = 16;
     // SAFETY: 所有句柄在本函数内创建并在返回前释放；像素缓冲按尺寸精确分配。
     unsafe {

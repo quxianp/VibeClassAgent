@@ -22,11 +22,13 @@
 pub mod cleanup;
 pub mod config;
 pub mod error;
+pub mod i18n;
 pub mod import;
 pub mod job;
 pub mod model;
 pub mod paths;
 pub mod schedule;
+pub mod secrets;
 pub mod setup;
 pub mod store;
 pub mod time;
@@ -35,9 +37,11 @@ pub mod windows;
 /// 项目版本号（取自 Cargo.toml）。
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// 产品名占位。策划书未最终确定正式名称，故此处使用占位常量，
-/// 后续改名只需修改此常量与 Cargo.toml 中的 description。
-pub const PRODUCT_NAME: &str = "<项目名>";
+/// 产品名。改名只需动这里与 Cargo.toml 的 description。
+pub const PRODUCT_NAME: &str = "VibeClassAgent";
 
-/// 数据目录默认名（用于 `%ProgramData%\\<数据目录名>\\`）。
+/// 程序缩写（CLI 上以 ASCII 字符画呈现）。
+pub const PRODUCT_SHORT: &str = "VCA";
+
+/// 数据目录默认名。
 pub const DEFAULT_DATA_DIR_NAME: &str = "VibeClassAgent";

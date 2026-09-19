@@ -21,8 +21,13 @@
 *.pem
 *.key
 *credentials*
-*secrets*
 *_rsa
+# 注意：`*secrets*` 是为了挡住 secrets.env / secrets.json 这类凭据文件，
+# 但它会把源码里的 secrets.rs（凭据读写模块）一起误伤，导致该文件静默不入库。
+# 所以必须补例外 —— 而且例外要写在规则**下面**才生效。
+*secrets*
+!secrets.rs
+!**/secrets.rs
 secrets.env
 **/secrets.env
 

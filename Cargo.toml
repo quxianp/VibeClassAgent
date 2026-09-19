@@ -68,5 +68,8 @@ windows = { version = "0.62", features = [
 [profile.release]
 opt-level = "z"
 lto = "thin"
-codegen-units = 1
+# 刻意不用 codegen-units = 1：单 codegen 单元会让 LTO 把所有 rlib 一次性载进内存，
+# 在 8 GB 的机器上直接触发 "The paging file is too small"（os error 1455）——
+# 结果就是发布包根本编不出来。4 的并行度换来「能构建」，体积只差一两百 KB。
+codegen-units = 4
 strip = true

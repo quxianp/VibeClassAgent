@@ -389,6 +389,19 @@ fn read_to_string(path: &std::path::Path) -> Result<String, LoadError> {
     })
 }
 
+/// 保存主配置为 YAML。
+///
+/// 返回 `Result<(), String>` 而不是自定义错误类型：调用方都是 CLI，
+/// 只需要把原因原样展示给用户，没必要再包一层。
+pub fn save_settings(path: &std::path::Path, s: &Settings) -> Result<(), String> {
+    if let Some(p) = path.parent() {
+        std::fs::create_dir_all(p).map_err(|e| format!("创建配置目录失败: {e}"))?;
+    }
+    let text = serde_yaml::to_string(s).map_err(|e| format!("序列化配置失败: {e}"))?;
+    std::fs::write(path, text).map_err(|e| format!("写入配置失败: {e}"))?;
+    Ok(())
+}
+
 /// 从 YAML 文件加载主配置。
 pub fn load_settings(path: &std::path::Path) -> Result<Settings, LoadError> {
     let text = read_to_string(path)?;

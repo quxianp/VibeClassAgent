@@ -1,0 +1,158 @@
+{
+  "app": {
+    "name": "VibeClassAgent",
+    "short": "VCA",
+    "tagline": "静默课堂录制与课后总结",
+    "version_label": "版本"
+  },
+
+  "welcome": {
+    "logo": [
+      " ██╗   ██╗ ██████╗ █████╗ ",
+      " ██║   ██║██╔════╝██╔══██╗",
+      " ██║   ██║██║     ███████║",
+      " ╚██╗ ██╔╝██║     ██╔══██║",
+      "  ╚████╔╝ ╚██████╗██║  ██║",
+      "   ╚═══╝   ╚═════╝╚═╝  ╚═╝"
+    ],
+    "label": {
+      "config": "配置",
+      "data": "数据",
+      "profile": "身份",
+      "model": "模型",
+      "stt": "转写",
+      "push": "推送",
+      "lang": "语言"
+    },
+    "not_configured": "未配置",
+    "need_setup": "还没生成配置文件，先跑 /doctor fix 自动补上。",
+    "hint": "输入 /help 查看命令，/quit 退出。",
+    "stt_ready": "本地 whisper.cpp({model}) 就绪",
+    "stt_missing": "本地模型缺失（跑 scripts/fetch-deps.py）",
+    "paths_source": "目录来源：{source}"
+  },
+
+  "cmd": {
+    "help_title": "命令",
+    "help_footer": "提示：直接输 `vca <子命令>` 也能用同样的功能，适合写进计划任务。",
+    "status": "总览：作业、组件就绪情况、配置",
+    "jobs": "列出所有作业及其状态",
+    "process": "处理待办作业（转写 → 提取 → 文档 → 推送）",
+    "process_dry": "演练：不真正推送",
+    "doctor": "环境自检；加 fix 自动建目录补配置",
+    "config": "查看配置目录 / 生成配置模板",
+    "paths": "查看或修改数据与配置目录（默认就在程序目录里，不落 C 盘）",
+    "model": "查看或选择提取用的模型（可从 API 自动拉取列表）",
+    "record": "录制状态；record start / stop 手动控制",
+    "audio": "探测 WASAPI 音频端点（系统声 / 麦克风）",
+    "record_test": "录 10 秒冒烟测试（含截图与合并）",
+    "transcribe_test": "对上次录制跑一次转写冒烟测试",
+    "e2e": "端到端：录 15 秒跑完整课后流程（含文档与推送演练）",
+    "clean": "预览到期清理；加 run 真正删除",
+    "logs": "查看日志",
+    "clear": "清屏",
+    "quit": "退出（同 Ctrl+D）",
+    "unknown": "未知命令 {cmd}，输入 /help 看全部。",
+    "only_commands": "这里只认命令。输入 /help 看全部，或 /status 看当前状态。",
+    "ctrl_c": "(Ctrl+C) 输入 /quit 退出，/help 看命令",
+    "bye": "已退出。",
+    "error_prefix": "出错了：{msg}",
+    "no_terminal": "无法启动交互输入（{err}）。改用子命令方式：vca --help"
+  },
+
+  "status": {
+    "title": "状态",
+    "jobs_total": "作业共 {n} 个",
+    "jobs_empty": "（还没有作业。录制会在上课时段自动开始）",
+    "pending": "待处理 {n} 个 —— 用 /process 开始",
+    "ffmpeg": "ffmpeg：{state}",
+    "ffmpeg_ready": "就绪",
+    "ffmpeg_missing": "缺失（跑 scripts/fetch-deps.py）",
+    "stt": "本地转写：{state}",
+    "stt_ready": "就绪（{model}）",
+    "stt_missing": "模型缺失，将走云端（若已配置）",
+    "llm": "要点提取：{state}",
+    "llm_ready": "{model}（{mode}）",
+    "llm_missing": "未配置，将降级为原文摘要",
+    "push": "推送渠道：{state}",
+    "push_missing": "未配置（dry-run）"
+  },
+
+  "jobs": {
+    "title": "作业列表（{n} 个）",
+    "last_error": "上次错误：{msg}"
+  },
+
+  "process": {
+    "title": "开始处理 {n} 个作业{mode}",
+    "dry_note": "（演练，不推送）",
+    "none": "没有待处理的作业。",
+    "step_prefix": "",
+    "done_state": "完成，状态 {state}",
+    "failed": "失败：{msg}",
+    "finished": "全部结束，用时 {secs}s"
+  },
+
+  "paths": {
+    "title": "目录位置（来源：{source}）",
+    "data": "数据",
+    "config": "配置",
+    "bootstrap": "引导文件",
+    "how_to_change": "改位置：/paths set <数据目录> [配置目录]",
+    "example": "例如：  /paths set D:\\课堂数据",
+    "restart_note": "改完要重启程序才生效。",
+    "saved": "已记住你的选择",
+    "note": "记录在 {file}",
+    "move_note": "注意：已有数据不会自动搬过去，需要手动拷贝。",
+    "unwritable": "这个目录写不进去：{dir}",
+    "unwritable_hint": "换一个位置，或先用资源管理器建好目录再试。",
+    "write_failed": "写入引导文件失败：{err}",
+    "usage": "用法：/paths [show | set <数据目录> [配置目录]]"
+  },
+
+  "model": {
+    "title": "要点提取模型",
+    "current": "当前：{model}（{provider}，{mode}）",
+    "fetching": "正在从 {url} 拉取可用模型…",
+    "fetched": "拉取到 {n} 个模型：",
+    "pick": "输入序号选择，或直接输入模型名；回车取消：",
+    "set_ok": "已切换到 {model}",
+    "set_failed": "写入配置失败：{err}",
+    "fetch_failed": "拉取失败：{err}",
+    "need_key": "需要先配置 API Key（环境变量 VCA_LLM_API_KEY）与 base_url。",
+    "usage": "用法：/model [list | set <模型名>]"
+  },
+
+  "setup": {
+    "title": "首次引导",
+    "step_model": "模型 API",
+    "ask_base_url": "模型服务地址（OpenAI 兼容，留空跳过）：",
+    "ask_api_key": "API Key（留空跳过；也可以之后设环境变量 VCA_LLM_API_KEY）：",
+    "ask_provider": "选择服务商：",
+    "fetching_models": "正在拉取模型列表…",
+    "pick_model": "选择模型（输入序号）：",
+    "manual_model": "直接输入模型名：",
+    "saved": "已写入配置。",
+    "skipped": "已跳过，之后可用 /model 配置。"
+  },
+
+  "doctor": {
+    "title": "环境自检",
+    "fix_title": "自动修复",
+    "nothing_to_fix": "目录与配置都已就绪，无需修复",
+    "created_dir": "新建目录",
+    "created_file": "生成文件",
+    "need_input": "还需要你提供这些信息：",
+    "legend": "说明：[SKIP] 表示该项缺失也不影响主流程（有替代路径），[MISS] 才要处理。"
+  },
+
+  "err": {
+    "read_input": "输入读取失败：{err}",
+    "unknown": "未知错误"
+  },
+
+  "hint": {
+    "fetch_deps": "运行 scripts/fetch-deps.py 获取运行时组件",
+    "env_key": "凭据只走环境变量，不写进配置文件"
+  }
+}

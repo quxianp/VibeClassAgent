@@ -1,15 +1,17 @@
 //! 环境自检。
 //!
-//! 检查项分三类：
+//! 检查的是这个程序**真正依赖**的东西：
 //!
-//! | 类别 | 处理 |
-//! |---|---|
-//! | **已内置替代**（ffmpeg / LibreOffice） | 不再报错录制用 PyAV、PDF 用 fpdf2，都打包在 `python/vendor` 里 |
-//! | 影响功能的外部依赖（Python） | 报告是否可用；缺失时说明用内置运行时 |
-//! | 运行环境（会话类型） | 服务模式抓不到屏幕，给出明确告警 |
+//! | 项 | 必需？ | 缺失后果 |
+//! |---|---|---|
+//! | ffmpeg | **是** | 录不了像（屏幕采集与音视频合并都靠它） |
+//! | whisper.cpp | 否 | 本地转写不可用，可改走云端 |
+//! | 语音模型 | 否 | 同上 |
+//! | 浏览器（Edge） | 否 | PDF 退化为保留 HTML；浏览器模式不可用 |
+//! | 运行会话 | **是** | 服务模式（Session 0）抓不到屏幕 |
 //!
-//! 更深入的录制能力探测（屏幕 / 麦克风）由 Python 侧的 `--selftest` 完成，
-//! 因为那需要真正打开设备。
+//! 这里**不再检查 Python 与 LibreOffice** —— 那是上一版架构的遗留。
+//! 现在整个程序是纯 Rust 的，把它们列出来只会让用户以为缺了东西。
 
 use std::process::Command;
 
@@ -70,46 +72,131 @@ pub fn check_executable(name: &str, version_arg: &str) -> CheckItem {
     }
 }
 
+/// 取某个可执行体版本首行。
+fn version_of(exe: &std::path::Path, arg: &str) -> String {
+    let mut cmd = crate::proc::silent(exe);
+    cmd.arg(arg);
+    match cmd.output() {
+        Ok(o) => {
+            // 有的程序把版本打到 stderr（whisper.cpp 就是这样），两边都看
+            let out = String::from_utf8_lossy(&o.stdout);
+            let err = String::from_utf8_lossy(&o.stderr);
+            let line = out
+                .lines()
+                .chain(err.lines())
+                .map(|l| l.trim())
+                .find(|l| !l.is_empty())
+                .unwrap_or("");
+            line.chars().take(70).collect()
+        }
+        Err(_) => String::new(),
+    }
+}
+
+/// 按「找到的路径」构造一项检查结果。
+fn check_tool(
+    name: &str,
+    path: Option<std::path::PathBuf>,
+    version_arg: &str,
+    optional: bool,
+    ok_note: &str,
+    miss_note: &str,
+) -> CheckItem {
+    match path {
+        Some(p) => {
+            let v = version_of(&p, version_arg);
+            CheckItem {
+                name: name.to_string(),
+                ok: true,
+                detail: if v.is_empty() {
+                    format!("就绪 {ok_note}")
+                } else {
+                    format!("{v} {ok_note}")
+                },
+                optional,
+            }
+        }
+        None => CheckItem {
+            name: name.to_string(),
+            ok: false,
+            detail: miss_note.to_string(),
+            optional,
+        },
+    }
+}
+
 /// 运行全部环境自检。
 ///
-/// 注意：**不再把 ffmpeg / LibreOffice 列为必需或缺失**
-/// 它们的功能已经内置（PyAV / fpdf2），报「缺失」只会误导用户。
+/// 检查的是**这个程序真正依赖的东西**：
+/// ffmpeg（录屏与合并）、whisper.cpp（本地转写）、语音模型、浏览器（PDF 与浏览器模式）。
+///
+/// 刻意**不再检查 Python / LibreOffice** —— 那是上一版架构的遗留，
+/// 现在整个程序是纯 Rust 的，报它们只会让用户以为缺东西。
 pub fn run_all() -> Vec<CheckItem> {
-    vec![
-        // Python：录制、转写、文档生成都走它，但**发行版自带嵌入式运行时**，
-        // 所以系统里有没有都不影响功能因此始终标记为「可选（仅信息）」。
-        {
-            let mut it = check_executable("python", "--version");
-            it.optional = true;
-            if it.ok {
-                it.detail = format!("{}（可选：程序自带 python\\runtime）", it.detail);
-            } else {
-                it.detail = "系统未安装（不影响：程序自带 python\\runtime）".to_string();
+    let mut items = Vec::new();
+
+    // 1) ffmpeg：屏幕采集与音视频合并，缺了录不了像（必需）
+    items.push(check_tool(
+        "ffmpeg",
+        crate::capture::ffmpeg_path(),
+        "-version",
+        false,
+        "（录屏与合并）",
+        "未找到。运行 scripts/fetch-deps.py 获取，或用 VCA_FFMPEG 指定路径",
+    ));
+
+    // 2) whisper.cpp 可执行体：本地转写。缺了还能走云端，所以是可选项
+    items.push(check_tool(
+        "whisper",
+        crate::stt::find_whisper(),
+        "--help",
+        true,
+        "（本地转写）",
+        "未找到。运行 scripts/fetch-deps.py 获取；或改用云端转写",
+    ));
+
+    // 3) 语音模型：和可执行体是一对，分开报是为了方便定位是哪一半缺了
+    items.push({
+        let model = std::env::var("VCA_WHISPER_MODEL")
+            .ok()
+            .map(std::path::PathBuf::from)
+            .filter(|p| p.is_file())
+            .or_else(|| crate::stt::find_model("tiny"));
+        match model {
+            Some(p) => {
+                let mb = std::fs::metadata(&p).map(|m| m.len() / 1048576).unwrap_or(0);
+                CheckItem {
+                    name: "语音模型".to_string(),
+                    ok: true,
+                    detail: format!(
+                        "{} 已就绪（{mb} MB）",
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default()
+                    ),
+                    optional: true,
+                }
             }
-            it
-        },
-        // 以下两项仅供了解，缺失不影响任何功能
-        {
-            let mut it = check_executable("ffmpeg", "-version");
-            it.optional = true;
-            it.detail = if it.ok {
-                format!("{}（可选：内置 PyAV 已够用）", it.detail)
-            } else {
-                "未安装（不需要：录制由内置 PyAV 完成）".to_string()
-            };
-            it
-        },
-        {
-            let mut it = check_executable("soffice", "--version");
-            it.optional = true;
-            it.detail = if it.ok {
-                format!("{}（可选：内置 fpdf2 已够用）", it.detail)
-            } else {
-                "未安装（不需要：PDF 由内置 fpdf2 生成）".to_string()
-            };
-            it
-        },
-    ]
+            None => CheckItem {
+                name: "语音模型".to_string(),
+                ok: false,
+                detail: "未找到 ggml-*.bin。运行 scripts/fetch-deps.py --models tiny".to_string(),
+                optional: true,
+            },
+        }
+    });
+
+    // 4) 浏览器：PDF 生成（HTML → 无头打印）与浏览器自动化模式都靠它
+    items.push(check_tool(
+        "浏览器",
+        crate::browser_bot::find_system_browser(),
+        "--version",
+        true,
+        "（生成 PDF / 浏览器模式）",
+        "未找到 Edge 或 Chrome。PDF 会退化为保留 HTML，其它功能不受影响",
+    ));
+
+    items
 }
 
 /// 会话类型检查（服务模式抓不到屏幕）。
@@ -163,11 +250,32 @@ mod tests {
     }
 
     #[test]
-    fn all_checks_are_optional_because_they_are_bundled() {
-        // ffmpeg / soffice / python 的功能都已经内置（PyAV / fpdf2 / 自带运行时），
-        // 所以自检里它们**一律是可选项**，不该因为缺失而判定环境不合格。
-        for it in &run_all() {
-            assert!(it.optional, "{} 应为可选（功能已内置）", it.name);
-        }
+    fn only_ffmpeg_is_required() {
+        // ffmpeg 缺了录不了像，必须报 MISS；
+        // 其余（whisper / 模型 / 浏览器）都有替代路径，只该报 SKIP，
+        // 否则用户会以为环境不合格。
+        let items = run_all();
+        let required: Vec<&str> = items
+            .iter()
+            .filter(|i| !i.optional)
+            .map(|i| i.name.as_str())
+            .collect();
+        assert_eq!(
+            required,
+            vec!["ffmpeg"],
+            "只有 ffmpeg 必需，实际 {required:?}"
+        );
+    }
+
+    #[test]
+    fn doctor_checks_the_new_architecture() {
+        // 自检列表不该再出现上一版架构的遗留项
+        let names: Vec<String> = run_all().into_iter().map(|i| i.name).collect();
+        assert!(names.iter().any(|n| n == "ffmpeg"));
+        assert!(names.iter().any(|n| n == "whisper"));
+        assert!(
+            !names.iter().any(|n| n == "python" || n == "soffice"),
+            "不该再检查 Python/LibreOffice：现在是纯 Rust 实现，实际 {names:?}"
+        );
     }
 }

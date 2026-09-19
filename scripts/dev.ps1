@@ -8,8 +8,12 @@
        否则 rustc 会误用其旧链接器导致 "unrecognized option '--high-entropy-va'"；
     3) 随后构建并运行 CLI。
 
-.PARAMETER Args
+.PARAMETER Command
     透传给 vca 的参数，例如 doctor。
+    注意：这里**刻意不叫 `$Args`** —— 那是 PowerShell 的自动变量，
+    拿它当参数名既容易冲突，又会在命令行只传 `-Args`（后面没值）时报
+    "Missing an argument for parameter 'Args'"。改用剩余参数绑定之后，
+    `dev.cmd doctor` 这种直接位置传入也能接住。
 
 .PARAMETER Release
     使用 release 配置构建并运行。
@@ -18,15 +22,15 @@
     只执行 cargo check，不运行程序。
 
 .EXAMPLE
-    .\scripts\dev.ps1
-    .\scripts\dev.ps1 -Args doctor
-    .\scripts\dev.ps1 -Args timetable,list
-    .\scripts\dev.ps1 -Release
-    .\scripts\dev.ps1 -Check
+    .\scripts\dev.cmd
+    .\scripts\dev.cmd doctor
+    .\scripts\dev.cmd run --dry-run
+    .\scripts\dev.cmd -Check
 #>
 [CmdletBinding()]
 param(
-    [string[]]$Args = @(),
+    [Parameter(ValueFromRemainingArguments = $true)]
+    [string[]]$Command = @(),
     [switch]$Release,
     [switch]$Check
 )
@@ -122,11 +126,11 @@ try {
     elseif ($Release) {
         Write-Host "[info] cargo build --release" -ForegroundColor Cyan
         & cargo build --release
-        & cargo run --release -p vca-cli -- @Args
+        & cargo run --release -p vca-cli -- @Command
     }
     else {
-        Write-Host "[info] cargo run -p vca-cli -- $($Args -join ' ')" -ForegroundColor Cyan
-        & cargo run -p vca-cli -- @Args
+        Write-Host "[info] cargo run -p vca-cli -- $($Command -join ' ')" -ForegroundColor Cyan
+        & cargo run -p vca-cli -- @Command
     }
 }
 finally {

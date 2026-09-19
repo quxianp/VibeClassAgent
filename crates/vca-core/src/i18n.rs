@@ -31,7 +31,7 @@
 //! 而不是空串 —— 一眼就能看出是漏翻了，而不是莫名其妙地空着一块。
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
 /// 内置的简体中文语言包（编译进二进制，永远可用）。

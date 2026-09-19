@@ -7,35 +7,7 @@ use anyhow::Result;
 
 use vca_core::model::OverlaySettings;
 use vca_core::paths::Layout;
-use vca_core::{PRODUCT_NAME, VERSION};
 use vca_platform::{doctor, overlay};
-
-/// 打印欢迎横幅与基本信息。
-pub fn print_banner(layout: &Layout, profile: Option<&str>) -> Result<()> {
-    println!("{PRODUCT_NAME}  v{VERSION}");
-    println!();
-    println!("配置目录 : {}", layout.config_root.display());
-    println!("数据目录 : {}", layout.data_root.display());
-    println!(
-        "当前身份 : {}",
-        profile.unwrap_or("(默认：Windows 登录账户)")
-    );
-    println!();
-    println!("可用命令：");
-    println!("  config     配置读写与管理");
-    println!("  timetable  时间表：自主配置或导入（策划书第 2 章）");
-    println!("  schedule   课程表：手工 / CSV / ClassIsland 导入");
-    println!("  record     录制控制 start|stop|status");
-    println!("  task       作业状态查询与重试");
-    println!("  plugin     插件管理（本地）");
-    println!("  market     本地插件市场");
-    println!("  log        日志查看");
-    println!("  doctor     环境自检（可直接运行）");
-    println!("  profile    多教师 profile 管理");
-    println!();
-    println!("提示：运行 `vca doctor` 查看本机依赖是否齐备。");
-    Ok(())
-}
 
 /// 环境自检。
 ///

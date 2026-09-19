@@ -41,8 +41,6 @@ mod c {
     pub const DIM: &str = "\x1b[2m";
     /// 主色：陶土橙（Claude 品牌色的 256 色近似）。
     pub const ACCENT: &str = "\x1b[38;5;216m";
-    /// 主色压暗版，用于边框与次要标题。
-    pub const ACCENT_DIM: &str = "\x1b[38;5;173m";
     /// 正文。
     pub const TEXT: &str = "\x1b[38;5;253m";
     /// 次要信息。

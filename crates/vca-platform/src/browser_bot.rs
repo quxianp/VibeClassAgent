@@ -262,6 +262,9 @@ pub fn find_system_browser() -> Option<PathBuf> {
 /// 一个最小的 CDP 客户端：只用到 `Runtime.evaluate`。
 struct CdpSession {
     child: Child,
+    /// 调试端口。当前代码不读它，但留着 —— 出问题时改一行日志就能知道
+    /// 该去 `http://127.0.0.1:<port>` 看现场，比重新复现一遍省事得多。
+    #[allow(dead_code)]
     port: u16,
     socket: tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>,
     next_id: u64,

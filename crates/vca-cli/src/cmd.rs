@@ -781,6 +781,35 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
             #[allow(unreachable_code)]
             Ok(())
         }
+        "audio" => {
+            // 音频端点自检：验证 WASAPI 能否枚举到「系统回环」端。
+            // 这是「能不能录到一体机自己播放的声音」的判据。
+            println!("WASAPI 音频端点");
+            println!("{}", "-".repeat(62));
+            match vca_platform::audio::probe_endpoints() {
+                Ok(list) if list.is_empty() => {
+                    println!("未发现默认音频端点（系统里可能没有可用的播放/录制设备）");
+                    Ok(())
+                }
+                Ok(list) => {
+                    for ep in list {
+                        let label = if ep.role == "render" {
+                            "播放端（系统声音回环，loopback）"
+                        } else {
+                            "录制端（麦克风）"
+                        };
+                        println!("{label}");
+                        println!("  格式 : {}", ep.format);
+                        println!("  端点 : {}", ep.id);
+                    }
+                    Ok(())
+                }
+                Err(e) => {
+                    println!("探测失败：{e}");
+                    Ok(())
+                }
+            }
+        }
         "record-test" => {
             // 录制冒烟测试：录 10 秒并报告产出，用来验证录屏录音链路
             use vca_platform::capture::{CaptureEngine, CaptureParams, CaptureSession};

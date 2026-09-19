@@ -141,7 +141,7 @@ enum Command {
     /// 内部诊断命令（`panic` 用于验证崩溃静默退出）。
     #[command(hide = true)]
     Debug {
-        /// 动作：`panic` / `crash-info` / `paths`。
+        /// 动作：`panic` / `crash-info` / `paths` / `audio` / `record-test`。
         action: String,
     },
     /// profile 管理（多教师共用）。

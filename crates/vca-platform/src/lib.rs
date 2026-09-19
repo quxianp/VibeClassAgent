@@ -25,6 +25,7 @@
 // 其余 crate 均保持 #![forbid(unsafe_code)]；核心层不含任何 unsafe。
 #![warn(missing_docs)]
 
+pub mod audio;
 pub mod capture;
 pub mod clock;
 pub mod crash;

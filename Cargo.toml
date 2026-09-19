@@ -16,14 +16,17 @@ members = [
     "crates/vca-plugin-host",
     "crates/vca-platform",
 ]
+# 工作区临时目录永远不属于 workspace：否则在 _tmp/ 里 cargo init 会被
+# 自动吸收成 member，并静默改写本文件（已踩过一次）。
+exclude = ["_tmp"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.85"
 license = "MIT"
-authors = ["<作者占位>"]
-description = "轻量级静默课堂录制与课后总结系统（框架骨架）"
+authors = ["QuXian"]
+description = "轻量级静默课堂录制与课后总结系统"
 
 [workspace.dependencies]
 # --- 内部 crate ---
@@ -45,6 +48,17 @@ thiserror = "1"
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter"] }
+
+# --- Windows 平台 API ---
+# WASAPI 音频采集需要 IMMDevice / IAudioClient；IMMDevice::Activate<T> 的
+# 安全包装只在 StructuredStorage + Variant 两个 feature 同时开启时生成。
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }
 # 说明：chrono 与 uuid 在骨架中尚未使用，暂不引入。
 # 二者（uuid 经 getrandom）在 windows-gnu 目标下会走 raw-dylib 链接，
 # 需要 dlltool 生成导入库；安装 MSVC C++ 工作负载后可安全恢复。

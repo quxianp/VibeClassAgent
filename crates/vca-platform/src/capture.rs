@@ -156,8 +156,8 @@ impl CaptureParams {
 
 /// 定位 `ffmpeg.exe`。
 ///
-/// 查找顺序：环境变量 `VCA_FFMPEG` → 程序同级的 `tools/ffmpeg/` → PATH。
-/// 自带优先，避免用户的机器上装了个怪版本 ffmpeg 导致行为不一致。
+/// 查找顺序：环境变量 `VCA_FFMPEG` → 工具目录（见 [`crate::proc::tool_dirs`]）
+/// → PATH。自带优先，避免用户的机器上装了个怪版本 ffmpeg 导致行为不一致。
 pub fn ffmpeg_path() -> Option<PathBuf> {
     if let Ok(p) = std::env::var("VCA_FFMPEG") {
         let pb = PathBuf::from(p);
@@ -165,33 +165,10 @@ pub fn ffmpeg_path() -> Option<PathBuf> {
             return Some(pb);
         }
     }
-
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
-            for rel in ["tools/ffmpeg/ffmpeg.exe", "ffmpeg.exe"] {
-                let cand = dir.join(rel);
-                if cand.is_file() {
-                    return Some(cand);
-                }
-            }
-        }
+    if let Some(p) = crate::proc::find_tool("ffmpeg/ffmpeg.exe") {
+        return Some(p);
     }
-
-    which("ffmpeg")
-}
-
-/// 在 PATH 中查找可执行体，返回完整路径。
-fn which(name: &str) -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    for dir in std::env::split_paths(&path) {
-        for ext in [".exe", ".cmd", ".bat", ""] {
-            let cand = dir.join(format!("{name}{ext}"));
-            if cand.is_file() {
-                return Some(cand);
-            }
-        }
-    }
-    None
+    crate::proc::which("ffmpeg")
 }
 
 /// `ffmpeg.exe` 是否可用。

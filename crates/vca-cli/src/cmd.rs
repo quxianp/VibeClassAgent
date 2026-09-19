@@ -810,6 +810,58 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
                 }
             }
         }
+        "transcribe" => {
+            // 转写冒烟测试：对指定媒体文件跑一次本地/云端转写并打印结果。
+            // 用法：vca debug transcribe <文件> [work_dir]
+            let media = layout
+                .data_root
+                .join("_record_test")
+                .join("test.mp4");
+            let media = if media.is_file() {
+                media
+            } else {
+                println!("没有可转写的文件。先跑 `vca debug record-test` 录一段。");
+                return Ok(());
+            };
+            let work = layout.data_root.join("_record_test").join("_work_stt");
+
+            println!("转写冒烟测试");
+            println!("{}", "-".repeat(62));
+            println!("输入 : {}", media.display());
+            println!(
+                "本地 : {}",
+                if vca_platform::stt::local_available(&Default::default()) {
+                    "可用"
+                } else {
+                    "不可用（缺 whisper-cli.exe 或模型，可运行 scripts/fetch-deps.py）"
+                }
+            );
+            println!();
+
+            let cfg = vca_platform::stt::SttConfig::new();
+            let t0 = std::time::Instant::now();
+            match vca_platform::stt::transcribe(&cfg, &media, &work) {
+                Ok(t) => {
+                    println!("引擎     : {}", t.engine);
+                    println!("耗时     : {:.1}s（含转码）", t.seconds);
+                    println!("分段     : {} 段", t.segments.len());
+                    println!("文本长度 : {} 字", t.text.chars().count());
+                    println!();
+                    println!("--- 转写内容（前 500 字）---");
+                    let preview: String = t.text.chars().take(500).collect();
+                    println!("{preview}");
+                    if t.text.chars().count() > 500 {
+                        println!("...（已截断）");
+                    }
+                }
+                Err(e) => {
+                    println!("转写失败：{e}");
+                }
+            }
+            println!();
+            println!("总耗时 : {:.1}s", t0.elapsed().as_secs_f64());
+            Ok(())
+        }
         "record-test" => {
             // 录制冒烟测试：录 10 秒并报告产出，用来验证「录屏 + 系统声音 + 麦克风」链路。
             use vca_platform::capture::{CaptureParams, CaptureSession};

@@ -1,70 +1,33 @@
-//! 极简 HTTP 客户端（WinHTTP）。
+//! HTTP 客户端：`ureq` + `rustls` 的薄封装。
 //!
-//! 为什么自己包一层而不是引入 reqwest/ureq：
-//! 1. 本项目只在 Windows 上运行，WinHTTP 是系统自带、原生支持 TLS，**零第三方依赖**；
-//! 2. 避免再引入一个庞大的异步运行时依赖链（编译时间与体积都会明显增加）；
-//! 3. 我们只需要「POST 一段 JSON / 一段 multipart，读回响应」这一种用法。
+//! # 为什么从自研 WinHTTP 换成 ureq
 //!
-//! 注意：本模块是阻塞式的，调用方应在独立线程或处理窗口中执行，不要卡住主循环。
+//! 原实现直接用 WinHTTP 的 FFI（零第三方依赖），但有三个绕不过去的短板：
+//!
+//! 1. **TLS 走系统 schannel**，在本机被沙箱阻断（`SEC_E_NO_CREDENTIALS`），
+//!    而 rustls 是纯 Rust 实现，不依赖系统凭据存储；
+//! 2. **不支持代理**，受限网络下（本项目开发机就是）完全没法用；
+//! 3. 没有连接池、没有重定向、没有分块传输，每个新需求都要手写一遍 FFI。
+//!
+//! ureq 是同步阻塞式客户端，不引入 async 运行时，体积与复杂度都可控，
+//! 与本项目「后台定时任务」的使用形态正好匹配。
+//!
+//! # 对外契约保持不变
+//!
+//! [`request`] / [`post_json`] / [`post_form`] / [`post_multipart`] / [`urlencode`]
+//! 的签名与语义与替换前一致，因此 `llm` 与 `push` 两个调用方无需改动。
+//!
+//! # 代理
+//!
+//! 代理是可选的，按 `VCA_PROXY` → `HTTPS_PROXY` → `https_proxy` 的顺序取，
+//! 也可以用 [`set_proxy`] 在运行时覆盖（CLI 的 `config` 命令会用）。
+//! 生产环境（一体机）通常直连，什么都不用配。
 
-use std::ffi::c_void;
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 
-type Handle = *mut c_void;
-type Bool = i32;
-
-const WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY: u32 = 4;
-const WINHTTP_FLAG_SECURE: u32 = 0x0080_0000;
-
-#[link(name = "winhttp")]
-extern "system" {
-    fn WinHttpOpen(
-        agent: *const u16,
-        access_type: u32,
-        proxy: *const u16,
-        bypass: *const u16,
-        flags: u32,
-    ) -> Handle;
-    fn WinHttpConnect(session: Handle, server: *const u16, port: u16, reserved: u32) -> Handle;
-    fn WinHttpOpenRequest(
-        connect: Handle,
-        verb: *const u16,
-        object: *const u16,
-        version: *const u16,
-        referrer: *const u16,
-        accept_types: *const *const u16,
-        flags: u32,
-    ) -> Handle;
-    fn WinHttpSendRequest(
-        request: Handle,
-        headers: *const u16,
-        headers_len: u32,
-        optional: *const c_void,
-        optional_len: u32,
-        total_len: u32,
-        context: usize,
-    ) -> Bool;
-    fn WinHttpReceiveResponse(request: Handle, reserved: *mut c_void) -> Bool;
-    fn WinHttpReadData(request: Handle, buffer: *mut c_void, to_read: u32, read: *mut u32) -> Bool;
-    fn WinHttpQueryHeaders(
-        request: Handle,
-        info_level: u32,
-        name: *const u16,
-        buffer: *mut c_void,
-        buffer_len: *mut u32,
-        index: *mut u32,
-    ) -> Bool;
-    fn WinHttpCloseHandle(handle: Handle) -> Bool;
-    fn WinHttpSetTimeouts(
-        handle: Handle,
-        resolve: i32,
-        connect: i32,
-        send: i32,
-        receive: i32,
-    ) -> Bool;
-}
-
-/// `WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER`
-const QUERY_STATUS_CODE: u32 = 19 | 0x2000_0000;
+use ureq::Agent;
 
 /// HTTP 响应。
 #[derive(Debug, Clone)]
@@ -83,74 +46,125 @@ impl HttpResponse {
 }
 
 /// HTTP 请求失败的原因。
+///
+/// 注意：**4xx/5xx 不是错误**，它们以正常的 [`HttpResponse`] 返回，
+/// 由调用方根据 `status` 决定怎么办（比如 401 说明 API Key 不对）。
+/// 这里的错误只涵盖「请求根本没发出去或没收到响应」。
 #[derive(Debug, thiserror::Error)]
 pub enum HttpError {
     /// 地址无法解析。
     #[error("URL 解析失败: {0}")]
     BadUrl(String),
-    /// WinHTTP 调用失败。
-    #[error("WinHTTP 调用失败: {0}")]
-    WinHttp(&'static str),
-    /// 超时或网络不可达。
+    /// 不支持的 HTTP 方法。
+    #[error("不支持的 HTTP 方法: {0}")]
+    Unsupported(String),
+    /// 网络层失败（连不上、超时、TLS 握手失败等）。
     #[error("网络错误: {0}")]
     Network(String),
 }
 
-fn wide(s: &str) -> Vec<u16> {
-    s.encode_utf16().chain(std::iter::once(0)).collect()
-}
+// ---------------------------------------------------------------------------
+// 代理
+// ---------------------------------------------------------------------------
 
-/// 解析后的 URL。
-#[derive(Debug, Clone)]
-pub struct ParsedUrl {
-    /// 是否 https。
-    pub secure: bool,
-    /// 主机。
-    pub host: String,
-    /// 端口。
-    pub port: u16,
-    /// 路径（含查询串）。
-    pub path: String,
-}
+static PROXY: OnceLock<Mutex<Option<String>>> = OnceLock::new();
 
-/// 解析 `http(s)://host[:port]/path`。
-pub fn parse_url(url: &str) -> Result<ParsedUrl, HttpError> {
-    let url = url.trim();
-    let (secure, rest) = if let Some(r) = url.strip_prefix("https://") {
-        (true, r)
-    } else if let Some(r) = url.strip_prefix("http://") {
-        (false, r)
-    } else {
-        return Err(HttpError::BadUrl(format!("缺少 http(s):// 前缀: {url}")));
-    };
-    let (hostport, path) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, "/"),
-    };
-    let (host, port) = match hostport.rsplit_once(':') {
-        Some((h, p)) => (
-            h.to_string(),
-            p.parse::<u16>()
-                .map_err(|_| HttpError::BadUrl(format!("非法端口: {p}")))?,
-        ),
-        None => (hostport.to_string(), if secure { 443 } else { 80 }),
-    };
-    if host.is_empty() {
-        return Err(HttpError::BadUrl("主机为空".into()));
-    }
-    Ok(ParsedUrl {
-        secure,
-        host,
-        port,
-        path: path.to_string(),
+fn proxy_cell() -> &'static Mutex<Option<String>> {
+    PROXY.get_or_init(|| {
+        let from_env = std::env::var("VCA_PROXY")
+            .ok()
+            .or_else(|| std::env::var("HTTPS_PROXY").ok())
+            .or_else(|| std::env::var("https_proxy").ok())
+            .filter(|s| !s.trim().is_empty());
+        Mutex::new(from_env)
     })
 }
+
+/// 设置全局代理（如 `http://127.0.0.1:10818`）。传 `None` 表示直连。
+pub fn set_proxy(proxy: Option<String>) {
+    if let Ok(mut g) = proxy_cell().lock() {
+        *g = proxy.filter(|s| !s.trim().is_empty());
+    }
+    // 代理变了，已缓存的 Agent 必须作废，否则会继续走旧代理。
+    if let Ok(mut c) = agents().lock() {
+        c.clear();
+    }
+}
+
+/// 当前生效的代理。
+pub fn proxy() -> Option<String> {
+    proxy_cell().lock().ok().and_then(|g| g.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Agent 缓存
+// ---------------------------------------------------------------------------
+
+type AgentCache = HashMap<u64, Agent>;
+
+static AGENTS: OnceLock<Mutex<AgentCache>> = OnceLock::new();
+
+fn agents() -> &'static Mutex<AgentCache> {
+    AGENTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 按超时分组缓存 Agent。
+///
+/// 缓存的意义是**复用连接池**：一次课后处理会连续打十几次同一个 API，
+/// 每次重建 Agent 就等于每次重新做 TLS 握手。
+fn agent_for(timeout_ms: i32) -> Result<Agent, HttpError> {
+    let key = timeout_ms.max(1_000) as u64;
+    if let Ok(c) = agents().lock() {
+        if let Some(a) = c.get(&key) {
+            return Ok(a.clone());
+        }
+    }
+
+    let timeout = Duration::from_millis(key);
+    let mut b = Agent::config_builder()
+        .timeout_global(Some(timeout))
+        // 关键：4xx/5xx 不要变成 Err。推送/转写需要读到错误 body
+        // （比如企业微信会在 200 里塞 errcode，OpenAI 会在 401 里说明原因）。
+        .http_status_as_error(false)
+        .user_agent(concat!("VibeClassAgent/", env!("CARGO_PKG_VERSION")));
+
+    if let Some(p) = proxy() {
+        let px = ureq::Proxy::new(&p)
+            .map_err(|e| HttpError::Network(format!("代理地址不合法（{p}）: {e}")))?;
+        b = b.proxy(Some(px));
+    }
+
+    let agent = Agent::new_with_config(b.build());
+    if let Ok(mut c) = agents().lock() {
+        c.insert(key, agent.clone());
+    }
+    Ok(agent)
+}
+
+/// 把 `"K: V\r\nK2: V2\r\n"` 形式的头逐行加到请求上。
+fn apply_headers<S>(rb: ureq::RequestBuilder<S>, headers: &str) -> ureq::RequestBuilder<S> {
+    let mut rb = rb;
+    for line in headers.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once(':') {
+            rb = rb.header(k.trim(), v.trim());
+        }
+    }
+    rb
+}
+
+// ---------------------------------------------------------------------------
+// 请求
+// ---------------------------------------------------------------------------
 
 /// 发送一次请求。
 ///
 /// - `headers`：形如 `"Content-Type: application/json\r\n"`，可为空串；
-/// - `body`：请求体字节；
-/// - `timeout_ms`：连接/发送/接收超时。
+/// - `body`：请求体字节（GET/HEAD 忽略）；
+/// - `timeout_ms`：整体超时（连接 + 传输）。
 pub fn request(
     method: &str,
     url: &str,
@@ -158,116 +172,37 @@ pub fn request(
     body: &[u8],
     timeout_ms: i32,
 ) -> Result<HttpResponse, HttpError> {
-    let u = parse_url(url)?;
-    let agent = wide("VibeClassAgent/0.2");
+    let m = method.trim().to_ascii_uppercase();
+    // 先校验动词，再碰任何 IO / 全局配置：
+    // 否则一个拼错的动词会被「代理没配好」之类的错误掩盖掉。
+    if !matches!(
+        m.as_str(),
+        "GET" | "HEAD" | "DELETE" | "POST" | "PUT" | "PATCH"
+    ) {
+        return Err(HttpError::Unsupported(m));
+    }
 
-    unsafe {
-        let session = WinHttpOpen(
-            agent.as_ptr(),
-            WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
-            std::ptr::null(),
-            std::ptr::null(),
-            0,
-        );
-        if session.is_null() {
-            return Err(HttpError::WinHttp("WinHttpOpen"));
+    let agent = agent_for(timeout_ms)?;
+
+    // 各分支的返回类型必须一致：都是 Result<Response<Body>, ureq::Error>。
+    let result = match m.as_str() {
+        "GET" => apply_headers(agent.get(url), headers).call(),
+        "HEAD" => apply_headers(agent.head(url), headers).call(),
+        "DELETE" => apply_headers(agent.delete(url), headers).call(),
+        "POST" => apply_headers(agent.post(url), headers).send(body),
+        "PUT" => apply_headers(agent.put(url), headers).send(body),
+        _ => apply_headers(agent.patch(url), headers).send(body),
+    };
+
+    match result {
+        Ok(mut resp) => {
+            let status = resp.status().as_u16() as u32;
+            // 读失败（比如响应不是 UTF-8）不该让整个请求失败：
+            // 状态码才是调用方真正要的判据。
+            let body = resp.body_mut().read_to_string().unwrap_or_default();
+            Ok(HttpResponse { status, body })
         }
-        let _ = WinHttpSetTimeouts(session, timeout_ms, timeout_ms, timeout_ms, timeout_ms);
-
-        let host = wide(&u.host);
-        let connect = WinHttpConnect(session, host.as_ptr(), u.port, 0);
-        if connect.is_null() {
-            WinHttpCloseHandle(session);
-            return Err(HttpError::WinHttp("WinHttpConnect"));
-        }
-
-        let verb = wide(method);
-        let path = wide(&u.path);
-        let flags = if u.secure { WINHTTP_FLAG_SECURE } else { 0 };
-        let req = WinHttpOpenRequest(
-            connect,
-            verb.as_ptr(),
-            path.as_ptr(),
-            std::ptr::null(),
-            std::ptr::null(),
-            std::ptr::null(),
-            flags,
-        );
-        if req.is_null() {
-            WinHttpCloseHandle(connect);
-            WinHttpCloseHandle(session);
-            return Err(HttpError::WinHttp("WinHttpOpenRequest"));
-        }
-
-        let hdr = if headers.is_empty() {
-            None
-        } else {
-            Some(wide(headers))
-        };
-        let (hp, hl) = match &hdr {
-            Some(h) => (h.as_ptr(), (h.len() as u32 - 1) * 2),
-            None => (std::ptr::null(), 0),
-        };
-
-        let ok = WinHttpSendRequest(
-            req,
-            hp,
-            hl,
-            body.as_ptr() as *const c_void,
-            body.len() as u32,
-            body.len() as u32,
-            0,
-        );
-        if ok == 0 {
-            WinHttpCloseHandle(req);
-            WinHttpCloseHandle(connect);
-            WinHttpCloseHandle(session);
-            return Err(HttpError::Network(
-                "WinHttpSendRequest 失败（网络不可达或证书问题）".into(),
-            ));
-        }
-
-        if WinHttpReceiveResponse(req, std::ptr::null_mut()) == 0 {
-            WinHttpCloseHandle(req);
-            WinHttpCloseHandle(connect);
-            WinHttpCloseHandle(session);
-            return Err(HttpError::Network("WinHttpReceiveResponse 失败".into()));
-        }
-
-        // 状态码
-        let mut status: u32 = 0;
-        let mut len = std::mem::size_of::<u32>() as u32;
-        let _ = WinHttpQueryHeaders(
-            req,
-            QUERY_STATUS_CODE,
-            std::ptr::null(),
-            &mut status as *mut u32 as *mut c_void,
-            &mut len,
-            std::ptr::null_mut(),
-        );
-
-        // 响应体
-        let mut raw: Vec<u8> = Vec::new();
-        loop {
-            let mut buf = [0u8; 8192];
-            let mut read: u32 = 0;
-            if WinHttpReadData(req, buf.as_mut_ptr() as *mut c_void, 8192, &mut read) == 0 {
-                break;
-            }
-            if read == 0 {
-                break;
-            }
-            raw.extend_from_slice(&buf[..read as usize]);
-        }
-
-        WinHttpCloseHandle(req);
-        WinHttpCloseHandle(connect);
-        WinHttpCloseHandle(session);
-
-        Ok(HttpResponse {
-            status,
-            body: String::from_utf8_lossy(&raw).to_string(),
-        })
+        Err(e) => Err(HttpError::Network(e.to_string())),
     }
 }
 
@@ -343,6 +278,55 @@ pub fn urlencode(s: &str) -> String {
     out
 }
 
+/// 解析后的 URL。
+#[derive(Debug, Clone)]
+pub struct ParsedUrl {
+    /// 是否 https。
+    pub secure: bool,
+    /// 主机。
+    pub host: String,
+    /// 端口。
+    pub port: u16,
+    /// 路径（含查询串）。
+    pub path: String,
+}
+
+/// 解析 `http(s)://host[:port]/path`。
+///
+/// 现在不再用于发请求（ureq 自己解析），而是用于**配置校验**：
+/// 用户填错 endpoint 时当场报错，比等到课后处理失败要好得多。
+pub fn parse_url(url: &str) -> Result<ParsedUrl, HttpError> {
+    let url = url.trim();
+    let (secure, rest) = if let Some(r) = url.strip_prefix("https://") {
+        (true, r)
+    } else if let Some(r) = url.strip_prefix("http://") {
+        (false, r)
+    } else {
+        return Err(HttpError::BadUrl(format!("缺少 http(s):// 前缀: {url}")));
+    };
+    let (hostport, path) = match rest.find('/') {
+        Some(i) => (&rest[..i], &rest[i..]),
+        None => (rest, "/"),
+    };
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) => (
+            h.to_string(),
+            p.parse::<u16>()
+                .map_err(|_| HttpError::BadUrl(format!("非法端口: {p}")))?,
+        ),
+        None => (hostport.to_string(), if secure { 443 } else { 80 }),
+    };
+    if host.is_empty() {
+        return Err(HttpError::BadUrl("主机为空".into()));
+    }
+    Ok(ParsedUrl {
+        secure,
+        host,
+        port,
+        path: path.to_string(),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -416,5 +400,32 @@ mod tests {
         assert_eq!(urlencode("a b"), "a+b");
         assert_eq!(urlencode("中文"), "%E4%B8%AD%E6%96%87");
         assert_eq!(urlencode("k=v&x"), "k%3Dv%26x");
+    }
+
+    #[test]
+    fn unsupported_method_is_rejected_before_any_io() {
+        // 关键：不支持的动词必须在**发请求之前**报错，
+        // 否则会拿一个莫名其妙的网络错误掩盖真正的配置问题。
+        let e = request("BREW", "http://127.0.0.1:1/x", "", b"", 1000);
+        assert!(matches!(e, Err(HttpError::Unsupported(_))));
+    }
+
+    #[test]
+    fn proxy_is_global_and_validated() {
+        // 合成一个测试：proxy 是进程级全局状态，拆成多个测试并行跑会互相干扰。
+        set_proxy(Some("http://127.0.0.1:9999".into()));
+        assert_eq!(proxy().as_deref(), Some("http://127.0.0.1:9999"));
+
+        // 空白串等价于清除，避免用户配置里写了空字符串就被当成代理
+        set_proxy(Some("   ".into()));
+        assert_eq!(proxy(), None);
+
+        // 非法代理地址应在发起请求时以网络错误暴露，而不是 panic
+        set_proxy(Some("这不是一个 URL".into()));
+        let r = request("GET", "http://example.com/", "", b"", 1000);
+        assert!(matches!(r, Err(HttpError::Network(_))));
+
+        set_proxy(None);
+        assert_eq!(proxy(), None);
     }
 }

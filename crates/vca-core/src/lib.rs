@@ -27,6 +27,7 @@ pub mod import;
 pub mod job;
 pub mod model;
 pub mod paths;
+pub mod peak;
 pub mod schedule;
 pub mod secrets;
 pub mod setup;

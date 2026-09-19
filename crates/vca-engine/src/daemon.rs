@@ -79,6 +79,11 @@ pub struct Daemon {
     pub weekend_entries: Vec<vca_core::model::ClassEntry>,
     /// 周末模板解析时的提示（供日志展示）。
     pub weekend_note: Option<String>,
+    /// 因 DeepSeek 高峰而积压、等闲时补跑的 scope。
+    ///
+    /// 只记在内存里、不落盘：作业本身还躺在 `pending()` 里，daemon 重启后
+    /// 下一个处理窗口照样会捞到它们；落盘反而要额外处理失效与过期。
+    pub deferred_scopes: Vec<String>,
 }
 
 impl Daemon {
@@ -140,6 +145,7 @@ impl Daemon {
             python_dir,
             weekend_entries,
             weekend_note,
+            deferred_scopes: Vec::new(),
         })
     }
 
@@ -160,7 +166,11 @@ impl Daemon {
         schedule::overlay_windows(lessons, self.settings.overlay.timing())
     }
 
-    /// 处理窗口（优先用配置，未配置则由时间表推导）。
+    /// 处理窗口。
+    ///
+    /// **优先用配置**：用户在 `settings.yaml` 里显式写了 `processing_windows`
+    /// 就照他的来。否则从时间表推导 —— 推导会优先挑「午休」与「晚餐 / 放学后」
+    /// 这两类休息段（见 `vca_core::windows`），这也是需求里的默认安排。
     pub fn processing_windows(&self) -> Vec<vca_core::model::ProcessingWindow> {
         if !self.settings.processing_windows.is_empty() {
             return self.settings.processing_windows.clone();
@@ -169,6 +179,31 @@ impl Daemon {
             Some(tt) => windows::derive_windows(tt, WindowSpec::default()),
             None => Vec::new(),
         }
+    }
+
+    /// 今天是不是用户列的法定节假日（这些天 DeepSeek 全天按闲时计费）。
+    fn peak_holiday(&self, today: LocalDate) -> bool {
+        let iso = today.to_string();
+        self.settings
+            .llm
+            .peak_holidays
+            .iter()
+            .any(|d| d.trim() == iso)
+    }
+
+    /// 现在该不该因为 DeepSeek 高峰而暂缓调用模型 API。
+    ///
+    /// 判断本身在 `vca_core::peak` 里（纯函数、可测）；这里只负责把配置喂进去。
+    /// 三个条件同时成立才算：用户开着这个开关（默认开）、端点是 DeepSeek 的、
+    /// 此刻确实在高峰里。用别的厂商不延后 —— 只有 DeepSeek 有错峰计费。
+    fn peak_defer_active(&self, today: LocalDate) -> bool {
+        let llm = &self.settings.llm;
+        vca_core::peak::should_defer_now(
+            llm.defer_on_peak,
+            &llm.base_url,
+            &llm.provider,
+            self.peak_holiday(today),
+        )
     }
 
     /// 主循环（永不返回，除非出错或被要求退出）。
@@ -248,6 +283,27 @@ impl Daemon {
                 .map(|w| format!("{} {}", w.name, w.start))
                 .collect();
             tracing::info!("处理窗口 {} 个：{}", pws.len(), names.join(" / "));
+        }
+
+        // DeepSeek 错峰：这是**静默延迟**行为 —— 不在启动时说清楚，
+        // 用户看到作业迟迟没处理，只会以为程序坏了。
+        if self.settings.llm.defer_on_peak
+            && vca_core::peak::looks_like_deepseek(
+                &self.settings.llm.base_url,
+                &self.settings.llm.provider,
+            )
+        {
+            let today = vca_platform::clock::now_local().date;
+            if self.peak_defer_active(today) {
+                tracing::info!(
+                    "DeepSeek 错峰：现在是高峰时段，处理任务会先积压，{}后自动补跑",
+                    vca_core::peak::humanize_secs(vca_core::peak::secs_until_offpeak_now(
+                        self.peak_holiday(today)
+                    ))
+                );
+            } else {
+                tracing::info!("DeepSeek 错峰：现在是闲时（半价），有任务会直接开跑");
+            }
         }
 
         tracing::info!("课程表 {} 条", self.schedule.week_template.entries.len());
@@ -575,13 +631,39 @@ impl Daemon {
 
             // ---------- 3) 处理窗口 ----------
             let pws = self.processing_windows();
+            let peak = self.peak_defer_active(today);
             if let Some(w) = windows::window_at(&pws, now_min) {
                 let key = format!("{today}-{}-{}", w.name, w.scope);
                 if !handled_windows.contains(&key) {
-                    handled_windows.push(key);
-                    tracing::info!("进入处理窗口「{}」（scope={}）", w.name, w.scope);
-                    // 把正在录制的那个作业排除掉：它这会儿文件还没写完
-                    let _ = self.process_scope(&w.scope, &lessons, today, current_job.as_deref());
+                    if peak {
+                        // 高峰时段调用模型要多花一倍的钱，先把这批积压下来。
+                        // 注意**不**把 key 记进 handled_windows —— 这轮并没有真的处理。
+                        if !self.deferred_scopes.contains(&w.scope) {
+                            let wait = vca_core::peak::humanize_secs(
+                                vca_core::peak::secs_until_offpeak_now(self.peak_holiday(today)),
+                            );
+                            tracing::info!(
+                                "处理窗口「{}」命中，但现在是 DeepSeek 高峰时段，\
+                                 本轮积压（{wait}后进入闲时，届时自动补跑）",
+                                w.name
+                            );
+                            self.deferred_scopes.push(w.scope.clone());
+                        }
+                    } else {
+                        handled_windows.push(key);
+                        tracing::info!("进入处理窗口「{}」（scope={}）", w.name, w.scope);
+                        // 把正在录制的那个作业排除掉：它这会儿文件还没写完
+                        let _ =
+                            self.process_scope(&w.scope, &lessons, today, current_job.as_deref());
+                    }
+                }
+            }
+
+            // ---------- 3b) 高峰过去了：把积压的补上 ----------
+            if !self.deferred_scopes.is_empty() && !peak {
+                for scope in std::mem::take(&mut self.deferred_scopes) {
+                    tracing::info!("高峰已结束，补跑积压的课后处理（scope={scope}）");
+                    let _ = self.process_scope(&scope, &lessons, today, current_job.as_deref());
                 }
             }
 

@@ -50,22 +50,24 @@ ui:
   tray_icon: true               # 仅一个小任务栏图标，无气泡无弹窗
   tray_badge: false             # 录制中角标，默认关
 
-processing_windows:
-  - name: 午休
-    start: "14:20"
-    end: "15:25"
-    scope: morning
-    max_concurrent: 1
-  - name: 放学后
-    start: "20:35"
-    end: "21:35"
-    scope: afternoon
-    max_concurrent: 1
-  - name: 晚自习后
-    start: "23:35"
-    end: "23:59"
-    scope: evening
-    max_concurrent: 1
+# 处理窗口：**默认留空**，让程序自己从时间表里挑。
+#
+# 留空时自动挑出「午休」与「晚餐 / 放学后」这两类休息段作为课后处理时段 ——
+# 这也正好是 DeepSeek 的闲时（工作日高峰是北京时间 09:00–12:00 与
+# 14:00–18:00，闲时半价）。只有当时间表里一个都没标出名字时，才会退回
+# 「所有 >= 15 分钟的休息段」，免得名字没对上就干脆不处理。
+#
+# 想自己指定就照下面的格式填，填了就不再自动推导。注意两点：
+#   1. 别与上课时段重叠 —— 重叠时正在录的那节课会被捞去处理（虽已有保护，
+#      但仍会白等一轮）；
+#   2. scope 决定这个窗口处理哪个时段的作业：morning / afternoon / evening
+#      按课程**开始时间**划分（< 12:00 / < 18:00 / 其余）。
+processing_windows: []
+#  - name: 午休
+#    start: "12:10"
+#    end: "13:30"
+#    scope: morning
+#    max_concurrent: 1
 
 overlay:
   # 桌面悬浮窗：下课后 5 分钟在右上角显示，上课前 2 分钟自动关闭

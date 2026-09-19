@@ -150,6 +150,20 @@ pub struct LlmSettings {
     /// 浏览器模式配置（仅 mode = browser-bot 时使用）。
     #[serde(default)]
     pub browser: BrowserSettings,
+    /// DeepSeek 高峰时段是否积压请求、等闲时再发（**默认开**）。
+    ///
+    /// DeepSeek 的高峰是 UTC 01:00–04:00 与 06:00–10:00、周一至周五，
+    /// 换算成北京时间就是工作日的 09:00–12:00 与 14:00–18:00（其余时间半价）。
+    /// 开着它，撞上高峰的处理任务会被推迟到闲时再跑 —— 代价是文档晚一点到手。
+    #[serde(default = "default_true")]
+    pub defer_on_peak: bool,
+    /// 中国法定节假日（`YYYY-MM-DD`，**本地日期**），这些天全天按闲时算。
+    ///
+    /// 程序不内置节假日日历：它每年都在变，写死了迟早过期，
+    /// 过期后还会静默按错误规则跑。需要的用户在配置里补几行即可；
+    /// 不填就是「只认周末」。
+    #[serde(default)]
+    pub peak_holidays: Vec<String>,
 }
 
 fn default_llm_mode() -> String {

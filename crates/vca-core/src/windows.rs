@@ -48,22 +48,32 @@ fn scope_of(start_minute: u32) -> &'static str {
 }
 
 /// 从时间表推导处理窗口。
+///
+/// **优先挑「午休」与「晚餐 / 放学后」这两类休息段** —— 这是需求里的默认安排，
+/// 也正好落在 DeepSeek 的闲时里。只有当时间表里一个都没标出来时
+/// （休息段没写名字、或者名字里没有这些词），才退回到「所有够长的休息段」：
+/// 名字没对上就不处理，比多跑几个窗口糟糕得多。
 pub fn derive_windows(timetable: &Timetable, spec: WindowSpec) -> Vec<ProcessingWindow> {
+    let viable = |slot: &TimetableSlot| is_viable_break(slot, spec.min_minutes);
+    let meal: Vec<&TimetableSlot> = timetable
+        .slots
+        .iter()
+        .filter(|s| viable(s) && is_meal_break(s))
+        .collect();
+    let picked: Vec<&TimetableSlot> = if meal.is_empty() {
+        timetable.slots.iter().filter(|s| viable(s)).collect()
+    } else {
+        meal
+    };
+
     let mut out: Vec<ProcessingWindow> = Vec::new();
-    for slot in &timetable.slots {
-        if slot.kind != SlotKind::Break {
-            continue;
-        }
+    for slot in picked {
         let Some(s) = LocalDateTime::parse_hhmm(&slot.start) else {
             continue;
         };
         let Some(e) = LocalDateTime::parse_hhmm(&slot.end) else {
             continue;
         };
-        let len = e as i64 - s as i64;
-        if len < spec.min_minutes {
-            continue;
-        }
         let start = (s as i64 + spec.lead_minutes).clamp(0, 1439);
         let end = (e as i64 - spec.trail_minutes).clamp(0, 1439);
         if end <= start {
@@ -154,9 +164,67 @@ pub fn is_viable_break(slot: &TimetableSlot, min_minutes: i64) -> bool {
     }
 }
 
+/// 名字里出现这些词，就认为它是「午休」。
+const LUNCH_HINTS: &[&str] = &["午休", "午餐", "午饭", "中午", "午间", "lunch", "noon"];
+
+/// 「晚餐 / 放学后」。
+const DINNER_HINTS: &[&str] = &[
+    "晚餐",
+    "晚饭",
+    "放学",
+    "晚自习",
+    "晚间",
+    "dinner",
+    "evening",
+    "after school",
+];
+
+/// 这个休息段是不是「午休」或「晚餐 / 放学后」。
+///
+/// 按名字判断是有意为之：`type: break` 只说明「不上课」，说明不了
+/// 「这段够不够安静、够不够长用来做课后处理」—— 那恰恰是午休与晚餐的特征。
+/// 名字没写时返回 false，由 [`derive_windows`] 统一走兜底路径。
+pub fn is_meal_break(slot: &TimetableSlot) -> bool {
+    match &slot.name {
+        Some(n) => {
+            let n = n.to_lowercase();
+            LUNCH_HINTS
+                .iter()
+                .chain(DINNER_HINTS.iter())
+                .any(|k| n.contains(k))
+        }
+        None => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn prefers_lunch_and_dinner_breaks() {
+        let t = tt(vec![
+            class(1, "08:00", "08:45"),
+            brk("08:45", "09:00", "课间"),
+            class(2, "09:00", "09:45"),
+            brk("12:00", "14:00", "午餐午休"),
+            class(3, "14:00", "14:45"),
+            brk("18:00", "19:00", "晚餐"),
+        ]);
+        let ws = derive_windows(&t, WindowSpec::default());
+        assert_eq!(ws.len(), 2, "只该挑出午休与晚餐，课间不参与");
+        assert_eq!(ws[0].name, "午餐午休");
+        assert_eq!(ws[1].name, "晚餐");
+        assert_eq!(ws[1].scope, "evening");
+    }
+
+    #[test]
+    fn meal_break_needs_a_name() {
+        let mut s = brk("12:00", "14:00", "");
+        assert!(!is_meal_break(&s), "空名字不算");
+        s.name = None;
+        assert!(!is_meal_break(&s), "没名字不算");
+    }
 
     fn tt(slots: Vec<TimetableSlot>) -> Timetable {
         Timetable {
@@ -192,23 +260,37 @@ mod tests {
     fn derives_windows_from_breaks() {
         let t = tt(vec![
             class(1, "08:00", "08:45"),
-            brk("09:40", "10:00", "大课间"), // 20 分钟 -> 保留
+            brk("09:40", "10:00", "大课间"), // 20 分钟：够长，但不是午休/晚餐
             class(2, "10:00", "10:45"),
-            brk("12:10", "13:30", "午餐午休"), // 80 分钟 -> 保留
+            brk("12:10", "13:30", "午餐午休"), // 80 分钟 -> 保留（首选）
             class(3, "14:00", "14:45"),
             brk("17:00", "17:05", "小课间"), // 5 分钟 -> 丢弃
             class(4, "19:00", "19:40"),
-            brk("20:30", "21:30", "晚餐"), // 60 分钟 -> 保留
+            brk("20:30", "21:30", "晚餐"), // 60 分钟 -> 保留（首选）
         ]);
         let w = derive_windows(&t, WindowSpec::default());
-        assert_eq!(w.len(), 3);
+        assert_eq!(
+            w.len(),
+            2,
+            "只挑午休与晚餐：大课间够长，但不是做课后处理的时段"
+        );
+        assert_eq!(w[0].name, "午餐午休");
+        assert_eq!(w[0].scope, "afternoon");
+        assert_eq!(w[1].name, "晚餐");
+        assert_eq!(w[1].scope, "evening");
+        assert_eq!(w[1].max_concurrent, 1);
+    }
+
+    #[test]
+    fn fallback_keeps_long_breaks_when_unlabeled() {
+        let t = tt(vec![
+            class(1, "08:00", "08:45"),
+            brk("09:40", "10:00", "大课间"),
+            brk("17:00", "17:05", "小课间"),
+        ]);
+        let w = derive_windows(&t, WindowSpec::default());
+        assert_eq!(w.len(), 1);
         assert_eq!(w[0].name, "大课间");
-        assert_eq!(w[0].scope, "morning");
-        assert_eq!(w[1].name, "午餐午休");
-        assert_eq!(w[1].scope, "afternoon");
-        assert_eq!(w[2].name, "晚餐");
-        assert_eq!(w[2].scope, "evening");
-        assert_eq!(w[2].max_concurrent, 1);
     }
 
     #[test]

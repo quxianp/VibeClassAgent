@@ -26,9 +26,27 @@ transcriber:
 llm:
   # 仅用于「要点提取」；转写为纯本地，不需要 Key
   # 真实 Key 请放入 .env 或 secrets.env，不要写在这里
+  #
+  # provider 与 base_url 二选一即可（填了 provider 会自动套用内置预设地址）：
+  # provider: deepseek          # deepseek | moonshot | zhipu | dashscope | …
   base_url: "https://<你的模型服务地址>/v1"
   model: "<模型名>"
   prompt_template: null
+  #
+  # DeepSeek 错峰（只在上面指向 DeepSeek 时生效，**默认开**）：
+  #   高峰 = 工作日 UTC 01:00–04:00 与 06:00–10:00，
+  #   换算成北京时间就是 09:00–12:00 与 14:00–18:00 —— 正好是上课时间。
+  #   其余时间（含周末与节假日全天）半价。
+  # 开着它，撞上高峰的处理任务会先积压、等进入闲时自动补跑；
+  # 想让它立刻跑（认了多花一倍钱）就改成 false。
+  # defer_on_peak: true
+  #
+  # 中国法定节假日（YYYY-MM-DD，**本地日期**），这些天全天按闲时算。
+  # 程序不内置这份日历：它每年都在变，写死了迟早过期，过期后还会静默
+  # 按错误的规则跑 —— 宁可让用户自己补几行。不填就是「只认周末」。
+  # peak_holidays:
+  #   - "2026-10-01"
+  #   - "2026-10-02"
 
 push:
   provider: ""                  # wecom | qq | wechat-personal（用户自选）

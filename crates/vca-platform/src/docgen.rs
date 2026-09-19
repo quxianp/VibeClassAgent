@@ -243,6 +243,36 @@ fn rel_link(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
+/// 把 `path` 表示成相对于 `base` 的路径（同一盘符内）。
+///
+/// 无法计算（不同盘符、路径不存在）时原样返回，绝不返回一个错的路径。
+fn make_relative(path: &Path, base: &Path) -> PathBuf {
+    let (Ok(p), Ok(b)) = (std::fs::canonicalize(path), std::fs::canonicalize(base)) else {
+        return path.to_path_buf();
+    };
+    let pc: Vec<_> = p.components().collect();
+    let bc: Vec<_> = b.components().collect();
+    // 盘符不同就别算了，相对路径跨不过去
+    if pc.first() != bc.first() {
+        return path.to_path_buf();
+    }
+    let mut i = 0;
+    while i < pc.len() && i < bc.len() && pc[i] == bc[i] {
+        i += 1;
+    }
+    let mut out = PathBuf::new();
+    for _ in i..bc.len() {
+        out.push("..");
+    }
+    for c in &pc[i..] {
+        out.push(c.as_os_str());
+    }
+    if out.as_os_str().is_empty() {
+        return path.to_path_buf();
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // HTML（PDF 的中间格式）
 // ---------------------------------------------------------------------------
@@ -526,6 +556,17 @@ pub fn write_docx(input: &DocInput, path: &Path) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// 用系统浏览器的无头模式把 HTML 打印成 PDF。
+///
+/// 先按常规多进程模式跑，失败再用 `--single-process` 重试一次。
+///
+/// 后一招是给**受限环境**准备的：Chromium 的多进程 IPC 走命名管道，
+/// 在远程桌面、强策略企业环境或沙箱会话里创建管道可能被拒，日志表现为
+///
+/// ```text
+/// FATAL:mojo\public\cpp\platform\platform_channel.cc:183] Access is denied. (0x5)
+/// ```
+///
+/// 此时单进程模式不再需要建管道，往往还能正常出图。
 pub fn html_to_pdf(html: &Path, pdf: &Path) -> Result<()> {
     let browser = browser_bot::find_system_browser().ok_or_else(|| {
         anyhow::anyhow!("找不到 Edge 或 Chrome，无法生成 PDF（可用 VCA_BROWSER 指定）")
@@ -533,31 +574,42 @@ pub fn html_to_pdf(html: &Path, pdf: &Path) -> Result<()> {
     if let Some(p) = pdf.parent() {
         std::fs::create_dir_all(p)?;
     }
-    let _ = std::fs::remove_file(pdf);
 
     // file:/// URL 必须是正斜杠
     let abs = std::fs::canonicalize(html).unwrap_or_else(|_| html.to_path_buf());
     let url = format!("file:///{}", abs.to_string_lossy().replace('\\', "/"));
 
-    let out = proc::silent(&browser)
-        .arg("--headless=new")
-        .arg("--disable-gpu")
-        .arg("--no-sandbox")
-        .arg("--no-pdf-header-footer")
-        .arg(format!("--print-to-pdf={}", pdf.display()))
-        .arg(&url)
-        .output()
-        .context("启动浏览器打印 PDF 失败")?;
+    let mut last_err = String::new();
+    for single_process in [false, true] {
+        let _ = std::fs::remove_file(pdf);
+        let mut cmd = proc::silent(&browser);
+        cmd.arg("--headless=new")
+            .arg("--disable-gpu")
+            .arg("--no-sandbox")
+            .arg("--no-pdf-header-footer")
+            .arg("--disable-crash-reporter")
+            .arg("--disable-breakpad");
+        if single_process {
+            cmd.arg("--single-process");
+        }
+        let out = cmd
+            .arg(format!("--print-to-pdf={}", pdf.display()))
+            .arg(&url)
+            .output()
+            .context("启动浏览器打印 PDF 失败")?;
 
-    if !pdf.is_file() || std::fs::metadata(pdf).map(|m| m.len()).unwrap_or(0) == 0 {
+        if pdf.is_file() && std::fs::metadata(pdf).map(|m| m.len()).unwrap_or(0) > 0 {
+            return Ok(());
+        }
         let err = String::from_utf8_lossy(&out.stderr);
-        return Err(anyhow::anyhow!(
-            "浏览器没有产出 PDF（退出码 {:?}）：{}",
+        last_err = format!(
+            "退出码 {:?}：{}",
             out.status.code(),
             err.trim().chars().take(300).collect::<String>()
-        ));
+        );
     }
-    Ok(())
+
+    Err(anyhow::anyhow!("浏览器没有产出 PDF（{last_err}）"))
 }
 
 // ---------------------------------------------------------------------------
@@ -570,6 +622,14 @@ pub fn html_to_pdf(html: &Path, pdf: &Path) -> Result<()> {
 pub fn generate(input: &DocInput, out_dir: &Path, formats: &[String]) -> Result<DocOutput> {
     std::fs::create_dir_all(out_dir)
         .with_context(|| format!("创建文档目录失败: {}", out_dir.display()))?;
+
+    // 截图路径改成**相对文档目录**：文档是要发给别人的，
+    // 绝对路径（D:\...\data\profiles\default\screenshots\...）在别人机器上必然断图。
+    let mut owned = input.clone();
+    for s in owned.screenshots.iter_mut() {
+        s.path = make_relative(&s.path, out_dir);
+    }
+    let input = &owned;
 
     let want: Vec<String> = if formats.is_empty() {
         vec!["md".into(), "docx".into(), "pdf".into()]
@@ -746,6 +806,36 @@ mod tests {
         assert!(out.pdf.is_none());
         assert!(out.markdown.as_ref().unwrap().is_file());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn screenshot_paths_become_relative_to_the_doc_dir() {
+        // 文档是要发给别人的，绝对路径在别人机器上必然断图
+        let dir = std::env::temp_dir().join("vca_docgen_rel");
+        let _ = std::fs::remove_dir_all(&dir);
+        let docs = dir.join("docs").join("20260919");
+        let shots = dir.join("screenshots").join("20260919");
+        std::fs::create_dir_all(&docs).unwrap();
+        std::fs::create_dir_all(&shots).unwrap();
+        let img = shots.join("shot00001.jpg");
+        std::fs::write(&img, b"fake-image").unwrap();
+
+        let rel = make_relative(&img, &docs);
+        assert!(!rel.is_absolute(), "应转成相对路径，实际 {}", rel.display());
+        assert!(
+            docs.join(&rel).exists(),
+            "相对路径拼回来应当指向原图：{}",
+            docs.join(&rel).display()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn make_relative_keeps_original_when_path_is_missing() {
+        // 算不出来时宁可原样返回，也不能返回一个错的路径
+        let p = PathBuf::from("C:/根本不存在/a.jpg");
+        let b = std::env::temp_dir();
+        assert_eq!(make_relative(&p, &b), p);
     }
 
     #[test]

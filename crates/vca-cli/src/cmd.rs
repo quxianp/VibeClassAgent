@@ -862,6 +862,152 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
             println!("总耗时 : {:.1}s", t0.elapsed().as_secs_f64());
             Ok(())
         }
+        "e2e" => {
+            // 端到端冒烟：录一小段 → 跑完整课后流水线。
+            // 这是「所有零件装在一起还能转」的唯一证明。
+            use vca_core::job::{Job, JobState};
+            use vca_core::store::JobStore;
+            use vca_engine::pipeline::Pipeline;
+
+            let profile = "default";
+            let secs: u32 = 15;
+
+            println!("端到端冒烟测试");
+            println!("{}", "-".repeat(62));
+
+            // 注意：LocalDateTime 的 Display 带时间部分，直接拿去做目录名会
+            // 因为冒号（Windows 非法字符）报 os error 267。只取日期段。
+            let now = vca_platform::clock::now_local().to_string();
+            let today: String = now
+                .split_whitespace()
+                .next()
+                .unwrap_or("1970-01-01")
+                .chars()
+                .take(10)
+                .collect();
+            let compact = today.replace('-', "");
+
+            // ---- 1) 录制 ----
+            let raw_dir = layout.raw_dir(profile, &compact);
+            std::fs::create_dir_all(&raw_dir)?;
+            let video = raw_dir.join("e2e.mp4");
+            let shots = layout.screenshots_dir(profile, &compact);
+            let _ = std::fs::remove_file(&video);
+            let _ = std::fs::remove_dir_all(&shots);
+
+            let params = vca_platform::capture::CaptureParams {
+                fps: 8,
+                height: 720,
+                crf: 30,
+                screenshot_interval_secs: 5,
+                ..Default::default()
+            };
+            print!("① 录制 {secs} 秒");
+            use std::io::Write;
+            let _ = std::io::stdout().flush();
+            let mut sess = match vca_platform::capture::CaptureSession::new(params, &video) {
+                Ok(s) => s.with_shot_dir(shots.clone()),
+                Err(e) => {
+                    println!();
+                    println!("   录制初始化失败：{e}");
+                    return Ok(());
+                }
+            };
+            if let Err(e) = sess.start() {
+                println!();
+                println!("   录制启动失败：{e}");
+                return Ok(());
+            }
+            std::thread::sleep(std::time::Duration::from_secs(secs as u64));
+            let _ = sess.stop();
+            let outcome = match sess.finalize() {
+                Ok(o) => o,
+                Err(e) => {
+                    println!();
+                    println!("   收尾失败：{e}");
+                    return Ok(());
+                }
+            };
+            println!(
+                "   → 视频 {} / 音频 {} 路 / 截图 {} 张",
+                if outcome.video.is_some() { "有" } else { "无" },
+                outcome.audio.len(),
+                outcome.screenshots.len()
+            );
+            for n in &outcome.notes {
+                println!("     备注：{n}");
+            }
+
+            // ---- 2) 建作业 ----
+            let store = JobStore::new(layout.profile_data_dir(profile));
+            let mut job = Job {
+                id: format!("e2e_{compact}_端到端测试"),
+                profile: profile.to_string(),
+                state: JobState::Recorded,
+                push_succeeded_at: None,
+                expire_at: None,
+                last_error: None,
+                course: "端到端测试".to_string(),
+                teacher_id: String::new(),
+                date: today.clone(),
+                start: "08:00".to_string(),
+                end: "08:12".to_string(),
+                video_path: outcome
+                    .video
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().to_string()),
+                audio_path: outcome
+                    .audio
+                    .first()
+                    .map(|p| p.to_string_lossy().to_string()),
+                screenshots: outcome
+                    .screenshots
+                    .iter()
+                    .map(|p| p.to_string_lossy().to_string())
+                    .collect(),
+                docx_path: None,
+                pdf_path: None,
+            };
+            store.save(&job)?;
+
+            // ---- 3) 流水线 ----
+            let settings_path = layout.profile_config_dir(profile).join("settings.yaml");
+            let settings = vca_core::config::load_settings(&settings_path).unwrap_or_default();
+
+            println!("② 课后流水线（演练，不真正推送）");
+            let mut pipe = Pipeline::new(layout, profile, &settings, &store, "");
+            pipe.dry_run = true;
+            let res = pipe.process(&mut job);
+            for s in &res.steps {
+                println!("   ⎿ {s}");
+            }
+            for w in &res.warnings {
+                println!("   ⚠ {w}");
+            }
+            if let Some(e) = &res.error {
+                println!("   ✗ 失败：{e}");
+            }
+
+            // ---- 4) 产物清单 ----
+            println!("③ 产物");
+            let dir = store.dir_of(&job.id);
+            if let Ok(rd) = std::fs::read_dir(&dir) {
+                let mut items: Vec<_> = rd.flatten().map(|e| e.path()).collect();
+                items.sort();
+                for p in items {
+                    let size = std::fs::metadata(&p).map(|m| m.len()).unwrap_or(0);
+                    println!(
+                        "   {size:>9} B  {}",
+                        p.file_name()
+                            .map(|n| n.to_string_lossy().to_string())
+                            .unwrap_or_default()
+                    );
+                }
+            }
+            println!("{}", "-".repeat(62));
+            println!("结束状态：{:?}", job.state);
+            Ok(())
+        }
         "record-test" => {
             // 录制冒烟测试：录 10 秒并报告产出，用来验证「录屏 + 系统声音 + 麦克风」链路。
             use vca_platform::capture::{CaptureParams, CaptureSession};

@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vca-worker"
+version = "0.1.0"
+description = "VibeClassAgent 算法侧 Worker（转写 / 文档 / 截图去重）"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+vca-worker = "vca_worker.__main__:main"
+
+[tool.setuptools]
+packages = ["vca_worker"]

@@ -1,0 +1,11 @@
+[package]
+name = "vca-ipc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "插件通信契约：JSON-RPC over stdio 的消息与载荷类型"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true

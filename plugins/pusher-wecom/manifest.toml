@@ -1,0 +1,16 @@
+[plugin]
+id = "pusher.wecom"
+name = "pusher-wecom"
+version = "0.1.0"
+api_version = "1"
+kind = "pusher"
+
+[runtime]
+type = "process"
+entry = "vca-plugin-pusher-wecom"
+timeout_sec = 30
+restart = "on-failure"
+
+[permissions]
+
+[config]

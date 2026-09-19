@@ -1,0 +1,24 @@
+# ============================================================================
+# 时间表示例（作息骨架） 格式示例，请按本校实际作息修改
+# ----------------------------------------------------------------------------
+# 时间表 = 一天的作息骨架；课程表 = 在骨架上填充课程。二者严格分离。
+# 来源二选一：source: manual（自主配置）| classisland（导入）
+# 注意：程序出厂时不含任何预置作息，以下均为虚构示例。
+# ============================================================================
+
+timetables:
+  - id: default
+    name: "<学校作息名称>"
+    is_active: true
+    source: manual
+    slots:
+      # type: class = 上课节；type: break = 课间/休息段
+      - { period: 1, start: "08:00", end: "08:45", type: class }
+      - { period: 2, start: "08:55", end: "09:40", type: class }
+      - { start: "09:40", end: "10:00", type: break, name: 大课间 }
+      - { period: 3, start: "10:00", end: "10:45", type: class }
+      - { period: 4, start: "10:55", end: "11:40", type: class }
+      - { start: "12:10", end: "13:30", type: break, name: 午餐午休 }
+      - { period: 5, start: "14:00", end: "14:45", type: class }
+      - { period: 6, start: "14:55", end: "15:40", type: class }
+      - { start: "17:30", end: "18:30", type: break, name: 晚餐 }

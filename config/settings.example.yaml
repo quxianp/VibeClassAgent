@@ -1,0 +1,106 @@
+# ============================================================================
+# VibeClassAgent 主配置示例
+# ----------------------------------------------------------------------------
+# 复制为 config/profiles/<profile>/settings.yaml 后按需修改。
+# 本文件**不含任何密钥**，可安全入库；密钥一律走环境变量或 secrets.env。
+# 默认值为「极简模式」（策划书 7.3），面向低配卡顿的希沃一体机。
+# ============================================================================
+
+# 运行身份（多教师共用时的数据隔离键）；留空则使用当前 Windows 登录账户
+profile: ""
+
+record:
+  fps: 8                        # 极简默认 8fps（标准档为 10）
+  height: 720                   # 720p（标准档为 1080）
+  crf: 30                       # 极简 CRF 30（标准档为 28）
+  screenshot_interval_secs: 180 # 截图间隔 180s（标准档为 90）
+  audio_source: both            # system | mic | both
+  monitor: 0                    # 显示器索引
+
+transcriber:
+  engine: local                 # local（默认，零调用费，不上云）| cloud
+  model: tiny                   # tiny（极简）| small | medium
+  language: zh
+  threads: 0                    # 0 = 自动 min(2, N-1)
+
+llm:
+  # 仅用于「要点提取」；转写为纯本地，不需要 Key
+  # 真实 Key 请放入 .env 或 secrets.env，不要写在这里
+  base_url: "https://<你的模型服务地址>/v1"
+  model: "<模型名>"
+  prompt_template: null
+
+push:
+  provider: ""                  # wecom | qq | wechat-personal（用户自选）
+  target: null                  # 目标会话 ID
+  max_retries: 3
+
+doc:
+  formats: ["docx", "pdf"]      # 极简模式可仅保留 docx 以省 CPU
+  max_screenshots: 4
+
+cleanup:
+  retention_hours: 72           # 保留 72 小时
+  start_from: push-success      # 倒计时起点：推送成功时刻
+
+performance:
+  profile: minimal              # minimal（默认）| standard
+
+ui:
+  tray_icon: true               # 仅一个小任务栏图标，无气泡无弹窗
+  tray_badge: false             # 录制中角标，默认关
+
+processing_windows:
+  - name: 午休
+    start: "14:20"
+    end: "15:25"
+    scope: morning
+    max_concurrent: 1
+  - name: 放学后
+    start: "20:35"
+    end: "21:35"
+    scope: afternoon
+    max_concurrent: 1
+  - name: 晚自习后
+    start: "23:35"
+    end: "23:59"
+    scope: evening
+    max_concurrent: 1
+
+overlay:
+  # 桌面悬浮窗：下课后 5 分钟在右上角显示，上课前 2 分钟自动关闭
+  enabled: true
+  text: "Agent Overrr :)"
+  show_delay_minutes: 5        # 下课后延迟显示
+  hide_before_minutes: 2       # 上课前提前关闭
+  fallback_minutes: 30         # 当天无后续课程时的兜底显示时长
+  margin_top: 16               # 距屏幕上边距（像素）
+  margin_right: 16             # 距屏幕右边距（像素）
+  width: 240
+  height: 72
+  bg_color: "#1F6FEB"
+  text_color: "#FFFFFF"
+  font_size: 18
+  record_only: false           # true 则只对「勾选录制」的课显示
+  font_face: "Consolas"        # 字体
+  liquid_glass: true           # 液态玻璃背景（亚克力模糊）
+  glass_alpha: 160             # 玻璃不透明度 0-255
+  use_system_accent: true      # 采用 Windows 系统主机色作为玻璃色调
+
+term:
+  # 学期对齐：用于把「单周/双周」映射到真实日期。
+  # 各校「第 1 周」定义不同，必须显式给出，程序不猜。
+  # 留空则退回「按自然周序号奇偶」，可能与学校口径不一致（启动时会告警）。
+  first_monday: ""             # 如 "2026-09-01"（本学期第 1 周的周一）
+  first_week_parity: odd       # 第 1 周是单周还是双周：odd / even
+
+plugins:
+  # 插件路由：把某个处理步骤交给外部插件执行（留空则用内置实现）。
+  # 插件目录：<配置根目录的同级>/plugins
+  # 安装：vca plugin install <插件目录>
+  push: ""                     # 如 "pusher.wecom"
+  transcribe: ""               # 如 "transcriber.local"
+  docgen: ""                   # 如 "doc.generator"
+
+backup:
+  schedule_dir: ""              # 存档备份路径（可选）

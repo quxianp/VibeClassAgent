@@ -1,0 +1,16 @@
+[plugin]
+id = "cleaner"
+name = "cleaner"
+version = "0.1.0"
+api_version = "1"
+kind = "cleaner"
+
+[runtime]
+type = "process"
+entry = "vca-plugin-cleaner"
+timeout_sec = 30
+restart = "on-failure"
+
+[permissions]
+
+[config]

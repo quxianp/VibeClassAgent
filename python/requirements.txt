@@ -1,0 +1,19 @@
+# VibeClassAgent 算法侧依赖
+# 说明：以下为「转写 / 文档 / 截图去重」所需；框架骨架不安装也可运行。
+# 安装：python -m pip install -r requirements.txt
+
+# --- 语音转写（本地，零调用费，不上云）---
+# faster-whisper 基于 CTranslate2，比 openai-whisper 更快、内存更低
+faster-whisper>=1.0.0
+# 极低配机器备选（CPU 友好、体积小）：按需二选一
+# whisper-cpp-python>=0.2.0
+
+# --- 文档生成 ---
+python-docx>=1.1.0
+
+# --- 截图去重（感知哈希）---
+Pillow>=10.0.0
+ImageHash>=4.3.0
+
+# --- 配置与校验 ---
+PyYAML>=6.0

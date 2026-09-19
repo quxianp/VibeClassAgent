@@ -1,0 +1,20 @@
+[package]
+name = "vca-engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "编排引擎：调度守护进程、录制联动、课后处理流水线"
+
+[dependencies]
+vca-core.workspace = true
+vca-ipc.workspace = true
+vca-platform.workspace = true
+vca-plugin-host.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml.workspace = true
+anyhow.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

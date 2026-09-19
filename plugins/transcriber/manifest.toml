@@ -1,0 +1,16 @@
+[plugin]
+id = "transcriber"
+name = "transcriber"
+version = "0.1.0"
+api_version = "1"
+kind = "transcriber"
+
+[runtime]
+type = "process"
+entry = "vca-plugin-transcriber"
+timeout_sec = 30
+restart = "on-failure"
+
+[permissions]
+
+[config]

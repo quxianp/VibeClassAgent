@@ -1,0 +1,16 @@
+[plugin]
+id = "linker"
+name = "screenshot-linker"
+version = "0.1.0"
+api_version = "1"
+kind = "linker"
+
+[runtime]
+type = "process"
+entry = "vca-plugin-linker"
+timeout_sec = 30
+restart = "on-failure"
+
+[permissions]
+
+[config]

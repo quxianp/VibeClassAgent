@@ -1,0 +1,18 @@
+[plugin]
+id = "pusher.wechat.personal"
+name = "个人微信推送（第三方协议）"
+version = "0.1.0"
+api_version = "1"
+kind = "pusher"
+risk_note = "使用第三方协议存在账号风险，请自行评估"
+
+[runtime]
+type = "process"
+entry = "vca-plugin-pusher-wechat-personal"
+timeout_sec = 30
+restart = "on-failure"
+
+[permissions]
+network = []
+
+[config]

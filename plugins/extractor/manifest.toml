@@ -1,0 +1,16 @@
+[plugin]
+id = "extractor"
+name = "extractor"
+version = "0.1.0"
+api_version = "1"
+kind = "extractor"
+
+[runtime]
+type = "process"
+entry = "vca-plugin-extractor"
+timeout_sec = 30
+restart = "on-failure"
+
+[permissions]
+
+[config]

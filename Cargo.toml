@@ -1,0 +1,58 @@
+# ============================================================================
+# VibeClassAgent - Rust workspace 根清单
+# ----------------------------------------------------------------------------
+# 说明：本文件是 Cargo workspace 的入口，聚合 crates/ 下的所有 crate。
+# 依赖版本统一在 [workspace.dependencies] 中声明，各 crate 用 workspace = true 引用。
+# 项目名（占位）：<项目名>；当前 crate 前缀 vca 取自工作区目录名 VibeClassAgent。
+# ============================================================================
+
+[workspace]
+resolver = "2"
+members = [
+    "crates/vca-cli",
+    "crates/vca-engine",
+    "crates/vca-core",
+    "crates/vca-ipc",
+    "crates/vca-plugin-host",
+    "crates/vca-platform",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+authors = ["<作者占位>"]
+description = "轻量级静默课堂录制与课后总结系统（框架骨架）"
+
+[workspace.dependencies]
+# --- 内部 crate ---
+vca-core = { path = "crates/vca-core" }
+vca-ipc = { path = "crates/vca-ipc" }
+vca-plugin-host = { path = "crates/vca-plugin-host" }
+vca-platform = { path = "crates/vca-platform" }
+vca-engine = { path = "crates/vca-engine" }
+
+# --- 外部依赖（框架骨架所需最小集合） ---
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+serde_yaml = "0.9"
+anyhow = "1"
+thiserror = "1"
+# clap 关闭彩色输出：a stream/anstyle-wincon 会间接引入 windows-sys，
+# 在 GNU 工具链下需要 dlltool 生成 raw-dylib 导入库。守护进程不需要彩色终端。
+clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter"] }
+# 说明：chrono 与 uuid 在骨架中尚未使用，暂不引入。
+# 二者（uuid 经 getrandom）在 windows-gnu 目标下会走 raw-dylib 链接，
+# 需要 dlltool 生成导入库；安装 MSVC C++ 工作负载后可安全恢复。
+# chrono = { version = "0.4", features = ["serde"] }
+# uuid = { version = "1", features = ["v4", "serde"] }
+
+[profile.release]
+opt-level = "z"
+lto = "thin"
+codegen-units = 1
+strip = true

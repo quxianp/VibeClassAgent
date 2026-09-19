@@ -1,0 +1,16 @@
+[plugin]
+id = "pusher"
+name = "recorder"
+version = "0.1.0"
+api_version = "1"
+kind = "recorder"
+
+[runtime]
+type = "process"
+entry = "vca-plugin-recorder"
+timeout_sec = 30
+restart = "on-failure"
+
+[permissions]
+
+[config]

@@ -1,0 +1,16 @@
+[plugin]
+id = "doc"
+name = "doc-generator"
+version = "0.1.0"
+api_version = "1"
+kind = "doc"
+
+[runtime]
+type = "process"
+entry = "vca-plugin-doc"
+timeout_sec = 30
+restart = "on-failure"
+
+[permissions]
+
+[config]

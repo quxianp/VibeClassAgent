@@ -163,9 +163,15 @@ fn main() -> Result<()> {
 
     // 双击 exe 时用户的控制台里没有任何父进程，输出会一闪而过、
     // 看起来像「程序打不开」。这里检测这种情况并改走交互菜单。
+    // 双击启动：同样进交互界面。
+    // 早期这里是一个独立的数字菜单，但菜单现在已经并进主界面
+    // （同一个提示符既认数字也认 / 命令），再留两套只会让文案、
+    // 配色和状态显示慢慢跑偏 —— 所以这里直接复用同一个入口。
     #[cfg(windows)]
     if std::env::args_os().len() <= 1 && vca_platform::session::launched_by_double_click() {
-        return interactive_menu();
+        let cli = Cli::parse();
+        let (layout, _) = build_layout(&cli);
+        return repl::run(&layout, cli.profile.as_deref().unwrap_or("default"));
     }
 
     let cli = Cli::parse();
@@ -213,87 +219,6 @@ fn main() -> Result<()> {
         Some(Command::Overlay { action, arg }) => cmd::overlay(&layout, &action, arg.as_deref()),
         Some(Command::Debug { action }) => cmd::debug(&layout, &action),
         Some(Command::Profile { action, name }) => cmd::profile(&layout, &action, name.as_deref()),
-    }
-}
-
-/// 双击启动时的交互菜单。
-///
-/// 目的：让不懂命令行的老师也能用双击 exe 不再是一闪而过，
-/// 而是一个能看懂的中文菜单。
-#[cfg(windows)]
-fn interactive_menu() -> Result<()> {
-    use std::io::Write;
-
-    loop {
-        println!();
-        println!("================================================================");
-        println!("  VibeClassAgent  静默课堂录制与课后总结系统");
-        println!("================================================================");
-        println!();
-        println!("  1  首次引导向导（**第一次使用请先跑这个**）");
-        println!("  2  环境自检 + 自动修复");
-        println!("  3  显示悬浮窗（看看效果，8 秒后消失）");
-        println!("  4  录制测试（录 10 秒，验证录屏录音是否正常）");
-        println!("  5  从 ClassIsland 导入课表");
-        println!("  6  预览今天的悬浮窗时序");
-        println!("  7  试运行守护进程（不真正录制 / 不真正推送）");
-        println!("  8  正式运行守护进程");
-        println!("  9  预览录像清理（不会真的删除）");
-        println!("  d  打开文档目录");
-        println!("  0  退出");
-        println!();
-        print!("请输入序号后回车：");
-
-        let _ = std::io::stdout().flush();
-        let mut line = String::new();
-        if std::io::stdin().read_line(&mut line).is_err() {
-            return Ok(());
-        }
-        let choice = line.trim();
-        println!();
-
-        let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("vca"));
-        let run = |args: &[&str]| -> Result<()> {
-            let st = std::process::Command::new(&exe).args(args).status();
-            match st {
-                Ok(s) if s.success() => {}
-                Ok(s) => println!("\n[命令结束，退出码 {:?}]", s.code()),
-                Err(e) => println!("\n[执行失败：{e}]"),
-            }
-            Ok(())
-        };
-
-        let _ = match choice {
-            "1" => run(&["setup"]),
-            "2" => run(&["doctor", "--fix"]),
-            "3" => run(&["overlay", "demo", "8"]),
-            "4" => run(&["debug", "record-test"]),
-            "5" => run(&["import", "classisland", ""]),
-            "6" => run(&["overlay", "plan"]),
-            "7" => run(&["run", "--dry-run"]),
-            "8" => run(&["run"]),
-            "9" => run(&["clean", "--dry-run"]),
-            "d" | "D" => {
-                let d = std::path::PathBuf::from("docs");
-                let d = if d.is_dir() {
-                    d
-                } else {
-                    std::path::PathBuf::from("../docs")
-                };
-                println!("文档目录：{}", d.display());
-                let _ = std::process::Command::new("explorer").arg(&d).spawn();
-                Ok(())
-            }
-            "0" | "q" | "quit" | "exit" => {
-                println!("再见。");
-                return Ok(());
-            }
-            "" => continue,
-            other => {
-                println!("无效的序号：{other}");
-                Ok(())
-            }
-        };
     }
 }
 

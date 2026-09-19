@@ -147,7 +147,6 @@ fn print_welcome(layout: &Layout, profile: &str) {
         version,
         c::RESET
     );
-    println!("  {}{}{}", c::MUTED, t("app.tagline"), c::RESET);
     println!();
 
     let settings_path = layout.profile_config_dir(profile).join("settings.yaml");
@@ -218,13 +217,39 @@ fn print_welcome(layout: &Layout, profile: &str) {
     }
 
     println!();
+
+    // 数字菜单：给不熟悉命令行的老师用（选哪一项就输哪个数字）。
+    // 斜杠命令在同一个提示符下并存 —— 输数字走菜单，输 / 开头走命令，
+    // 两者互不影响，也不需要切换模式。
+    println!("  {}{}{}", c::ACCENT, t("menu.title"), c::RESET);
+    for key in ["1", "2", "3", "4", "5", "6", "7", "8", "0"] {
+        println!(
+            "   {}{}{}  {}",
+            c::CYAN,
+            key,
+            c::RESET,
+            t(&format!("menu.{key}"))
+        );
+    }
+    println!();
+    println!("  {}{}{}", c::DIM, t("menu.hint"), c::RESET);
     println!("  {}{}{}", c::DIM, t("welcome.hint"), c::RESET);
     println!();
 }
 
 /// 命令分发。
+///
+/// 同一个提示符认两种输入：
+/// - **纯数字** → 菜单项（给老师用）；
+/// - **`/` 开头** → 斜杠命令（给开发者与脚本化用）。
 pub fn dispatch(layout: &Layout, profile: &str, line: &str) -> Result<Flow> {
     let line = line.trim();
+
+    // 数字菜单。放在最前面：老师只会输数字，不该被「只认命令」挡回去。
+    if let Ok(n) = line.parse::<u32>() {
+        return menu_action(layout, profile, n);
+    }
+
     if !line.starts_with('/') {
         println!("{}{} {}{}", c::MUTED, DOT, t("cmd.only_commands"), c::RESET);
         return Ok(Flow::Continue);
@@ -270,9 +295,56 @@ pub fn dispatch(layout: &Layout, profile: &str, line: &str) -> Result<Flow> {
     Ok(Flow::Continue)
 }
 
+/// 数字菜单的动作。
+///
+/// 与斜杠命令并存：老师输数字，开发者输 `/` 命令，同一个提示符都认。
+/// 菜单只放**老师真正会用到的**那几件（引导、检测、录制测试、处理、运行），
+/// 其余的排查类命令留在 `/` 里 —— 列太多反而让人不敢动。
+fn menu_action(layout: &Layout, profile: &str, n: u32) -> Result<Flow> {
+    match n {
+        1 => crate::cmd::setup(layout, Some(profile))?,
+        2 => crate::cmd::doctor(layout, true, Some(profile))?,
+        3 => crate::cmd::debug(layout, "record-test")?,
+        4 => process(layout, profile, &[])?,
+        5 => status(layout, profile)?,
+        6 => crate::cmd::run(layout, None, true)?,
+        7 => crate::cmd::run(layout, None, false)?,
+        8 => crate::cmd::clean(layout, true)?,
+        0 => return Ok(Flow::Quit),
+        other => {
+            println!(
+                "{}{} {}{}",
+                c::YELLOW,
+                DOT,
+                tf("menu.unknown", &[("n", &other.to_string())]),
+                c::RESET
+            );
+        }
+    }
+    Ok(Flow::Continue)
+}
+
 /// 帮助。
+///
+/// 分两区：上半是**数字菜单**（老师用），下半是**斜杠命令**（开发者用）。
+/// 早期版本把两者混在一张表里，结果老师看到一堆 `/plugin` `/market` 直接愣住。
 fn help() {
     println!("{}{} {}{}", c::ACCENT, DOT, t("cmd.help_title"), c::RESET);
+
+    println!();
+    println!("  {}{}{}", c::TEXT, t("cmd.help_menu_section"), c::RESET);
+    for key in ["1", "2", "3", "4", "5", "6", "7", "8", "0"] {
+        println!(
+            "   {}{}{}  {}",
+            c::CYAN,
+            key,
+            c::RESET,
+            t(&format!("menu.{key}"))
+        );
+    }
+
+    println!();
+    println!("  {}{}{}", c::TEXT, t("cmd.help_dev_section"), c::RESET);
     let rows: &[(&str, &str)] = &[
         ("/status", "cmd.status"),
         ("/jobs", "cmd.jobs"),
@@ -295,6 +367,7 @@ fn help() {
     for (k, key) in rows {
         println!("  {}{:<20}{} {}", c::CYAN, k, c::RESET, t(key));
     }
+
     println!();
     println!("  {}{}{}", c::DIM, t("cmd.help_footer"), c::RESET);
 }

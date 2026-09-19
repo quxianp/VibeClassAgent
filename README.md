@@ -8,7 +8,7 @@
 
 > **技术栈**：Rust 单语言，无 Python 运行时。
 > **平台**：Windows 10 及以上。
-> **测试**：188 个单元测试全绿。
+> **测试**：206 个单元测试全绿 ｜ clippy 零告警 ｜ fmt 无差异。
 
 ---
 
@@ -51,27 +51,47 @@ tools/whisper/models/ggml-*.bin   转写模型
 > 换机器时跑一次即可。脚本支持代理（`VCA_PROXY`）、已存在则跳过、多源自动回退。
 > 也可以自己准备这些文件放进去，或用环境变量指定路径。
 
-### 2. 编译
+### 2. 编译并运行
 
-```bash
-scripts\dev.cmd doctor      # 环境自检
-scripts\dev.cmd             # 直接进入交互界面
+**PowerShell 里注意两点**：当前目录下的脚本必须加 `.\` 前缀
+（不加的话 PowerShell 会把 `scripts` 当成模块名去找，报
+`The module 'scripts' could not be loaded`）；而且要先 cd 到项目根。
+
+```powershell
+cd D:\VibeClassAgent
+.\scripts\dev.cmd doctor      # 环境自检
+.\scripts\dev.cmd             # 编译并直接进入交互界面
 ```
+
+**不想 cd 的话，用绝对路径 + `&` 调用运算符**：
+
+```powershell
+& 'D:\VibeClassAgent\scripts\dev.cmd'
+& 'D:\VibeClassAgent\scripts\dev.cmd' plugin list
+```
+
+**或者绕过脚本直接跑二进制**（脚本只是帮你设好本地工具链的环境变量）：
+
+```powershell
+cd D:\VibeClassAgent
+.\target\debug\vca.exe
+```
+
+> 脚本内部会自己把工作目录切到项目根，所以**在哪个目录调用它都行** ——
+> 前提是路径本身找得到。
 
 首次编译约 1–3 分钟。
 
 ### 3. 用起来
 
-```bash
-vca                         # 交互界面（推荐）
-vca --help                  # 子命令一览
-```
-
-进入交互界面后：
+交互界面里直接输斜杠命令；命令行用法是 `vca <子命令>`（编译后位于
+`target\debug\vca.exe`）：
 
 ```
 > /status        总览：作业、组件就绪情况
 > /doctor fix    自检并自动生成配置
+> /model         列出模型并选择（从 API 自动拉取）
+> /paths         查看或修改数据/配置目录
 > /record-test   录 10 秒冒烟测试（含截图与合并）
 > /process       处理待办作业（转写 → 提取 → 文档 → 推送）
 > /help          全部命令
@@ -292,12 +312,21 @@ python scripts/package.py --no-model       # 不带模型，转写走云端
 
 ## 八、开发
 
-```bash
-scripts\dev.cmd doctor              # 自检
-scripts\dev.cmd -Check              # 只做 cargo check
-cargo test --workspace              # 188 个测试
-cargo clippy --all-targets -- -D warnings
+```powershell
+cd D:\VibeClassAgent
+.\scripts\dev.cmd doctor              # 自检
+.\scripts\dev.cmd -Check              # 只做 cargo check
+.\scripts\dev.cmd plugin list         # 插件列表
+.\scripts\dev.cmd debug e2e           # 端到端冒烟
+
+cargo test --workspace                # 206 个测试
+cargo clippy --all-targets            # 应当零告警
+cargo fmt --all                       # 应当无差异
 ```
+
+> 在 PowerShell 里跑当前目录的脚本**必须加 `.\`**，否则它会把
+> `scripts` 当模块名去找并报 `The module 'scripts' could not be loaded`。
+> 嫌麻烦就用绝对路径：`& 'D:\VibeClassAgent\scripts\dev.cmd' doctor`。
 
 本机若是受限环境（无 MSVC、有旧 MinGW 抢占 PATH），`scripts/dev.ps1` 已经处理了
 三处适配，细节见该文件里的注释：为 dlltool 准备 as.exe、用 CC/AR 指定 C 编译器

@@ -333,8 +333,7 @@ impl<'a> Pipeline<'a> {
         };
 
         let work = self.job_dir(job).join("_stt");
-        vca_platform::stt::transcribe(&cfg, Path::new(media), &work)
-            .map_err(|e| format!("{e}"))
+        vca_platform::stt::transcribe(&cfg, Path::new(media), &work).map_err(|e| format!("{e}"))
     }
 
     /// 调用 LLM 提取要点（付费 API / 免费额度 / 浏览器三种模式，见 `vca_platform::llm`）。
@@ -392,12 +391,9 @@ impl<'a> Pipeline<'a> {
 
         let interval = self.settings.record.screenshot_interval_secs.max(1) as u64;
         let refs = match shot_dir {
-            Some(dir) if dir.is_dir() => vca_platform::shots::build_refs(
-                &dir,
-                interval,
-                &segments,
-                limit,
-            ),
+            Some(dir) if dir.is_dir() => {
+                vca_platform::shots::build_refs(&dir, interval, &segments, limit)
+            }
             _ => Vec::new(),
         };
 
@@ -428,7 +424,9 @@ impl<'a> Pipeline<'a> {
     fn build_document(&self, job: &Job) -> Result<(Option<String>, Option<String>), String> {
         let dir = self.job_dir(job);
         let out_dir = {
-            let d = self.layout.docs_dir(self.profile, &job.date.replace('-', ""));
+            let d = self
+                .layout
+                .docs_dir(self.profile, &job.date.replace('-', ""));
             if d.as_os_str().is_empty() {
                 dir.clone()
             } else {

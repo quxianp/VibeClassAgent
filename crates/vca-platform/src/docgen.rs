@@ -114,7 +114,12 @@ impl DocInput {
     /// 全部关键词（去重）。
     pub fn all_keywords(&self) -> Vec<String> {
         let mut out: Vec<String> = Vec::new();
-        for k in self.summary.keywords.iter().chain(self.extra_keywords.iter()) {
+        for k in self
+            .summary
+            .keywords
+            .iter()
+            .chain(self.extra_keywords.iter())
+        {
             let k = k.trim();
             if !k.is_empty() && !out.iter().any(|x| x == k) {
                 out.push(k.to_string());
@@ -232,7 +237,7 @@ pub fn render_markdown(input: &DocInput) -> String {
         md.push_str("## 附：完整转写\n\n");
         md.push_str("> 由本地语音识别生成，可能存在识别错误，仅供检索参考。\n\n");
         md.push_str(input.transcript.trim());
-        md.push_str("\n");
+        md.push('\n');
     }
 
     md
@@ -444,8 +449,7 @@ pub fn write_docx(input: &DocInput, path: &Path) -> Result<()> {
         );
         for (i, p) in input.summary.points.iter().enumerate() {
             doc = doc.add_paragraph(
-                Paragraph::new()
-                    .add_run(Run::new().add_text(format!("{}. {p}", i + 1)).size(22)),
+                Paragraph::new().add_run(Run::new().add_text(format!("{}. {p}", i + 1)).size(22)),
             );
         }
         doc = doc.add_paragraph(Paragraph::new());
@@ -467,12 +471,10 @@ pub fn write_docx(input: &DocInput, path: &Path) -> Result<()> {
     // 关键词
     let kws = input.all_keywords();
     if !kws.is_empty() {
-        doc = doc.add_paragraph(
-            Paragraph::new().add_run(Run::new().add_text("关键词").size(28).bold()),
-        );
-        doc = doc.add_paragraph(
-            Paragraph::new().add_run(Run::new().add_text(kws.join("  ")).size(22)),
-        );
+        doc = doc
+            .add_paragraph(Paragraph::new().add_run(Run::new().add_text("关键词").size(28).bold()));
+        doc = doc
+            .add_paragraph(Paragraph::new().add_run(Run::new().add_text(kws.join("  ")).size(22)));
         doc = doc.add_paragraph(Paragraph::new());
     }
 
@@ -499,8 +501,7 @@ pub fn write_docx(input: &DocInput, path: &Path) -> Result<()> {
                 ),
             );
             doc = doc.add_paragraph(
-                Paragraph::new()
-                    .add_run(Run::new().add_image(Pic::new(&bytes).size(w_emu, h_emu))),
+                Paragraph::new().add_run(Run::new().add_image(Pic::new(&bytes).size(w_emu, h_emu))),
             );
             if !s.caption.trim().is_empty() {
                 doc = doc.add_paragraph(
@@ -534,9 +535,8 @@ pub fn write_docx(input: &DocInput, path: &Path) -> Result<()> {
             if line.trim().is_empty() {
                 continue;
             }
-            doc = doc.add_paragraph(
-                Paragraph::new().add_run(Run::new().add_text(line.trim()).size(19)),
-            );
+            doc = doc
+                .add_paragraph(Paragraph::new().add_run(Run::new().add_text(line.trim()).size(19)));
         }
     }
 
@@ -662,8 +662,10 @@ pub fn generate(input: &DocInput, out_dir: &Path, formats: &[String]) -> Result<
                 Err(e) => {
                     out.notes.push(format!("PDF 生成失败：{e}"));
                     // 保留 HTML，用户可以直接用浏览器打开另存为 PDF
-                    out.notes
-                        .push(format!("已保留网页版本，可用浏览器打开后另存为 PDF：{}", html_path.display()));
+                    out.notes.push(format!(
+                        "已保留网页版本，可用浏览器打开后另存为 PDF：{}",
+                        html_path.display()
+                    ));
                 }
             },
             Err(e) => out.notes.push(format!("写 HTML 失败：{e}")),
@@ -785,7 +787,10 @@ mod tests {
         assert!(html.contains("A4"));
         // 中文字体必须用系统自带的名字，否则 PDF 会掉字
         assert!(html.contains("Microsoft YaHei"));
-        assert!(html.contains("page-break-inside: avoid"), "截图不应被分页截断");
+        assert!(
+            html.contains("page-break-inside: avoid"),
+            "截图不应被分页截断"
+        );
     }
 
     #[test]

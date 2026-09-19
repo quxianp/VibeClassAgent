@@ -237,11 +237,7 @@ pub fn resolve_encoder(ffmpeg: &Path, want: VideoEncoder) -> (VideoEncoder, Opti
         VideoEncoder::Auto => {
             // 集显 QSV 是一体机上最划算的选择：CPU 占用最低。
             // 依次实测，碰上第一个能用的就收工；全都不能用则退软件编码。
-            for cand in [
-                VideoEncoder::Qsv,
-                VideoEncoder::Nvenc,
-                VideoEncoder::Amf,
-            ] {
+            for cand in [VideoEncoder::Qsv, VideoEncoder::Nvenc, VideoEncoder::Amf] {
                 if probe_encoder(ffmpeg, cand) {
                     return (cand, None);
                 }
@@ -631,10 +627,7 @@ impl CaptureSession {
 
     /// 停止录制：先让 ffmpeg 优雅收尾（写容器索引），超时再强杀。
     pub fn stop(&mut self) -> std::io::Result<()> {
-        let seconds = self
-            .started_at
-            .map(|t| t.elapsed().as_secs())
-            .unwrap_or(0);
+        let seconds = self.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0);
 
         // ---- 先停音频：它写的是 WAV，需要回填长度头 ----
         if let Some(handle) = self.audio_handle.take() {
@@ -693,10 +686,7 @@ impl CaptureSession {
     pub fn finalize(&self) -> std::io::Result<CaptureOutcome> {
         let mut outcome = CaptureOutcome {
             raw_video: self.video_temp.is_file().then(|| self.video_temp.clone()),
-            seconds: self
-                .started_at
-                .map(|t| t.elapsed().as_secs())
-                .unwrap_or(0),
+            seconds: self.started_at.map(|t| t.elapsed().as_secs()).unwrap_or(0),
             notes: self.notes.clone(),
             ..Default::default()
         };
@@ -770,9 +760,10 @@ impl CaptureSession {
             outcome.video = Some(self.output.clone());
         } else {
             let err = String::from_utf8_lossy(&out.stderr);
-            outcome
-                .notes
-                .push(format!("收尾合并失败：{}", err.trim().chars().take(300).collect::<String>()));
+            outcome.notes.push(format!(
+                "收尾合并失败：{}",
+                err.trim().chars().take(300).collect::<String>()
+            ));
         }
         Ok(outcome)
     }
@@ -841,12 +832,7 @@ mod tests {
     #[test]
     fn record_args_target_matroska_and_no_dshow() {
         let p = CaptureParams::default();
-        let args = build_record_args(
-            &p,
-            VideoEncoder::X264,
-            Path::new("C:/tmp/video.mkv"),
-            None,
-        );
+        let args = build_record_args(&p, VideoEncoder::X264, Path::new("C:/tmp/video.mkv"), None);
         let joined = args.join(" ");
         // 中间容器必须是 matroska：mp4 被强杀会丢 moov 导致整段作废
         assert!(joined.contains("matroska"));

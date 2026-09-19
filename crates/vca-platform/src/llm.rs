@@ -198,15 +198,39 @@ pub struct LlmConfig {
     pub browser: crate::browser_bot::BrowserBotConfig,
 }
 
+/// 判断一个配置值是不是**模板占位符**。
+///
+/// 配置模板里写的是 `<模型名>`、`<你的模型服务地址>` 这类东西。
+/// 用户没改时它们既不是空串、也不是合法值 —— 不识别的话，
+/// 界面会显示成「已配置」，直到课后处理调用的那一刻才失败。
+pub fn is_placeholder(s: &str) -> bool {
+    let t = s.trim();
+    if t.is_empty() {
+        return false;
+    }
+    if t.starts_with('<') && t.ends_with('>') {
+        return true;
+    }
+    t.contains("<你的") || t.starts_with("你的")
+}
+
 impl LlmConfig {
     /// 是否已配置完整（按模式判断）。
+    ///
+    /// 注意会**排除模板占位符**：配置模板里留的是 `<模型名>`、
+    /// `<你的模型服务地址>`，用户没改时它们既非空、也不是合法值。
+    /// 不排除的话，界面上会显示成「已配置：<模型名>」——
+    /// 看着像配好了，实际一调用就失败。
     pub fn is_configured(&self) -> bool {
         match self.mode {
             LlmMode::BrowserBot => self.browser.is_ready(),
             _ => {
-                !self.effective_base_url().trim().is_empty()
+                let base = self.effective_base_url();
+                !base.trim().is_empty()
+                    && !is_placeholder(&base)
                     && !self.api_key.trim().is_empty()
                     && !self.model.trim().is_empty()
+                    && !is_placeholder(&self.model)
             }
         }
     }
@@ -550,6 +574,54 @@ pub fn render_summary_text(course: &str, date: &str, s: &LessonSummary) -> Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn placeholder_is_recognised() {
+        // 配置模板里的占位符必须被识破，否则界面会显示成「已配置」
+        assert!(is_placeholder("<模型名>"));
+        assert!(is_placeholder("  <你的模型服务地址> "));
+        assert!(is_placeholder("你的模型服务地址"));
+        // 真实值不能被误判
+        assert!(!is_placeholder("deepseek-chat"));
+        assert!(!is_placeholder("https://api.deepseek.com/v1"));
+        assert!(!is_placeholder(""));
+    }
+
+    #[test]
+    fn config_with_placeholders_is_not_configured() {
+        let cfg = LlmConfig {
+            provider: "custom".into(),
+            base_url: "https://<你的模型服务地址>/v1".into(),
+            api_key: "sk-real".into(),
+            model: "<模型名>".into(),
+            ..Default::default()
+        };
+        // 模板原样留着时不能算已配置 —— 否则课后处理会在调用那一刻才炸
+        assert!(!cfg.is_configured());
+
+        let ok = LlmConfig {
+            base_url: "https://api.deepseek.com/v1".into(),
+            api_key: "sk-real".into(),
+            model: "deepseek-chat".into(),
+            ..Default::default()
+        };
+        assert!(ok.is_configured());
+    }
+
+    #[test]
+    fn models_endpoint_strips_chat_suffix() {
+        // 用户可能把 base_url 一直填到 /chat/completions，取模型列表要剥回去
+        let cfg = LlmConfig {
+            base_url: "https://api.deepseek.com/v1/chat/completions".into(),
+            ..Default::default()
+        };
+        assert_eq!(cfg.models_endpoint(), "https://api.deepseek.com/v1/models");
+        let cfg2 = LlmConfig {
+            base_url: "https://api.deepseek.com/v1/".into(),
+            ..Default::default()
+        };
+        assert_eq!(cfg2.models_endpoint(), "https://api.deepseek.com/v1/models");
+    }
 
     #[test]
     fn config_requires_all_fields() {

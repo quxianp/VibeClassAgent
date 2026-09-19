@@ -299,7 +299,9 @@ impl CdpSession {
             cmd.arg("--headless=new");
         }
         cmd.arg(cfg.adapter().url);
-        cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        cmd.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
         #[cfg(windows)]
         {
             use std::os::windows::process::CommandExt;
@@ -312,9 +314,12 @@ impl CdpSession {
         let port = wait_for_devtools_port(&profile, Duration::from_secs(30))
             .context("等待浏览器调试端口超时")?;
 
-        let ws_url = format!("ws://127.0.0.1:{port}/devtools/page/{}", page_target_id(port)?);
-        let (socket, _resp) =
-            tungstenite::connect(ws_url.as_str()).with_context(|| format!("连接 CDP 失败: {ws_url}"))?;
+        let ws_url = format!(
+            "ws://127.0.0.1:{port}/devtools/page/{}",
+            page_target_id(port)?
+        );
+        let (socket, _resp) = tungstenite::connect(ws_url.as_str())
+            .with_context(|| format!("连接 CDP 失败: {ws_url}"))?;
 
         Ok(Self {
             child,

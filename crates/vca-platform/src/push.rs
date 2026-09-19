@@ -34,7 +34,9 @@ impl Provider {
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "wecom" | "企业微信" => Some(Self::WeCom),
-            "qq" | "qq-official" | "qq_official" | "官方qq" | "qq官方" => Some(Self::QqOfficial),
+            "qq" | "qq-official" | "qq_official" | "官方qq" | "qq官方" => {
+                Some(Self::QqOfficial)
+            }
             "onebot" | "onebot11" | "napcat" | "lagrange" | "gocqhttp" | "第三方qq" => {
                 Some(Self::OneBot)
             }
@@ -296,7 +298,11 @@ impl OneBotPusher {
     }
 
     /// 调用一个 OneBot action。
-    fn call(&self, action: &str, payload: serde_json::Value) -> Result<serde_json::Value, PushError> {
+    fn call(
+        &self,
+        action: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, PushError> {
         let base = self.cfg.endpoint.trim().trim_end_matches('/');
         let url = format!("{base}/{action}");
         let mut headers = String::from("Content-Type: application/json\r\n");
@@ -389,7 +395,9 @@ impl Pusher for OneBotPusher {
             }
         }
 
-        Ok(PushOutcome::ok(message_id.unwrap_or_else(|| "onebot".into())))
+        Ok(PushOutcome::ok(
+            message_id.unwrap_or_else(|| "onebot".into()),
+        ))
     }
 }
 
@@ -481,7 +489,10 @@ impl QqOfficialPusher {
         // 提前 5 分钟过期，避免边界上用了刚好失效的 token
         let ttl = expires.saturating_sub(300).max(60);
         if let Ok(mut g) = self.token_cache.lock() {
-            *g = Some((token.clone(), std::time::Instant::now() + std::time::Duration::from_secs(ttl)));
+            *g = Some((
+                token.clone(),
+                std::time::Instant::now() + std::time::Duration::from_secs(ttl),
+            ));
         }
         Ok(token)
     }
@@ -498,9 +509,7 @@ impl QqOfficialPusher {
     fn post(&self, path: &str, payload: serde_json::Value) -> Result<serde_json::Value, PushError> {
         let token = self.access_token()?;
         let url = format!("{}{path}", self.base());
-        let headers = format!(
-            "Content-Type: application/json\r\nAuthorization: QQBot {token}\r\n"
-        );
+        let headers = format!("Content-Type: application/json\r\nAuthorization: QQBot {token}\r\n");
         let resp = http::request(
             "POST",
             &url,
@@ -534,16 +543,14 @@ impl Pusher for QqOfficialPusher {
 
         // 1) 先发文本：这是最可靠的一步
         let mut sid = String::new();
-        match self.post(
-            &format!("{}/messages", self.target_path()),
-            serde_json::json!({ "content": text, "msg_type": 0 }),
-        ) {
-            Ok(v) => {
-                if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
-                    sid = id.to_string();
-                }
+        {
+            let v = self.post(
+                &format!("{}/messages", self.target_path()),
+                serde_json::json!({ "content": text, "msg_type": 0 }),
+            )?;
+            if let Some(id) = v.get("id").and_then(|x| x.as_str()) {
+                sid = id.to_string();
             }
-            Err(e) => return Err(e),
         }
 
         // 2) 再尽力上传文件（失败只记日志，不影响整体判定）
@@ -610,7 +617,7 @@ impl Pusher for QqOfficialPusher {
 /// 标准 base64 编码（不引第三方库：这里只有一处需求）。
 pub fn base64_encode(data: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((data.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
     for chunk in data.chunks(3) {
         let b = [
             chunk[0],
@@ -942,8 +949,19 @@ mod tests {
         assert_eq!(Provider::parse("qq"), Some(Provider::QqOfficial));
         assert_eq!(Provider::parse("官方QQ"), Some(Provider::QqOfficial));
         assert_eq!(Provider::parse("qq-official"), Some(Provider::QqOfficial));
-        for alias in ["onebot", "onebot11", "napcat", "lagrange", "gocqhttp", "第三方QQ"] {
-            assert_eq!(Provider::parse(alias), Some(Provider::OneBot), "别名 {alias}");
+        for alias in [
+            "onebot",
+            "onebot11",
+            "napcat",
+            "lagrange",
+            "gocqhttp",
+            "第三方QQ",
+        ] {
+            assert_eq!(
+                Provider::parse(alias),
+                Some(Provider::OneBot),
+                "别名 {alias}"
+            );
         }
     }
 

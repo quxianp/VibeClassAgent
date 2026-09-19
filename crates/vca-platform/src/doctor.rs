@@ -164,7 +164,9 @@ pub fn run_all() -> Vec<CheckItem> {
             .or_else(|| crate::stt::find_model("tiny"));
         match model {
             Some(p) => {
-                let mb = std::fs::metadata(&p).map(|m| m.len() / 1048576).unwrap_or(0);
+                let mb = std::fs::metadata(&p)
+                    .map(|m| m.len() / 1048576)
+                    .unwrap_or(0);
                 CheckItem {
                     name: "语音模型".to_string(),
                     ok: true,

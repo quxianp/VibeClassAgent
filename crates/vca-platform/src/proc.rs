@@ -17,7 +17,9 @@ pub const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// 拿返回值自行改 `stdout`/`stderr` 即可，`CREATE_NO_WINDOW` 已经设好。
 pub fn silent(program: impl AsRef<OsStr>) -> Command {
     let mut cmd = Command::new(program);
-    cmd.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null());
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;

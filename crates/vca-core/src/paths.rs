@@ -116,6 +116,31 @@ pub fn is_writable(dir: &Path) -> bool {
     }
 }
 
+/// 便携布局的基准目录。
+///
+/// 正常情况就是程序所在目录；但开发形态（`cargo run`）下 exe 在
+/// `target/debug` 或 `target/release`，数据放那儿既会被 `cargo clean` 清掉，
+/// 又让用户在仓库根目录下找不到，所以要上溯到仓库根。
+fn portable_base() -> PathBuf {
+    let exe_dir = program_dir();
+    let name = exe_dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let parent_name = exe_dir
+        .parent()
+        .and_then(|p| p.file_name())
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+
+    if (name == "debug" || name == "release") && parent_name == "target" {
+        if let Some(root) = exe_dir.parent().and_then(|p| p.parent()) {
+            return root.to_path_buf();
+        }
+    }
+    exe_dir
+}
+
 /// 目录布局解析器。
 #[derive(Debug, Clone)]
 pub struct Layout {
@@ -138,8 +163,13 @@ impl Layout {
     ///
     /// 这是默认选择 —— 整个程序连同数据都在一个文件夹里，
     /// 拷走就能换机器，不碰系统盘。
+    ///
+    /// 开发形态要特殊处理：`cargo run` 时 exe 在 `target/debug/`，
+    /// 照字面把数据放进那里有两个坏处 —— `cargo clean` 一跑全没了，
+    /// 而且用户在自己的仓库根目录下根本找不到它们。所以识别出
+    /// 「exe 位于 `target/{debug,release}`」时，基准目录上溯到仓库根。
     pub fn portable() -> Self {
-        let base = program_dir();
+        let base = portable_base();
         Self {
             data_root: base.join("data"),
             config_root: base.join("config"),

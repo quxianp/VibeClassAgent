@@ -174,7 +174,10 @@ fn ensure() {
 /// 当前语种。
 pub fn lang() -> String {
     ensure();
-    current().lock().map(|c| c.clone()).unwrap_or_else(|_| DEFAULT_LANG.into())
+    current()
+        .lock()
+        .map(|c| c.clone())
+        .unwrap_or_else(|_| DEFAULT_LANG.into())
 }
 
 /// 取一条文案。缺 key 时返回 key 本身（便于一眼看出漏翻）。

@@ -402,7 +402,12 @@ mod tests {
         assert_eq!(all.len(), 4);
         let kept = dedupe(&all, DEFAULT_THRESHOLD, 8);
         // 重复的三张只留一张，第四张不同要保留
-        assert_eq!(kept.len(), 2, "实际保留 {:?}", kept.iter().map(|k| k.seq).collect::<Vec<_>>());
+        assert_eq!(
+            kept.len(),
+            2,
+            "实际保留 {:?}",
+            kept.iter().map(|k| k.seq).collect::<Vec<_>>()
+        );
         assert_eq!(kept[0].seq, 1);
         assert_eq!(kept[1].seq, 4);
         let _ = std::fs::remove_dir_all(&dir);
@@ -444,7 +449,10 @@ mod tests {
         make_jpeg(&dir.join("shot00001.jpg"), 10);
         make_jpeg(&dir.join("shot00002.jpg"), 220);
 
-        let segs = vec![seg(0, 60_000, "第一段讲解"), seg(60_000, 120_000, "第二段讲解")];
+        let segs = vec![
+            seg(0, 60_000, "第一段讲解"),
+            seg(60_000, 120_000, "第二段讲解"),
+        ];
         let refs = build_refs(&dir, 60, &segs, 8);
         assert!(!refs.is_empty());
         assert_eq!(refs[0].at_ms, 0);

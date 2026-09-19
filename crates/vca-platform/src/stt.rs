@@ -320,9 +320,7 @@ pub fn transcribe(cfg: &SttConfig, media: &Path, work_dir: &Path) -> Result<Tran
         SttEngine::Local => transcribe_local(&cfg.local, media, work_dir),
         SttEngine::Cloud => {
             if !cfg.cloud.is_configured() {
-                return Err(anyhow!(
-                    "云端转写未配置完整（需要 base_url 与 api_key）"
-                ));
+                return Err(anyhow!("云端转写未配置完整（需要 base_url 与 api_key）"));
             }
             transcribe_cloud(&cfg.cloud, media, work_dir)
         }
@@ -352,11 +350,7 @@ pub fn transcribe(cfg: &SttConfig, media: &Path, work_dir: &Path) -> Result<Tran
 }
 
 /// 本地转写。
-pub fn transcribe_local(
-    cfg: &LocalSttConfig,
-    media: &Path,
-    work_dir: &Path,
-) -> Result<Transcript> {
+pub fn transcribe_local(cfg: &LocalSttConfig, media: &Path, work_dir: &Path) -> Result<Transcript> {
     let started = Instant::now();
 
     let bin = if cfg.binary.as_os_str().is_empty() {
@@ -488,11 +482,7 @@ fn read_whisper_output(prefix: &Path) -> (String, Vec<Segment>) {
 }
 
 /// 云端转写（OpenAI 兼容接口）。
-pub fn transcribe_cloud(
-    cfg: &CloudSttConfig,
-    media: &Path,
-    work_dir: &Path,
-) -> Result<Transcript> {
+pub fn transcribe_cloud(cfg: &CloudSttConfig, media: &Path, work_dir: &Path) -> Result<Transcript> {
     let started = Instant::now();
     let mp3 = work_dir.join("stt_up.mp3");
     to_mp3(media, &mp3)?;
@@ -511,22 +501,10 @@ pub fn transcribe_cloud(
         ("language", cfg.language.as_str()),
         ("response_format", "json"),
     ];
-    let (ct, body) = http::multipart(
-        &fields,
-        Some(("file", "audio.mp3", data.as_slice())),
-    );
-    let headers = format!(
-        "{ct}Authorization: Bearer {}\r\n",
-        cfg.api_key.trim()
-    );
-    let resp = http::request(
-        "POST",
-        &cfg.endpoint(),
-        &headers,
-        &body,
-        cfg.timeout_ms,
-    )
-    .map_err(|e| anyhow!("调用云端转写失败: {e}"))?;
+    let (ct, body) = http::multipart(&fields, Some(("file", "audio.mp3", data.as_slice())));
+    let headers = format!("{ct}Authorization: Bearer {}\r\n", cfg.api_key.trim());
+    let resp = http::request("POST", &cfg.endpoint(), &headers, &body, cfg.timeout_ms)
+        .map_err(|e| anyhow!("调用云端转写失败: {e}"))?;
 
     if !resp.is_success() {
         return Err(anyhow!(
@@ -597,8 +575,11 @@ mod tests {
 
     #[test]
     fn cloud_endpoint_is_completed_once() {
-        let mut cfg = CloudSttConfig::default();
-        cfg.base_url = "https://api.openai.com/v1".into();
+        // 用结构体初始化而不是 Default 之后逐个赋值（clippy 会提醒，也更好读）
+        let mut cfg = CloudSttConfig {
+            base_url: "https://api.openai.com/v1".into(),
+            ..Default::default()
+        };
         assert_eq!(
             cfg.endpoint(),
             "https://api.openai.com/v1/audio/transcriptions"

@@ -60,6 +60,15 @@ const DOT: &str = "⏺";
 /// 结果标记。
 const ELBOW: &str = "⎿";
 
+/// 交互提示符。
+///
+/// **必须是纯文本。** rustyline 在 Windows 上遇到带 ANSI 转义的 prompt
+/// 会直接断言失败（`content should not be styled directly`，见
+/// `rustyline/src/tty/windows.rs`）—— 那不是显示异常，是 panic。
+/// 颜色由 rustyline 自己管理，不要嵌在这一串里。
+/// 有一条单元测试盯着这件事，别给它上色。
+const PROMPT: &str = "> ";
+
 /// 一次命令之后是否继续。
 #[derive(Debug, PartialEq, Eq)]
 pub enum Flow {
@@ -77,17 +86,14 @@ pub fn run(layout: &Layout, profile: &str) -> Result<()> {
     let mut rl = match rustyline::DefaultEditor::new() {
         Ok(r) => r,
         Err(e) => {
-            println!(
-                "{}",
-                tf("cmd.no_terminal", &[("err", &e.to_string())])
-            );
+            println!("{}", tf("cmd.no_terminal", &[("err", &e.to_string())]));
             return Ok(());
         }
     };
 
-    let prompt = format!("{}>{} ", c::ACCENT, c::RESET);
+    // 提示符见 PROMPT 的说明：必须纯文本，带 ANSI 会让 rustyline 直接 panic
     loop {
-        match rl.readline(&prompt) {
+        match rl.readline(PROMPT) {
             Ok(line) => {
                 let line = line.trim().to_string();
                 if line.is_empty() {
@@ -113,10 +119,7 @@ pub fn run(layout: &Layout, profile: &str) -> Result<()> {
             }
             Err(ReadlineError::Eof) => break,
             Err(e) => {
-                println!(
-                    "{}",
-                    tf("err.read_input", &[("err", &e.to_string())])
-                );
+                println!("{}", tf("err.read_input", &[("err", &e.to_string())]));
                 break;
             }
         }
@@ -133,13 +136,15 @@ fn print_welcome(layout: &Layout, profile: &str) {
     for line in logo.lines() {
         println!("  {}{}{}", c::ACCENT, line, c::RESET);
     }
+    // 版本号先算出来：写在 println! 的参数里会多一次临时分配（clippy 也提过）
+    let version = format!("v{}", vca_core::VERSION);
     println!(
         "  {}{}{}  {}{}{}",
         c::TEXT,
         t("app.name"),
         c::RESET,
         c::MUTED,
-        format!("v{}", vca_core::VERSION),
+        version,
         c::RESET
     );
     println!("  {}{}{}", c::MUTED, t("app.tagline"), c::RESET);
@@ -170,8 +175,10 @@ fn print_welcome(layout: &Layout, profile: &str) {
             s.llm.mode.as_str()
         };
 
-        // 模型：没配就明确说「未配置」，而不是显示空白让人猜
-        let model = if s.llm.model.trim().is_empty() {
+        // 模型：没配就明确说「未配置」，而不是显示空白让人猜。
+        // 还要挡住模板占位符 —— `<模型名>` 看着像配好了，其实是没填。
+        let raw_model = s.llm.model.trim();
+        let model = if raw_model.is_empty() || vca_platform::llm::is_placeholder(raw_model) {
             format!("{}{}{}", c::YELLOW, t("welcome.not_configured"), c::RESET)
         } else {
             let prov = if s.llm.provider.trim().is_empty() {
@@ -207,12 +214,7 @@ fn print_welcome(layout: &Layout, profile: &str) {
         };
         row(&t("welcome.label.push"), push);
     } else {
-        println!(
-            "  {}{}{}",
-            c::YELLOW,
-            t("welcome.need_setup"),
-            c::RESET
-        );
+        println!("  {}{}{}", c::YELLOW, t("welcome.need_setup"), c::RESET);
     }
 
     println!();
@@ -257,7 +259,10 @@ pub fn dispatch(layout: &Layout, profile: &str, line: &str) -> Result<Flow> {
                 "{}{} {}{}",
                 c::YELLOW,
                 DOT,
-                tf("cmd.unknown", &[("cmd", &format!("{}{}{}", c::BOLD, other, c::RESET))]),
+                tf(
+                    "cmd.unknown",
+                    &[("cmd", &format!("{}{}{}", c::BOLD, other, c::RESET))]
+                ),
                 c::RESET
             );
         }
@@ -436,7 +441,10 @@ fn jobs(layout: &Layout, profile: &str) -> Result<()> {
         if let Some(e) = &j.last_error {
             println!(
                 "     {}",
-                tf("jobs.last_error", &[("msg", &format!("{}{e}{}", c::RED, c::RESET))])
+                tf(
+                    "jobs.last_error",
+                    &[("msg", &format!("{}{e}{}", c::RED, c::RESET))]
+                )
             );
         }
     }
@@ -484,7 +492,14 @@ fn process(layout: &Layout, profile: &str, args: &[&str]) -> Result<()> {
 
     let started = std::time::Instant::now();
     for mut job in targets {
-        println!("  {}{} {} {}{}", c::CYAN, DOT, job.date, job.course, c::RESET);
+        println!(
+            "  {}{} {} {}{}",
+            c::CYAN,
+            DOT,
+            job.date,
+            job.course,
+            c::RESET
+        );
         let outcome = pipeline.process(&mut job);
         for s in &outcome.steps {
             println!("     {}{} {s}{}", c::MUTED, ELBOW, c::RESET);
@@ -505,7 +520,10 @@ fn process(layout: &Layout, profile: &str, args: &[&str]) -> Result<()> {
                 "     {}{} {}{}",
                 c::GREEN,
                 ELBOW,
-                tf("process.done_state", &[("state", &format!("{:?}", outcome.state))]),
+                tf(
+                    "process.done_state",
+                    &[("state", &format!("{:?}", outcome.state))]
+                ),
                 c::RESET
             );
         }
@@ -542,7 +560,11 @@ fn paths_cmd(layout: &Layout, args: &[&str]) -> Result<()> {
             c::RESET
         );
         println!("  {:<8}  {}", t("paths.data"), layout.data_root.display());
-        println!("  {:<8}  {}", t("paths.config"), layout.config_root.display());
+        println!(
+            "  {:<8}  {}",
+            t("paths.config"),
+            layout.config_root.display()
+        );
         println!(
             "  {:<8}  {}",
             t("paths.bootstrap"),
@@ -587,7 +609,10 @@ fn paths_cmd(layout: &Layout, args: &[&str]) -> Result<()> {
                 println!("{}{} {}{}", c::GREEN, DOT, t("paths.saved"), c::RESET);
                 println!("    {:<6}  {data}", t("paths.data"));
                 println!("    {:<6}  {cfg}", t("paths.config"));
-                println!("    {}", tf("paths.note", &[("file", &p.display().to_string())]));
+                println!(
+                    "    {}",
+                    tf("paths.note", &[("file", &p.display().to_string())])
+                );
                 println!();
                 println!("  {}{}{}", c::YELLOW, t("paths.move_note"), c::RESET);
                 println!("  {}{}{}", c::MUTED, t("paths.restart_note"), c::RESET);
@@ -684,8 +709,8 @@ fn model_cmd(layout: &Layout, profile: &str, args: &[&str]) -> Result<()> {
                 Ok(r) => r,
                 Err(_) => return Ok(()),
             };
-            let prompt = format!("{}  >{} ", c::ACCENT, c::RESET);
-            if let Ok(line) = rl.readline(&prompt) {
+            // 同上：prompt 不能带 ANSI，否则 rustyline 在 Windows 上会断言失败
+            if let Ok(line) = rl.readline("  > ") {
                 let line = line.trim();
                 if line.is_empty() {
                     return Ok(());
@@ -699,10 +724,7 @@ fn model_cmd(layout: &Layout, profile: &str, args: &[&str]) -> Result<()> {
             }
         }
         Err(e) => {
-            println!(
-                "  {}",
-                tf("model.fetch_failed", &[("err", &e.to_string())])
-            );
+            println!("  {}", tf("model.fetch_failed", &[("err", &e.to_string())]));
         }
     }
     Ok(())
@@ -796,6 +818,17 @@ mod tests {
     }
 
     #[test]
+    fn prompt_must_not_contain_ansi_escapes() {
+        // 这条盯着一个真实踩过的 panic：rustyline 在 Windows 上会断言
+        // "content should not be styled directly"，只要 prompt 里出现 ANSI 转义
+        // 就直接崩 —— 不是显示怪，是进程没了。
+        assert!(
+            !PROMPT.contains('\x1b'),
+            "提示符不能包含 ANSI 转义，否则 rustyline 会 panic: {PROMPT:?}"
+        );
+    }
+
+    #[test]
     fn all_ui_text_comes_from_locale_files() {
         // 界面文案一律走语言文件：这些 key 必须都能取到，
         // 取不到会返回 key 本身（界面上就会出现 "welcome.hint" 这种字面量）。
@@ -825,7 +858,8 @@ mod tests {
         // 纯 ASCII/制表符号，不能混入中文，否则对齐会乱
         for line in logo.lines() {
             assert!(
-                line.chars().all(|ch| !ch.is_ascii() || ch.is_ascii_graphic() || ch == ' '),
+                line.chars()
+                    .all(|ch| !ch.is_ascii() || ch.is_ascii_graphic() || ch == ' '),
                 "logo 里不该有非 ASCII 的可打印字符以外的东西: {line}"
             );
         }

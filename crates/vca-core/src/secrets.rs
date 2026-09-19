@@ -172,7 +172,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
 
         std::env::set_var("VCA_TEST_ALREADY_SET", "from-env");
-        std::fs::write(&p, "VCA_TEST_ALREADY_SET=from-file\nVCA_TEST_FRESH=from-file\n").unwrap();
+        std::fs::write(
+            &p,
+            "VCA_TEST_ALREADY_SET=from-file\nVCA_TEST_FRESH=from-file\n",
+        )
+        .unwrap();
 
         let n = load_into_env(&p);
         assert_eq!(

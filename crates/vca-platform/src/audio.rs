@@ -112,7 +112,10 @@ impl ComGuard {
             // RPC_E_CHANGED_MODE：本线程已用其它模式初始化过 COM。
             // 此时 COM 仍可用，只是不该由我们负责反初始化。
             0x8001_0106 => Ok(Self { owned: false }),
-            _ => Err(anyhow!("CoInitializeEx 失败: HRESULT {:#010x}", hr.0 as u32)),
+            _ => Err(anyhow!(
+                "CoInitializeEx 失败: HRESULT {:#010x}",
+                hr.0 as u32
+            )),
         }
     }
 }
@@ -300,7 +303,12 @@ pub struct AudioTrack {
 }
 
 /// 写 44 字节的标准 WAV 头（PCM）。
-fn write_wav_header(f: &mut File, sample_rate: u32, channels: u16, data_len: u32) -> std::io::Result<()> {
+fn write_wav_header(
+    f: &mut File,
+    sample_rate: u32,
+    channels: u16,
+    data_len: u32,
+) -> std::io::Result<()> {
     let bits = 16u16;
     let block_align = channels * bits / 8;
     let byte_rate = sample_rate * block_align as u32;
@@ -334,8 +342,8 @@ fn capture_one(
     let _com = ComGuard::new()?;
     let enumr = enumerator()?;
     let device = default_device(&enumr, render)?;
-    let client: IAudioClient = unsafe { device.Activate(CLSCTX_ALL, None) }
-        .context("激活 IAudioClient 失败")?;
+    let client: IAudioClient =
+        unsafe { device.Activate(CLSCTX_ALL, None) }.context("激活 IAudioClient 失败")?;
 
     let wf_ptr = unsafe { client.GetMixFormat() }.context("GetMixFormat 失败")?;
     if wf_ptr.is_null() {
@@ -381,8 +389,8 @@ fn capture_one(
 
     let result = (|| -> Result<()> {
         while !stop.load(Ordering::Relaxed) {
-            let packet = unsafe { capture.GetNextPacketSize() }
-                .context("GetNextPacketSize 失败")?;
+            let packet =
+                unsafe { capture.GetNextPacketSize() }.context("GetNextPacketSize 失败")?;
             if packet == 0 {
                 // 没有新数据时小睡，避免空转吃满一个核。
                 std::thread::sleep(std::time::Duration::from_millis(5));

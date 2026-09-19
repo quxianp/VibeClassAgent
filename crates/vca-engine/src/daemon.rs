@@ -433,7 +433,8 @@ impl Daemon {
                             &self.cfg.profile,
                             &today.to_string().replace('-', ""),
                         );
-                        match CaptureSession::new(params, &out).map(|s| s.with_shot_dir(&shot_dir)) {
+                        match CaptureSession::new(params, &out).map(|s| s.with_shot_dir(&shot_dir))
+                        {
                             Ok(mut sess) => {
                                 let engine_label = sess.engine_label();
                                 match sess.start() {
@@ -451,8 +452,8 @@ impl Daemon {
                                         let _ = self.store.save(&j);
                                         current_job = Some(j.id.clone());
                                         recorder = Some(sess);
-                                        last_shot = std::time::Instant::now()
-                                            - Duration::from_secs(3600);
+                                        last_shot =
+                                            std::time::Instant::now() - Duration::from_secs(3600);
                                     }
                                     Err(e) => {
                                         // 录制启动失败不崩溃，只记录；下轮会再试

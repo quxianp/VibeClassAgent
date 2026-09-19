@@ -889,10 +889,7 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
         "transcribe" => {
             // 转写冒烟测试：对指定媒体文件跑一次本地/云端转写并打印结果。
             // 用法：vca debug transcribe <文件> [work_dir]
-            let media = layout
-                .data_root
-                .join("_record_test")
-                .join("test.mp4");
+            let media = layout.data_root.join("_record_test").join("test.mp4");
             let media = if media.is_file() {
                 media
             } else {
@@ -1006,7 +1003,11 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
             };
             println!(
                 "   → 视频 {} / 音频 {} 路 / 截图 {} 张",
-                if outcome.video.is_some() { "有" } else { "无" },
+                if outcome.video.is_some() {
+                    "有"
+                } else {
+                    "无"
+                },
                 outcome.audio.len(),
                 outcome.screenshots.len()
             );

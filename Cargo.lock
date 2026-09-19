@@ -1514,6 +1514,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "vca-plugin-example"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "vca-plugin-host"
 version = "0.1.0"
 dependencies = [

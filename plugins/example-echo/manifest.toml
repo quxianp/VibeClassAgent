@@ -1,0 +1,21 @@
+# 插件清单
+# 说明：entry 是**相对本插件目录**的路径（宿主用 plugin_dir.join(entry) 定位），
+# 不是命令名。写成 vca-plugin-example 会找不到文件。
+# 构建方式见同目录 README.md。
+
+[plugin]
+id = "example.echo"
+name = "示例插件（回显）"
+version = "0.1.0"
+api_version = "1"
+kind = "pusher"
+
+[runtime]
+type = "process"
+entry = "bin/vca-plugin-example.exe"
+timeout_sec = 30
+restart = "on-failure"
+
+[permissions]
+
+[config]

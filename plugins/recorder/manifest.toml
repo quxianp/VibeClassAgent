@@ -1,13 +1,18 @@
 [plugin]
-id = "pusher"
-name = "recorder"
+# 注意：这里曾经是 "pusher"（从别的插件复制过来忘了改），
+# 结果是 recorder 与 pusher 撞 id —— 插件列表里显示成 "pusher / recorder"，
+# 按 id 查插件也会拿到错的。id 必须与目录名和 kind 对得上。
+id = "recorder"
+name = "静默录制"
 version = "0.1.0"
 api_version = "1"
 kind = "recorder"
 
 [runtime]
 type = "process"
-entry = "vca-plugin-recorder"
+# 注意：entry 是**相对本插件目录**的路径（宿主用 plugin_dir.join(entry) 定位），
+# 不是裸命令名。写 vca-plugin-recorder 会找不到文件。
+entry = "bin/vca-plugin-recorder.exe"
 timeout_sec = 30
 restart = "on-failure"
 

@@ -15,6 +15,7 @@ members = [
     "crates/vca-ipc",
     "crates/vca-plugin-host",
     "crates/vca-platform",
+    "crates/vca-plugin-example",
 ]
 # 工作区临时目录永远不属于 workspace：否则在 _tmp/ 里 cargo init 会被
 # 自动吸收成 member，并静默改写本文件（已踩过一次）。

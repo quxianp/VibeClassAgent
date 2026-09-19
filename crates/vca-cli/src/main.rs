@@ -16,6 +16,7 @@ use vca_core::paths::Layout;
 use vca_core::{PRODUCT_NAME, VERSION};
 
 mod cmd;
+mod repl;
 
 /// 顶层命令行。
 #[derive(Debug, Parser)]
@@ -144,6 +145,8 @@ enum Command {
         /// 动作：`panic` / `crash-info` / `paths` / `audio` / `record-test`。
         action: String,
     },
+    /// 交互式命令行界面（不带子命令时默认进入）。
+    Chat,
     /// profile 管理（多教师共用）。
     Profile {
         /// 动作：`list` / `show` / `new`。
@@ -169,7 +172,9 @@ fn main() -> Result<()> {
     let layout = build_layout(&cli);
 
     match cli.command {
-        None => cmd::print_banner(&layout, cli.profile.as_deref()),
+        // 不带子命令时进入交互界面：像 Claude Code 那样敲 `vca` 就直接开始用。
+        None => repl::run(&layout, cli.profile.as_deref().unwrap_or("default")),
+        Some(Command::Chat) => repl::run(&layout, cli.profile.as_deref().unwrap_or("default")),
         Some(Command::Import {
             source,
             arg,

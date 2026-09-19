@@ -580,7 +580,8 @@ impl Daemon {
                 if !handled_windows.contains(&key) {
                     handled_windows.push(key);
                     tracing::info!("进入处理窗口「{}」（scope={}）", w.name, w.scope);
-                    let _ = self.process_scope(&w.scope, &lessons, today);
+                    // 把正在录制的那个作业排除掉：它这会儿文件还没写完
+                    let _ = self.process_scope(&w.scope, &lessons, today, current_job.as_deref());
                 }
             }
 
@@ -630,11 +631,19 @@ impl Daemon {
     }
 
     /// 处理某个 scope 下的所有待办作业。
+    ///
+    /// `recording_job` 是**此刻正在录制**的作业 id，必须排除掉。
+    ///
+    /// 为什么：录制一开始就把作业标成 `Recorded` 并存盘，于是它立刻出现在
+    /// `pending()` 里。如果处理窗口恰好与上课时段重叠（用户把午休时段填错、
+    /// 或者时间表里没有像样的休息段），这个**还没写完的录像**就会被捞去处理，
+    /// 结果是「转写失败：没有可转写的音视频文件」，作业被无谓地标成 Failed。
     fn process_scope(
         &mut self,
         scope: &str,
         lessons: &[LessonInstance],
         today: LocalDate,
+        recording_job: Option<&str>,
     ) -> anyhow::Result<()> {
         let targets: Vec<String> = lessons
             .iter()
@@ -650,6 +659,14 @@ impl Daemon {
         let todo: Vec<_> = pending
             .into_iter()
             .filter(|j| targets.is_empty() || targets.contains(&j.id))
+            .filter(|j| {
+                if Some(j.id.as_str()) == recording_job {
+                    tracing::warn!("[{}] 正在录制中，本轮跳过（等它录完再处理）", j.id);
+                    false
+                } else {
+                    true
+                }
+            })
             .collect();
 
         if todo.is_empty() {

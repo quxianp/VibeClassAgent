@@ -47,6 +47,11 @@ python/.audio_device
 *.wav
 *.avi
 
+# ---- 第三方可执行体（体积大，不入库）----
+# ffmpeg 静态构建约 98 MB，由 _tmp/fetch_ffmpeg.py 之类的取材脚本获取，
+# 或由用户自行放置到 tools/ffmpeg/。
+/tools/
+
 # ---- 编辑器 / 系统 ----
 .vscode/
 .idea/

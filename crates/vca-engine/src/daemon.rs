@@ -20,7 +20,7 @@ use vca_core::schedule::{self, LessonInstance, OverlayTiming, OverlayWindow, Wee
 use vca_core::store::JobStore;
 use vca_core::time::{LocalDate, LocalDateTime};
 use vca_core::windows::{self, WindowSpec};
-use vca_platform::capture::{CaptureEngine, CaptureParams, CaptureSession};
+use vca_platform::capture::{CaptureParams, CaptureSession};
 use vca_platform::overlay::{self, OverlayStyle};
 use vca_platform::probe::{self, LoadLevel};
 
@@ -420,44 +420,48 @@ impl Daemon {
                             audio_source: self.settings.record.audio_source.clone(),
                             screenshot_interval_secs: self.settings.record.screenshot_interval_secs
                                 as u64,
+                            ..Default::default()
                         };
                         // 自适应降档
                         if let Ok(snap) = probe::sample_load() {
                             params.degrade(LoadLevel::from_snapshot(&snap));
                         }
 
-                        // 截图目录：Python 引擎由录制器自己抓（复用已解码帧，更省资源），
-                        // ffmpeg 引擎则由 daemon 用 GDI 单独抓。
-                        let _shot_dir = self.layout.screenshots_dir(
+                        // 截图由 ffmpeg 的第二路输出产出（与视频共用同一次采集，
+                        // 不再另开一路屏幕抓取，省一次拷贝）。
+                        let shot_dir = self.layout.screenshots_dir(
                             &self.cfg.profile,
                             &today.to_string().replace('-', ""),
                         );
-                        let mut sess = CaptureSession::new(CaptureEngine::Auto, params, &out)
-                            .with_python_dir(self.python_dir.clone())
-                            .with_shot_dir(_shot_dir);
-                        let engine_label = sess.engine_label();
-                        match sess.start() {
-                            Ok(()) => {
-                                tracing::info!(
-                                    "开始录制「{}」-> {}（引擎：{}）",
-                                    lesson.course,
-                                    out.display(),
-                                    engine_label
-                                );
-                                recording_engine = engine_label.to_string();
-                                let mut j = job;
-                                j.state = vca_core::job::JobState::Recorded;
-                                j.video_path = Some(out.to_string_lossy().to_string());
-                                j.audio_path =
-                                    sess.audio.as_ref().map(|p| p.to_string_lossy().to_string());
-                                let _ = self.store.save(&j);
-                                current_job = Some(j.id.clone());
-                                recorder = Some(sess);
-                                last_shot = std::time::Instant::now() - Duration::from_secs(3600);
+                        match CaptureSession::new(params, &out).map(|s| s.with_shot_dir(&shot_dir)) {
+                            Ok(mut sess) => {
+                                let engine_label = sess.engine_label();
+                                match sess.start() {
+                                    Ok(()) => {
+                                        tracing::info!(
+                                            "开始录制「{}」-> {}（引擎：{}）",
+                                            lesson.course,
+                                            out.display(),
+                                            engine_label
+                                        );
+                                        recording_engine = engine_label;
+                                        let mut j = job;
+                                        j.state = vca_core::job::JobState::Recorded;
+                                        j.video_path = Some(out.to_string_lossy().to_string());
+                                        let _ = self.store.save(&j);
+                                        current_job = Some(j.id.clone());
+                                        recorder = Some(sess);
+                                        last_shot = std::time::Instant::now()
+                                            - Duration::from_secs(3600);
+                                    }
+                                    Err(e) => {
+                                        // 录制启动失败不崩溃，只记录；下轮会再试
+                                        tracing::warn!("录制启动失败（将重试）: {e}");
+                                    }
+                                }
                             }
                             Err(e) => {
-                                // 录制启动失败不崩溃，只记录；下轮会再试
-                                tracing::warn!("录制启动失败（将重试）: {e}");
+                                tracing::warn!("录制会话初始化失败（将重试）: {e}");
                             }
                         }
                     }
@@ -466,26 +470,38 @@ impl Daemon {
                         if let Some(mut s) = recorder.take() {
                             let _ = s.stop();
                             tracing::info!("录制结束（引擎：{recording_engine}）");
-                            // Python 引擎的截图由录制器产出，从结果文件读回
-                            let py_shots = s
-                                .read_report()
-                                .map(|r| {
-                                    for n in &r.notes {
-                                        tracing::info!("录制器备注：{n}");
+
+                            // 收尾：把视频与 WASAPI 采到的音频合并成最终 mp4。
+                            // 中间产物不会被删除，收尾失败可重跑，不必重录一节课。
+                            let (shots, notes) = match s.finalize() {
+                                Ok(o) => {
+                                    for n in &o.notes {
+                                        tracing::info!("录制备注：{n}");
                                     }
-                                    if !r.audio_used {
-                                        tracing::warn!("本次未录到音频（转写将无内容）");
+                                    if let Some(v) = &o.video {
+                                        tracing::info!("收尾产物：{}", v.display());
                                     }
-                                    r.screenshots
-                                })
-                                .unwrap_or_default();
+                                    (
+                                        o.screenshots
+                                            .iter()
+                                            .map(|p| p.to_string_lossy().to_string())
+                                            .collect::<Vec<_>>(),
+                                        o.notes,
+                                    )
+                                }
+                                Err(e) => {
+                                    tracing::warn!("收尾合并失败（素材保留，可重跑）: {e}");
+                                    (Vec::new(), Vec::new())
+                                }
+                            };
+                            let _ = notes;
 
                             if let Some(id) = current_job.take() {
                                 match self.store.load(&id) {
                                     Ok(mut j) => {
                                         j.end = now.to_string();
-                                        if !py_shots.is_empty() {
-                                            j.screenshots.extend(py_shots.clone());
+                                        if !shots.is_empty() {
+                                            j.screenshots.extend(shots.clone());
                                         }
                                         if let Err(e) = self.store.save(&j) {
                                             tracing::error!("保存结束时刻失败: {e}");

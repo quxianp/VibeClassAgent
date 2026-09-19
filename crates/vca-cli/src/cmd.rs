@@ -811,8 +811,8 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
             }
         }
         "record-test" => {
-            // 录制冒烟测试：录 10 秒并报告产出，用来验证录屏录音链路
-            use vca_platform::capture::{CaptureEngine, CaptureParams, CaptureSession};
+            // 录制冒烟测试：录 10 秒并报告产出，用来验证「录屏 + 系统声音 + 麦克风」链路。
+            use vca_platform::capture::{CaptureParams, CaptureSession};
 
             let out_dir = layout.data_root.join("_record_test");
             std::fs::create_dir_all(&out_dir)?;
@@ -820,15 +820,10 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
             let shots = out_dir.join("shots");
             let _ = std::fs::remove_file(&out);
 
-            let python_dir = std::env::var("VCA_PYTHON_DIR")
-                .map(std::path::PathBuf::from)
-                .unwrap_or_else(|_| std::path::PathBuf::from("python"));
-
-            println!("录制测试");
+            println!("录制冒烟测试");
             println!("{}", "-".repeat(62));
             println!("输出目录 : {}", out_dir.display());
-            println!("时长     : 10 秒");
-            println!("帧率     : 8 fps   分辨率：720p");
+            println!("时长     : 10 秒（8 fps / 720p / 每 5 秒一张截图）");
             println!();
 
             let params = CaptureParams {
@@ -838,10 +833,16 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
                 screenshot_interval_secs: 5,
                 ..Default::default()
             };
-            let mut sess = CaptureSession::new(CaptureEngine::Auto, params, &out)
-                .with_python_dir(python_dir)
-                .with_shot_dir(shots.clone());
+
+            let mut sess = match CaptureSession::new(params, &out) {
+                Ok(s) => s.with_shot_dir(shots.clone()),
+                Err(e) => {
+                    println!("初始化失败：{e}");
+                    return Ok(());
+                }
+            };
             println!("录制引擎 : {}", sess.engine_label());
+            println!();
 
             print!("正在录制");
             use std::io::Write;
@@ -849,7 +850,6 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
             if let Err(e) = sess.start() {
                 println!();
                 println!("启动失败：{e}");
-                println!("提示：若用内置 Python 运行时，请确认 python/runtime/python.exe 存在。");
                 return Ok(());
             }
             for _ in 0..10 {
@@ -862,29 +862,28 @@ pub fn debug(layout: &Layout, action: &str) -> Result<()> {
 
             println!();
             println!("{}", "-".repeat(62));
-            if out.exists() {
-                let kb = std::fs::metadata(&out).map(|m| m.len() / 1024).unwrap_or(0);
-                println!(" 录制成功：{} ({} KB)", out.display(), kb);
-            } else {
-                println!(" 没有产出视频文件，请把上面的信息发给我排查");
-            }
-            if let Some(r) = sess.read_report() {
-                println!(
-                    "   时长 {} 秒 / {} 帧 / 音频：{}",
-                    r.seconds,
-                    r.frames,
-                    if r.audio_used { "有" } else { "无" }
-                );
-                for n in &r.notes {
-                    println!("   备注：{n}");
+            match sess.finalize() {
+                Ok(o) => {
+                    match &o.video {
+                        Some(v) => {
+                            let kb = std::fs::metadata(v).map(|m| m.len() / 1024).unwrap_or(0);
+                            println!(" 收尾产物：{} ({} KB)", v.display(), kb);
+                        }
+                        None => println!(" 没有产出最终 mp4（见下方备注）"),
+                    }
+                    println!(" 音频轨  ：{} 路", o.audio.len());
+                    for a in &o.audio {
+                        println!("            {}", a.display());
+                    }
+                    println!(" 截图    ：{} 张", o.screenshots.len());
+                    if let Some(raw) = &o.raw_video {
+                        println!(" 中间视频：{}", raw.display());
+                    }
+                    for n in &o.notes {
+                        println!(" 备注    ：{n}");
+                    }
                 }
-                if !r.screenshots.is_empty() {
-                    println!("   截图：{} 张", r.screenshots.len());
-                }
-            }
-            let n = std::fs::read_dir(&shots).map(|d| d.count()).unwrap_or(0);
-            if n > 0 {
-                println!("   截图目录：{} （{} 个文件）", shots.display(), n);
+                Err(e) => println!(" 收尾失败：{e}"),
             }
             Ok(())
         }

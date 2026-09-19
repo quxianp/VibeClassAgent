@@ -22,8 +22,6 @@ use vca_core::time::LocalDateTime;
 use vca_platform::push::{self, PushConfig, PushDoc};
 use vca_platform::{llm, push as push_mod};
 
-use crate::worker::WorkerClient;
-
 /// 流水线一次执行的结果。
 #[derive(Debug, Clone)]
 pub struct PipelineOutcome {
@@ -100,19 +98,30 @@ impl<'a> Pipeline<'a> {
         // ---- 1) 转写 ----
         if job.state == JobState::Recorded {
             match self.transcribe(job) {
-                Ok(text) => {
-                    let path = self.job_dir(job).join("transcript.txt");
-                    let _ = std::fs::create_dir_all(self.job_dir(job));
-                    let _ = std::fs::write(&path, &text);
-                    steps.push(format!("转写完成（{} 字）", text.chars().count()));
+                Ok(t) => {
+                    let dir = self.job_dir(job);
+                    let _ = std::fs::create_dir_all(&dir);
+                    let _ = std::fs::write(dir.join("transcript.txt"), &t.text);
+                    // 分段带时间戳，截图关联要靠它把图注对上讲稿
+                    let _ = std::fs::write(
+                        dir.join("transcript.json"),
+                        serde_json::to_string(&t.segments).unwrap_or_default(),
+                    );
+                    steps.push(format!(
+                        "转写完成（{} 字 / {} 段 / {} / {:.1}s）",
+                        t.text.chars().count(),
+                        t.segments.len(),
+                        t.engine,
+                        t.seconds
+                    ));
                     if let Err(e) = self.advance(job, JobState::Transcribed) {
                         return self.fail(job, e);
                     }
                 }
                 Err(e) => {
-                    // 没有音频（未录到音）时不阻塞后续：产出空转写继续
-                    if job.audio_path.is_none() {
-                        warnings.push("没有音频轨，跳过转写".into());
+                    // 没有音视频时不阻塞后续：产出空转写继续，至少文档还能生成
+                    if job.video_path.is_none() && job.audio_path.is_none() {
+                        warnings.push("没有音视频轨，跳过转写".into());
                         if let Err(e2) = self.advance(job, JobState::Transcribed) {
                             return self.fail(job, e2);
                         }
@@ -285,161 +294,199 @@ impl<'a> Pipeline<'a> {
     // 各步骤
     // -----------------------------------------------------------------------
 
-    /// 调用 Python Worker 转写。
-    fn transcribe(&self, job: &Job) -> Result<String, String> {
-        let Some(audio) = &job.audio_path else {
-            return Err("没有音频文件".into());
+    /// 语音转写：本地 whisper.cpp 优先，云端 API 可选（见 `vca_platform::stt`）。
+    ///
+    /// 返回全文 + **带时间戳的分段**；分段另存为 `transcript.json`，
+    /// 供后面的截图关联使用 —— 没有时间戳，截图就只能随便贴上去。
+    fn transcribe(&self, job: &Job) -> Result<vca_platform::stt::Transcript, String> {
+        // 优先用合并后的视频（音轨已经混好），没有才退回单独的音轨文件
+        let media = job
+            .video_path
+            .as_ref()
+            .filter(|p| Path::new(p).exists())
+            .or_else(|| job.audio_path.as_ref().filter(|p| Path::new(p).exists()))
+            .ok_or_else(|| "没有可转写的音视频文件".to_string())?;
+
+        let t = &self.settings.transcriber;
+        let cloud_default = vca_platform::stt::CloudSttConfig::default();
+        let cfg = vca_platform::stt::SttConfig {
+            engine: vca_platform::stt::SttEngine::parse(&t.engine),
+            local: vca_platform::stt::LocalSttConfig {
+                model: t.model.clone(),
+                language: t.language.clone(),
+                threads: t.threads,
+                max_seconds: t.max_seconds,
+                ..Default::default()
+            },
+            cloud: vca_platform::stt::CloudSttConfig {
+                base_url: if t.cloud_base_url.trim().is_empty() {
+                    cloud_default.base_url
+                } else {
+                    t.cloud_base_url.clone()
+                },
+                model: t.cloud_model.clone(),
+                // 凭据只走环境变量，绝不写进配置文件
+                api_key: std::env::var("VCA_STT_API_KEY").unwrap_or_default(),
+                language: t.language.clone(),
+                timeout_ms: cloud_default.timeout_ms,
+            },
         };
-        if !Path::new(audio).exists() {
-            return Err(format!("音频不存在: {audio}"));
-        }
-        let mut w = WorkerClient::start(&self.python_dir, 3600)
-            .map_err(|e| format!("启动 Worker 失败: {e}"))?;
-        let res = w
-            .call(
-                "run",
-                serde_json::json!({
-                    "kind": "transcribe",
-                    "audio_path": audio,
-                    "model": self.settings.transcriber.model,
-                    "language": self.settings.transcriber.language,
-                    "threads": self.settings.transcriber.threads,
-                }),
-            )
-            .map_err(|e| format!("转写调用失败: {e}"))?;
-        if let Some(err) = res.get("error").and_then(|v| v.as_str()) {
-            return Err(err.to_string());
-        }
-        let text = res
-            .get("text")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| "Worker 未返回 text".to_string())?;
-        Ok(text.to_string())
+
+        let work = self.job_dir(job).join("_stt");
+        vca_platform::stt::transcribe(&cfg, Path::new(media), &work)
+            .map_err(|e| format!("{e}"))
     }
 
-    /// 调用 LLM 提取要点。
+    /// 调用 LLM 提取要点（付费 API / 免费额度 / 浏览器三种模式，见 `vca_platform::llm`）。
     fn extract(&self, transcript: &str) -> Result<llm::LessonSummary, llm::LlmError> {
         if transcript.trim().is_empty() {
             return Ok(llm::LessonSummary::default());
         }
+        let s = &self.settings.llm;
+        let b = &s.browser;
         let cfg = llm::LlmConfig {
-            base_url: self.settings.llm.base_url.clone(),
+            mode: llm::LlmMode::parse(&s.mode),
+            provider: s.provider.clone(),
+            base_url: s.base_url.clone(),
+            // 凭据只走环境变量，绝不写进配置文件
             api_key: std::env::var("VCA_LLM_API_KEY").unwrap_or_default(),
-            model: self.settings.llm.model.clone(),
+            model: s.model.clone(),
             timeout_ms: 90_000,
             max_chars: 6000,
+            browser: vca_platform::browser_bot::BrowserBotConfig {
+                site: b.site.clone(),
+                headless: b.headless,
+                risk_ack: b.risk_ack,
+                user_data_dir: b.user_data_dir.clone().into(),
+                timeout_sec: b.timeout_sec,
+                selectors_override: b.selectors.clone(),
+                ..Default::default()
+            },
         };
         llm::extract_summary(&cfg, transcript)
     }
 
-    /// 截图关联：先用 **pHash** 去掉几乎相同的画面，再取前 N 张。
+    /// 截图关联：感知哈希去重 + 与讲稿按时间对齐（见 `vca_platform::shots`）。
     ///
-    /// 录制期间每 180 秒抓一张，一节课会攒下十几张，
-    /// 其中大量是「PPT 没翻页」的重复画面  直接塞进文档会让文件巨大且无信息量。
+    /// 录制期间每 180 秒抓一张，一节课攒十几张，其中大量是「PPT 没翻页」的重复画面。
+    /// 去重后只留有变化的那几张，并按时间点从转写里取一句话当图注。
     ///
-    /// 处理顺序：
-    /// 1. 先用路径去重并过滤掉不存在的文件（**必须**，否则 Worker 会读到脏路径）；
-    /// 2. 调用 Python Worker 的 `dedupe` 做感知哈希去重；
-    /// 3. Worker 不可用（未装 Python / 未装 ImageHash）时**降级**为均匀抽样，
-    ///    保证文档照常产出，只是截图可能略多几张。
+    /// 同时把带图注的结果落盘成 `shot_refs.json`，文档生成阶段直接读，
+    /// 避免重复跑一遍感知哈希。
     fn link_screenshots(&self, job: &Job) -> Vec<String> {
         let limit = self.settings.doc.max_screenshots.max(1) as usize;
 
-        // 1) 路径去重 + 存在性过滤
-        let mut seen = std::collections::HashSet::new();
-        let existing: Vec<String> = job
+        // 转写分段（没有就退化为「有图无注」）
+        let segments: Vec<vca_platform::stt::Segment> =
+            std::fs::read_to_string(self.job_dir(job).join("transcript.json"))
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+
+        // 截图目录：从已记录的路径反推（录制时写进 job.screenshots 的目录）
+        let shot_dir = job
             .screenshots
             .iter()
-            .filter(|s| Path::new(s).exists() && seen.insert((*s).clone()))
-            .cloned()
-            .collect();
+            .filter_map(|p| Path::new(p).parent().map(|d| d.to_path_buf()))
+            .next();
 
-        if existing.is_empty() {
-            return Vec::new();
-        }
-        if existing.len() <= limit {
-            return existing;
-        }
+        let interval = self.settings.record.screenshot_interval_secs.max(1) as u64;
+        let refs = match shot_dir {
+            Some(dir) if dir.is_dir() => vca_platform::shots::build_refs(
+                &dir,
+                interval,
+                &segments,
+                limit,
+            ),
+            _ => Vec::new(),
+        };
 
-        // 2) 交给 Python 做 pHash 去重
-        if let Ok(mut w) = WorkerClient::start(&self.python_dir, 300) {
-            let res = w.call(
-                "run",
-                serde_json::json!({
-                    "kind": "dedupe",
-                    "paths": existing,
-                    "threshold": 6,
-                    "limit": limit,
-                }),
-            );
-            if let Ok(v) = res {
-                if let Some(kept) = v.get("kept").and_then(|k| k.as_array()) {
-                    let out: Vec<String> = kept
-                        .iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect();
-                    if !out.is_empty() {
-                        return out;
-                    }
-                }
-            }
-            tracing::warn!("pHash 去重不可用，降级为均匀抽样");
+        // 没有任何截图时不报错：文档照常生成
+        if refs.is_empty() {
+            return job
+                .screenshots
+                .iter()
+                .filter(|s| Path::new(s).exists())
+                .take(limit)
+                .cloned()
+                .collect();
         }
 
-        // 3) 降级：均匀抽样
-        let step = (existing.len() / limit).max(1);
-        existing.into_iter().step_by(step).take(limit).collect()
+        let dir = self.job_dir(job);
+        let _ = std::fs::create_dir_all(&dir);
+        let _ = std::fs::write(
+            dir.join("shot_refs.json"),
+            serde_json::to_string_pretty(&refs).unwrap_or_default(),
+        );
+
+        refs.iter()
+            .map(|r| r.path.to_string_lossy().to_string())
+            .collect()
     }
 
     /// 调用 Python Worker 生成 Word/PDF。
     fn build_document(&self, job: &Job) -> Result<(Option<String>, Option<String>), String> {
-        let summary_path = self.job_dir(job).join("summary.json");
-        let transcript_path = self.job_dir(job).join("transcript.txt");
-        let out_dir = self
-            .layout
-            .docs_dir(self.profile, &job.date.replace('-', ""));
-        let out_dir = if out_dir.as_os_str().is_empty() {
-            self.job_dir(job)
-        } else {
-            out_dir
+        let dir = self.job_dir(job);
+        let out_dir = {
+            let d = self.layout.docs_dir(self.profile, &job.date.replace('-', ""));
+            if d.as_os_str().is_empty() {
+                dir.clone()
+            } else {
+                d
+            }
         };
         let _ = std::fs::create_dir_all(&out_dir);
 
-        let mut w = WorkerClient::start(&self.python_dir, 600)
-            .map_err(|e| format!("启动 Worker 失败: {e}"))?;
-        let res = w
-            .call(
-                "run",
-                serde_json::json!({
-                    "kind": "docgen",
-                    "course": job.course,
-                    "date": job.date,
-                    "start": job.start,
-                    "end": job.end,
-                    "teacher_id": job.teacher_id,
-                    "summary_path": summary_path.to_string_lossy(),
-                    "transcript_path": transcript_path.to_string_lossy(),
-                    "screenshots": job.screenshots,
-                    "out_dir": out_dir.to_string_lossy(),
-                    "formats": self.settings.doc.formats,
-                }),
-            )
-            .map_err(|e| format!("文档生成调用失败: {e}"))?;
-        if let Some(err) = res.get("error").and_then(|v| v.as_str()) {
-            return Err(err.to_string());
+        // 要点
+        let summary: llm::LessonSummary = std::fs::read_to_string(dir.join("summary.json"))
+            .ok()
+            .and_then(|s| serde_json::from_str(&s).ok())
+            .unwrap_or_default();
+
+        // 转写全文（作为文档附录）
+        let transcript = std::fs::read_to_string(dir.join("transcript.txt")).unwrap_or_default();
+
+        // 截图（已在 link 阶段去重并配好图注）
+        let screenshots: Vec<vca_platform::docgen::ShotRef> =
+            std::fs::read_to_string(dir.join("shot_refs.json"))
+                .ok()
+                .and_then(|s| serde_json::from_str(&s).ok())
+                .unwrap_or_default();
+
+        let input = vca_platform::docgen::DocInput {
+            course: job.course.clone(),
+            date: job.date.clone(),
+            teacher: job.teacher_id.clone(),
+            summary,
+            transcript: if self.settings.doc.include_transcript {
+                transcript
+            } else {
+                String::new()
+            },
+            screenshots,
+            duration_secs: duration_between(&job.start, &job.end),
+            video_name: job
+                .video_path
+                .as_ref()
+                .and_then(|p| {
+                    Path::new(p)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                })
+                .unwrap_or_default(),
+            extra_keywords: Vec::new(),
+        };
+
+        let out = vca_platform::docgen::generate(&input, &out_dir, &self.settings.doc.formats)
+            .map_err(|e| format!("{e}"))?;
+        for n in &out.notes {
+            tracing::warn!("文档生成备注：{n}");
         }
-        let docx = res
-            .get("docx")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(String::from);
-        let pdf = res
-            .get("pdf")
-            .and_then(|v| v.as_str())
-            .filter(|s| !s.is_empty())
-            .map(String::from);
-        if docx.is_none() && pdf.is_none() {
-            return Err("Worker 未产出任何文档".into());
+
+        let docx = out.docx.map(|p| p.to_string_lossy().to_string());
+        let pdf = out.pdf.map(|p| p.to_string_lossy().to_string());
+        if docx.is_none() && pdf.is_none() && out.markdown.is_none() {
+            return Err("没有产出任何文档".into());
         }
         Ok((docx, pdf))
     }
@@ -539,10 +586,22 @@ impl<'a> Pipeline<'a> {
             return Ok(out.message_id.unwrap_or_else(|| "dry-run".into()));
         }
 
+        let p = &self.settings.push;
         let cfg = PushConfig {
             provider,
-            endpoint: std::env::var("VCA_PUSH_ENDPOINT").unwrap_or_default(),
+            // 地址优先用配置；留空时回落到环境变量（地址与令牌都可能敏感）
+            endpoint: if p.endpoint.trim().is_empty() {
+                std::env::var("VCA_PUSH_ENDPOINT").unwrap_or_default()
+            } else {
+                p.endpoint.clone()
+            },
             token: std::env::var("VCA_PUSH_TOKEN").unwrap_or_default(),
+            target: p.target.clone().unwrap_or_default(),
+            target_type: p.target_type.clone(),
+            // QQ 官方机器人凭据只走环境变量
+            app_id: std::env::var("VCA_QQ_APP_ID").unwrap_or_default(),
+            app_secret: std::env::var("VCA_QQ_APP_SECRET").unwrap_or_default(),
+            max_retries: p.max_retries,
             timeout_ms: 60_000,
         };
         let pusher = push_mod::make_pusher(&cfg);
@@ -551,21 +610,38 @@ impl<'a> Pipeline<'a> {
             summary: llm::render_summary_text(&job.course, &job.date, &summary),
             docx: job.docx_path.clone(),
             pdf: job.pdf_path.clone(),
-            target: self.settings.push.target.clone(),
+            target: p.target.clone(),
         };
 
-        let mut last_err = String::new();
-        for attempt in 1..=self.settings.push.max_retries.max(1) {
-            match pusher.send(&doc) {
-                Ok(o) if o.success => {
-                    return Ok(o.message_id.unwrap_or_else(|| format!("attempt{attempt}")))
-                }
-                Ok(o) => last_err = o.error.unwrap_or_else(|| "未知失败".into()),
-                Err(e) => last_err = e.to_string(),
-            }
-            std::thread::sleep(std::time::Duration::from_secs(2u64.pow(attempt.min(4))));
+        // 带重试；只有全部失败才返回失败 ——
+        // 调用方据此决定「保留本地录像」，所以这里的判定必须严格。
+        let out = push_mod::send_with_retry(pusher.as_ref(), &doc, p.max_retries);
+        if out.success {
+            Ok(out.message_id.unwrap_or_else(|| "ok".into()))
+        } else {
+            Err(out.error.unwrap_or_else(|| "推送失败".into()))
         }
-        Err(last_err)
+    }
+}
+
+/// 从 `start` / `end` 时刻算出课时长（秒）。
+///
+/// 接受 `HH:MM` 与 `HH:MM:SS` 两种写法；解析不出来就返回 0
+/// （文档里会显示成 `—`，而不是一个假的时长）。
+fn duration_between(start: &str, end: &str) -> u64 {
+    fn to_secs(s: &str) -> Option<u64> {
+        let parts: Vec<&str> = s.trim().split(':').collect();
+        if parts.len() < 2 {
+            return None;
+        }
+        let h: u64 = parts[0].parse().ok()?;
+        let m: u64 = parts[1].parse().ok()?;
+        let sec: u64 = parts.get(2).and_then(|x| x.parse().ok()).unwrap_or(0);
+        Some(h * 3600 + m * 60 + sec)
+    }
+    match (to_secs(start), to_secs(end)) {
+        (Some(a), Some(b)) if b > a => b - a,
+        _ => 0,
     }
 }
 

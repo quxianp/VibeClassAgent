@@ -40,6 +40,7 @@ pub mod proc;
 pub mod push;
 pub mod screenshot;
 pub mod session;
+pub mod shots;
 pub mod shutdown;
 pub mod stt;
 pub mod tray;

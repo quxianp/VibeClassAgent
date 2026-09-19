@@ -1395,6 +1395,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "docx-rs",
+ "image",
  "serde",
  "serde_json",
  "thiserror 1.0.69",

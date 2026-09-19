@@ -89,14 +89,31 @@ impl Default for RecordSettings {
 /// 转写参数。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TranscriberSettings {
-    /// 引擎：`local` / `cloud`。默认 local。
+    /// 引擎：`local` / `cloud` / `auto`（本地可用则本地）。默认 local。
     pub engine: String,
-    /// 本地模型规格：`tiny` / `small` / `medium`。
+    /// 本地模型规格：`tiny` / `base` / `small`。
     pub model: String,
-    /// 语言。
+    /// 语言；`auto` 表示自动检测。
     pub language: String,
-    /// 线程数。0 表示自动（min(2, N-1)）。
+    /// 线程数。0 表示自动（核数一半，上限 4）。
     pub threads: u32,
+    /// 本地转写时长上限（秒）。超过就不本地跑，避免把上课用的机器占死。0 表示不限。
+    #[serde(default = "default_local_max_seconds")]
+    pub max_seconds: u64,
+    /// 云端转写的 base url（留空用 OpenAI 官方地址）。
+    #[serde(default)]
+    pub cloud_base_url: String,
+    /// 云端转写的模型名。
+    #[serde(default = "default_cloud_stt_model")]
+    pub cloud_model: String,
+}
+
+fn default_local_max_seconds() -> u64 {
+    2 * 60 * 60
+}
+
+fn default_cloud_stt_model() -> String {
+    "whisper-1".to_string()
 }
 
 impl Default for TranscriberSettings {
@@ -106,6 +123,9 @@ impl Default for TranscriberSettings {
             model: "tiny".to_string(),
             language: "zh".to_string(),
             threads: 0,
+            max_seconds: default_local_max_seconds(),
+            cloud_base_url: String::new(),
+            cloud_model: default_cloud_stt_model(),
         }
     }
 }
@@ -113,6 +133,13 @@ impl Default for TranscriberSettings {
 /// 模型 API 配置（**不含密钥**）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct LlmSettings {
+    /// 厂商预设 id（`deepseek` / `zhipu` / `dashscope` / …）。
+    /// 填了它且 base_url 为空时，自动套用预设里的地址。
+    #[serde(default)]
+    pub provider: String,
+    /// 提取模式：`paid-api`（默认） / `free-api` / `browser-bot`。
+    #[serde(default = "default_llm_mode")]
+    pub mode: String,
     /// OpenAI 兼容的 base URL。
     pub base_url: String,
     /// 模型名。
@@ -120,19 +147,84 @@ pub struct LlmSettings {
     /// 提示词模板路径。
     #[serde(default)]
     pub prompt_template: Option<String>,
+    /// 浏览器模式配置（仅 mode = browser-bot 时使用）。
+    #[serde(default)]
+    pub browser: BrowserSettings,
+}
+
+fn default_llm_mode() -> String {
+    "paid-api".to_string()
+}
+
+/// 浏览器自动化（网页版聊天机器人）配置。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BrowserSettings {
+    /// 站点 id：`kimi` / `deepseek` / `tongyi` / `doubao` / `chatgpt` / `custom`。
+    #[serde(default = "default_browser_site")]
+    pub site: String,
+    /// 是否用无界面模式（首次登录需要手动跑一次登录命令）。
+    #[serde(default = "default_true")]
+    pub headless: bool,
+    /// 风险确认：必须显式改成 true 才允许启用浏览器模式。
+    #[serde(default)]
+    pub risk_ack: bool,
+    /// 浏览器数据目录（保存登录态）。留空则用工具目录下的 browser-profile。
+    #[serde(default)]
+    pub user_data_dir: String,
+    /// 单次问答超时（秒）。
+    #[serde(default = "default_browser_timeout")]
+    pub timeout_sec: u64,
+    /// 选择器覆盖，形如 `input=textarea;send=.btn`。
+    #[serde(default)]
+    pub selectors: String,
+}
+
+fn default_browser_site() -> String {
+    "kimi".to_string()
+}
+
+fn default_browser_timeout() -> u64 {
+    180
+}
+
+fn default_true() -> bool {
+    true
+}
+
+impl Default for BrowserSettings {
+    fn default() -> Self {
+        Self {
+            site: default_browser_site(),
+            headless: true,
+            risk_ack: false,
+            user_data_dir: String::new(),
+            timeout_sec: default_browser_timeout(),
+            selectors: String::new(),
+        }
+    }
 }
 
 /// 推送配置（**不含密钥**）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PushSettings {
-    /// 渠道 id，如 `wecom` / `qq` / `wechat-personal`。
+    /// 渠道 id：`wecom` / `qq`(官方) / `onebot`(第三方) / `wechat-personal` / `webhook`。
     pub provider: String,
-    /// 目标会话。
+    /// 目标：QQ 号 / 群号 / openid。
     #[serde(default)]
     pub target: Option<String>,
+    /// 目标类型：`private`（默认）或 `group`。
+    #[serde(default = "default_target_type")]
+    pub target_type: String,
     /// 推送失败重试次数。
     #[serde(default = "default_retry")]
     pub max_retries: u32,
+    /// 渠道地址（Webhook URL / OneBot 基址）。敏感时留空并走环境变量。
+    #[serde(default)]
+    pub endpoint: String,
+}
+
+fn default_target_type() -> String {
+    "private".to_string()
 }
 
 fn default_retry() -> u32 {
@@ -142,17 +234,21 @@ fn default_retry() -> u32 {
 /// 文档导出配置。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DocSettings {
-    /// 导出格式，规划为 `["docx", "pdf"]`。
+    /// 导出格式：`md` / `docx` / `pdf`。`md` 总会生成。
     pub formats: Vec<String>,
-    /// 每节课最多嵌入截图数。
+    /// 每节课最多嵌入截图数（去重之后的上限）。
     pub max_screenshots: u32,
+    /// 是否把完整转写作为附录写进文档。
+    #[serde(default = "default_true")]
+    pub include_transcript: bool,
 }
 
 impl Default for DocSettings {
     fn default() -> Self {
         Self {
-            formats: vec!["docx".to_string(), "pdf".to_string()],
-            max_screenshots: 4,
+            formats: vec!["md".to_string(), "docx".to_string(), "pdf".to_string()],
+            max_screenshots: 6,
+            include_transcript: true,
         }
     }
 }

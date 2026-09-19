@@ -177,7 +177,7 @@ impl SttConfig {
 }
 
 /// 一段带时间戳的转写文本。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Segment {
     /// 起始毫秒。
     pub start_ms: u64,

@@ -32,7 +32,7 @@ use crate::llm::LessonSummary;
 use crate::proc;
 
 /// 一张与课堂内容关联的截图。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ShotRef {
     /// 图片路径。
     pub path: PathBuf,

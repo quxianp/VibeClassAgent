@@ -664,5 +664,21 @@ document.getElementById('nav').addEventListener('click', e => {
 });
 document.getElementById('btn-refresh').addEventListener('click', () => go(current));
 
+// 退出：关窗口 ≠ 退程序（窗口是 --app 拉起的独立进程，后台服务还在跑），
+// 所以必须给一个明确的出口，并且把这件事说清楚。
+document.getElementById('btn-quit').addEventListener('click', async () => {
+  const yes = confirm(
+    '确定退出 VibeClassAgent 吗？\n\n' +
+    '注意：直接关掉这个窗口只会关掉窗口，后台服务还在运行。\n' +
+    '要彻底退出请用这个按钮。'
+  );
+  if (!yes) return;
+  await api('/api/quit', {});
+  document.body.innerHTML =
+    '<div style="padding:80px;text-align:center;color:#8f8f8f;font-family:Segoe UI,sans-serif">' +
+    '<div style="font-size:16px;color:#ededed">已退出</div>' +
+    '<div style="margin-top:8px">这个窗口可以关掉了。</div></div>';
+});
+
 go('overview');
 refreshDots();

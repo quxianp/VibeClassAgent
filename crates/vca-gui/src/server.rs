@@ -98,7 +98,7 @@ fn split_url(url: &str) -> (String, &str) {
 }
 
 /// 从查询串里取一个参数（值不做 URL 解码 —— token 是十六进制，不需要）。
-pub(crate) fn query_param<'a>(query: &'a str, key: &str) -> Option<String> {
+pub(crate) fn query_param(query: &str, key: &str) -> Option<String> {
     query.split('&').find_map(|kv| {
         let (k, v) = kv.split_once('=')?;
         (k == key).then(|| v.to_string())

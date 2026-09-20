@@ -44,6 +44,7 @@ pub fn dispatch(
         ("GET", "/api/jobs") => get_jobs(opts),
         ("POST", "/api/models") => list_models(&settings_path, &body),
         ("POST", "/api/clean/preview") => clean_preview(opts),
+        ("POST", "/api/quit") => quit(),
         _ => Ok(json!({"ok": false, "error": format!("没有这个接口：{method} {path}")})),
     };
 
@@ -558,6 +559,21 @@ fn get_jobs(opts: &ServeOptions) -> Result<Value> {
         })
         .collect();
     Ok(json!({ "ok": true, "jobs": jobs }))
+}
+
+/// 退出程序。
+///
+/// 为什么需要这个接口：浏览器窗口是 `--app` 拉起来的独立进程，把它关掉之后
+/// **后台服务还在跑** —— 用户看到窗口没了会以为程序退了，实际它还占着端口。
+/// 与其让人去任务管理器里杀进程，不如给一个明确的出口。
+fn quit() -> Result<Value> {
+    tracing::info!("收到退出请求，界面服务即将关闭");
+    std::thread::spawn(|| {
+        // 留一点时间把响应发出去，否则浏览器那边看到的是连接被重置
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        std::process::exit(0);
+    });
+    Ok(json!({ "ok": true }))
 }
 
 /// Unix 秒（给存档文件名用）。

@@ -592,6 +592,114 @@ async function renderRecord() {
   });
 }
 
+/* ---------------------------------------------------------------- 运行 */
+
+async function renderRun() {
+  const d = await api('/api/daemon/status');
+  const s = state.status || (await api('/api/status'));
+
+  view.innerHTML = '';
+  const dot = d.running ? 'ok' : 'bad';
+
+  const card = el(`<div class="card">
+    <h2>守护进程</h2>
+    <p class="hint">
+      打开它，程序就会自己干活：<b>上课时段自动录屏录音</b>（含系统声音与麦克风），
+      <b>午休与晚餐时段自动处理</b>（转写 → 提取 → 配图 → 生成文档 → 推送），
+      推送成功 72 小时后自动清理录像。
+    </p>
+
+    <div class="grid" style="margin-bottom:16px">
+      <div class="stat">
+        <div class="k">状态</div>
+        <div class="v ${dot}">${d.running ? '运行中' : '已停止'}</div>
+        <div class="k" style="margin:6px 0 0">${d.running ? esc(d.uptime) : '—'}</div>
+      </div>
+      <div class="stat">
+        <div class="k">模型 / 推送</div>
+        <div class="v small ${s.llm.ready ? 'ok' : 'bad'}">${s.llm.ready ? '已配置' : '未配置'}</div>
+        <div class="k" style="margin:6px 0 0">${s.push.ready ? esc(s.push.provider) : '推送未配置'}</div>
+      </div>
+      <div class="stat">
+        <div class="k">模式</div>
+        <div class="v small ${d.dry_run ? 'bad' : ''}">${d.running ? (d.dry_run ? '演练（不真录不真推）' : '正式运行') : '—'}</div>
+        <div class="k" style="margin:6px 0 0">${d.running ? '' : '点下面按钮启动'}</div>
+      </div>
+    </div>
+
+    <div class="row wrap">
+      <button class="btn primary" id="btn-start" ${d.running ? 'disabled' : ''}>开始工作</button>
+      <button class="btn" id="btn-dry" ${d.running ? 'disabled' : ''}>先演练一遍</button>
+      <button class="btn danger" id="btn-stop" ${d.running ? '' : 'disabled'}>停止</button>
+      <span class="spacer"></span>
+      <button class="btn ghost sm" id="btn-log">查看日志</button>
+    </div>
+
+    <div class="note" id="run-note" style="display:none"></div>
+  </div>`);
+  view.appendChild(card);
+
+  const note = document.getElementById('run-note');
+  const show = (html, kind) => {
+    note.style.display = 'block';
+    note.innerHTML = html;
+    note.style.borderLeftColor = kind === 'err' ? '#e05c5c' : kind === 'warn' ? '#d9a343' : '#2f2f2f';
+  };
+
+  // 启动前把「还缺什么」说清楚：等它跑起来什么都不干，用户只会以为坏了
+  const precheck = () => {
+    const miss = [];
+    if (!s.llm.ready) miss.push('模型 API 没配 → 课后提取会降级成原文摘要');
+    if (!s.push.ready) miss.push('推送渠道没配 → 文档只会存在本地');
+    if (!s.whisper_ready) miss.push('本地转写缺失 → 需要云端转写 Key，否则转写会失败');
+    return miss;
+  };
+
+  const start = async (dry) => {
+    const miss = precheck();
+    const warn = miss.length ? '注意：\n· ' + miss.join('\n· ') + '\n\n' : '';
+    if (!confirm(`${warn}${dry ? '以演练模式启动' : '开始工作'}？`)) return;
+    const r = await api('/api/daemon/start', { dry_run: dry });
+    if (r.ok) {
+      const w = r.warnings || [];
+      show(`<b style="color:#7fd3ba">已启动${dry ? '（演练模式）' : ''}</b>` +
+        (w.length ? '<br>同时提醒：<br>· ' + w.map(esc).join('<br>· ') : '') +
+        '<br><br>这个页面会自动刷新状态。');
+      setTimeout(renderRun, 1200);
+    } else {
+      show(`<b style="color:#e05c5c">启动失败</b><br><code>${esc(r.error || '')}</code>`, 'err');
+    }
+  };
+
+  document.getElementById('btn-start').addEventListener('click', () => start(false));
+  document.getElementById('btn-dry').addEventListener('click', () => start(true));
+  document.getElementById('btn-stop').addEventListener('click', async () => {
+    const r = await api('/api/daemon/stop', {});
+    if (r.ok) {
+      show('已请求停止。' + (r.note ? '<br>' + esc(r.note) : '') + '<br>稍等几秒后这里会变成「已停止」。');
+      setTimeout(renderRun, 2500);
+    } else {
+      show(esc(r.error || ''), 'err');
+    }
+  });
+
+  document.getElementById('btn-log').addEventListener('click', async () => {
+    const l = await api('/api/logs');
+    if (!l.ok) { show(esc(l.error || ''), 'err'); return; }
+    const lines = l.lines || [];
+    show(`<b>日志</b>（最近 ${lines.length} 行 / 共 ${l.total_lines || 0} 行）<br>
+      <code style="display:block;max-height:280px;overflow:auto;margin-top:8px;white-space:pre-wrap">${
+        lines.length ? esc(lines.join('\n')) : esc(l.note || '（空）')}</code>`);
+  });
+
+  if (d.last_error) {
+    show(`<b style="color:#e05c5c">上次退出时报错</b><br><code>${esc(d.last_error)}</code>`, 'err');
+  }
+
+  // 运行中时自动刷新一次，让用户看到状态变化
+  if (d.running) setTimeout(() => { if (current === 'run') renderRun(); }, 5000);
+}
+
 /* ---------------------------------------------------------------- 作业 */
 
 async function renderJobs() {
@@ -627,6 +735,7 @@ async function renderJobs() {
 
 const PAGES = {
   overview: ['概览', renderOverview],
+  run: ['运行', renderRun],
   model: ['模型 API', renderModel],
   push: ['推送', renderPush],
   timetable: ['时间表', renderTimetable],

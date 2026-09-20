@@ -326,7 +326,7 @@ impl<'a> Pipeline<'a> {
                 },
                 model: t.cloud_model.clone(),
                 // 凭据只走环境变量，绝不写进配置文件
-                api_key: std::env::var("VCA_STT_API_KEY").unwrap_or_default(),
+                api_key: vca_core::secrets::get("VCA_STT_API_KEY"),
                 language: t.language.clone(),
                 timeout_ms: cloud_default.timeout_ms,
             },
@@ -348,7 +348,7 @@ impl<'a> Pipeline<'a> {
             provider: s.provider.clone(),
             base_url: s.base_url.clone(),
             // 凭据只走环境变量，绝不写进配置文件
-            api_key: std::env::var("VCA_LLM_API_KEY").unwrap_or_default(),
+            api_key: vca_core::secrets::get("VCA_LLM_API_KEY"),
             model: s.model.clone(),
             timeout_ms: 90_000,
             max_chars: 6000,
@@ -589,16 +589,16 @@ impl<'a> Pipeline<'a> {
             provider,
             // 地址优先用配置；留空时回落到环境变量（地址与令牌都可能敏感）
             endpoint: if p.endpoint.trim().is_empty() {
-                std::env::var("VCA_PUSH_ENDPOINT").unwrap_or_default()
+                vca_core::secrets::get("VCA_PUSH_ENDPOINT")
             } else {
                 p.endpoint.clone()
             },
-            token: std::env::var("VCA_PUSH_TOKEN").unwrap_or_default(),
+            token: vca_core::secrets::get("VCA_PUSH_TOKEN"),
             target: p.target.clone().unwrap_or_default(),
             target_type: p.target_type.clone(),
             // QQ 官方机器人凭据只走环境变量
-            app_id: std::env::var("VCA_QQ_APP_ID").unwrap_or_default(),
-            app_secret: std::env::var("VCA_QQ_APP_SECRET").unwrap_or_default(),
+            app_id: vca_core::secrets::get("VCA_QQ_APP_ID"),
+            app_secret: vca_core::secrets::get("VCA_QQ_APP_SECRET"),
             max_retries: p.max_retries,
             timeout_ms: 60_000,
         };

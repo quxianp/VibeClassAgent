@@ -44,6 +44,10 @@ pub fn dispatch(
         ("GET", "/api/jobs") => get_jobs(opts),
         ("POST", "/api/models") => list_models(&settings_path, &body),
         ("POST", "/api/clean/preview") => clean_preview(opts),
+        ("GET", "/api/daemon/status") => Ok(crate::daemon::status()),
+        ("POST", "/api/daemon/start") => daemon_start(opts, &body),
+        ("POST", "/api/daemon/stop") => crate::daemon::stop(),
+        ("GET", "/api/logs") => read_logs(opts),
         ("POST", "/api/quit") => quit(),
         _ => Ok(json!({"ok": false, "error": format!("没有这个接口：{method} {path}")})),
     };
@@ -126,7 +130,7 @@ fn status(opts: &ServeOptions, settings: &Path) -> Result<Value> {
             "provider": s.llm.provider,
             "base_url": s.llm.base_url,
             "model": s.llm.model,
-            "key_set": !std::env::var("VCA_LLM_API_KEY").unwrap_or_default().is_empty(),
+            "key_set": vca_core::secrets::is_set("VCA_LLM_API_KEY"),
             "ready": llm_ready,
         },
         "push": {
@@ -168,7 +172,7 @@ fn get_llm(path: &Path) -> Result<Value> {
         "model": s.llm.model,
         "mode": s.llm.mode,
         // 只回"有没有"，**不回密钥本身** —— 界面不需要看到它
-        "key_set": !std::env::var("VCA_LLM_API_KEY").unwrap_or_default().is_empty(),
+        "key_set": vca_core::secrets::is_set("VCA_LLM_API_KEY"),
         "defer_on_peak": s.llm.defer_on_peak,
         "peak_holidays": s.llm.peak_holidays,
     }))
@@ -209,7 +213,7 @@ fn post_llm(path: &Path, body: &str) -> Result<Value> {
             );
             vca_core::secrets::upsert(&sp, "VCA_LLM_API_KEY", k.trim())?;
             // 立刻注入，这样紧接着拉模型列表就能用
-            std::env::set_var("VCA_LLM_API_KEY", k.trim());
+            vca_core::secrets::set_override("VCA_LLM_API_KEY", k.trim());
             wrote.push("api_key");
         }
     }
@@ -239,9 +243,9 @@ fn get_push(path: &Path) -> Result<Value> {
         "target_type": s.push.target_type,
         "max_retries": s.push.max_retries,
         // 同样只回"设没设"，不回内容
-        "token_set": !std::env::var("VCA_PUSH_TOKEN").unwrap_or_default().is_empty(),
-        "qq_appid_set": !std::env::var("VCA_QQ_APP_ID").unwrap_or_default().is_empty(),
-        "qq_secret_set": !std::env::var("VCA_QQ_APP_SECRET").unwrap_or_default().is_empty(),
+        "token_set": vca_core::secrets::is_set("VCA_PUSH_TOKEN"),
+        "qq_appid_set": vca_core::secrets::is_set("VCA_QQ_APP_ID"),
+        "qq_secret_set": vca_core::secrets::is_set("VCA_QQ_APP_SECRET"),
     }))
 }
 
@@ -285,7 +289,7 @@ fn post_push(path: &Path, body: &str) -> Result<Value> {
         if let Some(val) = v.get(field).and_then(|x| x.as_str()) {
             if !val.trim().is_empty() {
                 vca_core::secrets::upsert(&sp, env, val.trim())?;
-                std::env::set_var(env, val.trim());
+                vca_core::secrets::set_override(env, val.trim());
                 wrote.push(field);
             }
         }
@@ -320,18 +324,18 @@ fn push_test(path: &Path, body: &str) -> Result<Value> {
 
     // 与 pipeline 完全一致的取值逻辑，避免"测试通过、真推送失败"
     let endpoint = if s.push.endpoint.trim().is_empty() {
-        std::env::var("VCA_PUSH_ENDPOINT").unwrap_or_default()
+        vca_core::secrets::get("VCA_PUSH_ENDPOINT")
     } else {
         s.push.endpoint.clone()
     };
     let cfg = PushConfig {
         provider,
         endpoint,
-        token: std::env::var("VCA_PUSH_TOKEN").unwrap_or_default(),
+        token: vca_core::secrets::get("VCA_PUSH_TOKEN"),
         target: s.push.target.clone().unwrap_or_default(),
         target_type: s.push.target_type.clone(),
-        app_id: std::env::var("VCA_QQ_APP_ID").unwrap_or_default(),
-        app_secret: std::env::var("VCA_QQ_APP_SECRET").unwrap_or_default(),
+        app_id: vca_core::secrets::get("VCA_QQ_APP_ID"),
+        app_secret: vca_core::secrets::get("VCA_QQ_APP_SECRET"),
         max_retries: 1,
         timeout_ms: 30_000,
     };
@@ -561,6 +565,68 @@ fn get_jobs(opts: &ServeOptions) -> Result<Value> {
     Ok(json!({ "ok": true, "jobs": jobs }))
 }
 
+/// 启动守护进程（界面上那个「开始工作」按钮）。
+fn daemon_start(opts: &ServeOptions, body: &str) -> Result<Value> {
+    let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
+    let dry = v.get("dry_run").and_then(|x| x.as_bool()).unwrap_or(false);
+
+    // 启动前先做一次配置自检：与其让它跑起来什么都不干，
+    // 不如现在就说清楚缺什么 —— 用户在这个界面上才有机会改。
+    let s = vca_core::config::load_settings(&settings_path(opts)).unwrap_or_default();
+    let mut hints = Vec::new();
+    if s.llm.base_url.trim().is_empty() || vca_platform::llm::is_placeholder(&s.llm.base_url) {
+        hints.push("模型 API 还没配 —— 课后提取会降级成原文摘要");
+    }
+    if s.push.provider.trim().is_empty() {
+        hints.push("推送渠道还没配 —— 文档只会存在本地");
+    }
+    let layout = vca_core::paths::Layout::new(opts.data_root.clone(), opts.config_root.clone());
+    let sc = opts.config_root.join("schedule").join("current.yaml");
+    let lessons = if sc.is_file() {
+        vca_core::config::load_schedule_file(&sc).ok()
+    } else {
+        None
+    };
+    if lessons.is_none() {
+        hints.push("课表还没导入 —— 不知道要录哪些课");
+    }
+
+    let mut r = crate::daemon::start(layout, &opts.profile, dry)?;
+    if let Some(obj) = r.as_object_mut() {
+        obj.insert("warnings".into(), json!(hints));
+    }
+    Ok(r)
+}
+
+/// 读日志尾部。
+///
+/// 只回最后 N 行：日志文件会一直长，整份塞给浏览器既慢又没用 ——
+/// 排查问题时看的就是最近发生了什么。
+fn read_logs(opts: &ServeOptions) -> Result<Value> {
+    let path = opts.data_root.join("logs").join("ui.log");
+    if !path.is_file() {
+        return Ok(json!({
+            "ok": true,
+            "path": path.display().to_string(),
+            "lines": [],
+            "note": "还没有日志文件（程序启动后由界面写入）",
+        }));
+    }
+    let text = std::fs::read_to_string(&path)?;
+    let all: Vec<&str> = text.lines().collect();
+    let take = 300.min(all.len());
+    let tail: Vec<String> = all[all.len() - take..]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    Ok(json!({
+        "ok": true,
+        "path": path.display().to_string(),
+        "total_lines": all.len(),
+        "lines": tail,
+    }))
+}
+
 /// 退出程序。
 ///
 /// 为什么需要这个接口：浏览器窗口是 `--app` 拉起来的独立进程，把它关掉之后
@@ -605,7 +671,7 @@ fn list_models(path: &Path, body: &str) -> Result<Value> {
         .and_then(|x| x.as_str())
         .filter(|x| !x.trim().is_empty())
         .map(String::from)
-        .unwrap_or_else(|| std::env::var("VCA_LLM_API_KEY").unwrap_or_default());
+        .unwrap_or_else(|| vca_core::secrets::get("VCA_LLM_API_KEY"));
 
     if base.trim().is_empty() || key.trim().is_empty() {
         return Ok(json!({

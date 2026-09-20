@@ -18,10 +18,47 @@
 //! 一行一条 `KEY=VALUE`，`#` 开头是注释，值两边的引号会被去掉。
 //! 空行忽略。解析失败的行跳过而不是报错 —— 一个文件里的笔误不该让程序起不来。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 
 /// 凭据文件名。
 pub const SECRETS_FILE: &str = "secrets.env";
+
+/// 进程内的即时覆盖。
+///
+/// # 为什么需要它（而不是 `std::env::set_var`）
+///
+/// 用户在界面上粘完 Key，紧接着就要点「拉取模型列表」「发送测试消息」——
+/// 那一刻必须已经能读到新 Key。最直觉的做法是 `std::env::set_var`，
+/// 但**多线程环境下改环境变量是未定义行为**：守护进程线程可能正好在
+/// `getenv`，轻则读到半截字符串、重则更糟。
+///
+/// 所以这里用一张进程内的表 —— 写入只碰自己的锁。读取优先级是
+/// **覆盖表 → 环境变量**。文件仍然照写，下次启动照常从文件加载。
+fn overrides() -> &'static Mutex<HashMap<String, String>> {
+    static M: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    M.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// 记一个即时生效的值（界面刚保存密钥时调用）。
+pub fn set_override(key: &str, value: &str) {
+    if let Ok(mut m) = overrides().lock() {
+        m.insert(key.to_string(), value.to_string());
+    }
+}
+
+/// 读一个密钥：先看即时覆盖，再看环境变量。都没有返回空串。
+pub fn get(key: &str) -> String {
+    if let Ok(m) = overrides().lock() {
+        if let Some(v) = m.get(key) {
+            if !v.trim().is_empty() {
+                return v.clone();
+            }
+        }
+    }
+    std::env::var(key).unwrap_or_default()
+}
 
 /// 解析 `KEY=VALUE` 文本。
 pub fn parse(text: &str) -> Vec<(String, String)> {
@@ -118,16 +155,28 @@ pub fn default_path(config_root: &Path) -> PathBuf {
     config_root.join(SECRETS_FILE)
 }
 
-/// 某个键当前是否已经可用（环境变量或凭据文件都算）。
+/// 某个键当前是否已经可用（即时覆盖、环境变量、凭据文件都算）。
 pub fn is_set(key: &str) -> bool {
-    std::env::var(key)
-        .map(|v| !v.trim().is_empty())
-        .unwrap_or(false)
+    !get(key).trim().is_empty()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn override_wins_over_env_and_is_readable() {
+        // 覆盖表要能盖住环境变量：界面刚保存的 Key 必须立刻生效
+        std::env::set_var("VCA_TEST_OVERRIDE_KEY", "from-env");
+        assert_eq!(get("VCA_TEST_OVERRIDE_KEY"), "from-env");
+        set_override("VCA_TEST_OVERRIDE_KEY", "from-ui");
+        assert_eq!(get("VCA_TEST_OVERRIDE_KEY"), "from-ui");
+        // 空值不该盖掉环境变量（界面留空表示"不改"）
+        set_override("VCA_TEST_OVERRIDE_KEY", "   ");
+        assert_eq!(get("VCA_TEST_OVERRIDE_KEY"), "from-env");
+        std::env::remove_var("VCA_TEST_OVERRIDE_KEY");
+        assert!(get("VCA_TEST_OVERRIDE_KEY_ABSENT").is_empty());
+    }
 
     #[test]
     fn parses_key_value_with_comments_and_quotes() {

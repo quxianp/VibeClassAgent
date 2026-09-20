@@ -168,23 +168,32 @@ enum Command {
 fn main() -> Result<()> {
     // 先把控制台切到 UTF-8，否则中文在简中 Windows 上是乱码
     vca_platform::session::ensure_utf8_console();
-    init_tracing();
 
     // 双击 exe 时用户的控制台里没有任何父进程，输出会一闪而过、
-    // 看起来像「程序打不开」。这里检测这种情况并改走交互菜单。
-    // 双击启动：同样进交互界面。
-    // 早期这里是一个独立的数字菜单，但菜单现在已经并进主界面
-    // （同一个提示符既认数字也认 / 命令），再留两套只会让文案、
-    // 配色和状态显示慢慢跑偏 —— 所以这里直接复用同一个入口。
+    // 看起来像「程序打不开」。现在有界面了，双击直接开界面。
     #[cfg(windows)]
     if std::env::args_os().len() <= 1 && vca_platform::session::launched_by_double_click() {
         let cli = Cli::parse();
         let (layout, _) = build_layout(&cli);
-        return repl::run(&layout, cli.profile.as_deref().unwrap_or("default"));
+        // 界面模式：日志额外落一份文件，界面上才看得到守护进程在干什么
+        std::env::set_var("VCA_UI", "1");
+        init_tracing(&layout);
+        return run_gui(
+            &layout,
+            cli.profile.as_deref().unwrap_or("default"),
+            0,
+            false,
+        );
     }
 
     let cli = Cli::parse();
     let (layout, path_source) = build_layout(&cli);
+
+    // 界面模式（不带子命令或显式 gui）下日志要落文件 —— 让 init_tracing 知道
+    if matches!(cli.command, None | Some(Command::Gui { .. })) {
+        std::env::set_var("VCA_UI", "1");
+    }
+    init_tracing(&layout);
 
     // 载入本地凭据文件（secrets.env）。放在这里、且在任何命令之前：
     // 后面所有模块读的都是环境变量，少一处加载就会有一个功能悄悄降级。
@@ -267,9 +276,34 @@ fn run_gui(
 }
 
 /// 初始化日志。`RUST_LOG` 控制级别，默认 `info`。
-fn init_tracing() {
+///
+/// 界面模式（`VCA_UI=1`）下额外写一份 `<数据目录>/logs/ui.log`：
+/// 守护进程跑在后台线程里，它的输出如果只走 stdout，用户在界面上
+/// 就完全看不到"它到底在干什么" —— 而看不到的东西最容易让人以为坏了。
+fn init_tracing(layout: &vca_core::paths::Layout) {
     use tracing_subscriber::{fmt, EnvFilter};
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
+
+    if std::env::var("VCA_UI").is_ok() {
+        let path = layout.data_root.join("logs").join("ui.log");
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Ok(f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = fmt()
+                .with_env_filter(filter)
+                .with_target(false)
+                .with_ansi(false) // 文件里不需要颜色转义
+                .with_writer(std::sync::Mutex::new(f))
+                .try_init();
+            return;
+        }
+    }
+
     let _ = fmt().with_env_filter(filter).with_target(false).try_init();
 }
 

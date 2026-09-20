@@ -98,8 +98,10 @@ def run_cargo_release() -> Path:
     env["PATH"] = os.pathsep.join(parts)
 
     log("[1/4] 编译 release …")
+    # -j 1：本机 8 GB 内存，release 开着 thin LTO，并行两个 codegen 单元会
+    # 直接吃爆内存（表现为 rustc 报 `memory allocation failed` 或 0xc0000409）。
     r = subprocess.run(
-        ["cargo", "build", "--release", "-p", "vca-cli", "-j", "2"],
+        ["cargo", "build", "--release", "-p", "vca-cli", "-j", "1"],
         cwd=str(ROOT),
         env=env,
     )
@@ -142,7 +144,7 @@ echo   VibeClassAgent  FIRST-TIME SETUP
 echo   This will check the environment and create missing files.
 echo ============================================================
 echo.
-vca.exe doctor fix
+vca.exe doctor --fix
 echo.
 echo ------------------------------------------------------------
 echo   Next: edit config\\profiles\\default\\settings.yaml
@@ -179,10 +181,19 @@ README_TXT = """VibeClassAgent —— 静默课堂录制与课后总结
 --------
     启动.cmd                进交互界面（推荐，输入 /help 看全部命令）
     vca.exe doctor          环境自检
-    vca.exe doctor fix      自检并自动生成目录与配置
+    vca.exe doctor --fix    自检并自动生成目录与配置
     vca.exe debug e2e       端到端冒烟测试（录 15 秒跑完整流程）
     vca.exe run             挂后台按课表自动录制与处理
     vca.exe --help          全部子命令
+
+运行环境
+--------
+* Windows 10 及以上（64 位）。程序本身只依赖系统自带的 DLL；
+  whisper 需要的 VC++ 运行库已经放在 tools\\whisper\\ 里，**不必另外安装**。
+* 录屏必须**在登录后的桌面会话里运行**（不能做成系统服务启动），
+  否则采集不到画面 —— 这也是它被设计成"双击启动"的原因。
+* 如果录不到麦克风，去「设置 → 隐私和安全性 → 麦克风」里确认
+  已允许桌面应用访问。
 
 提醒
 ----
@@ -239,8 +250,38 @@ def main() -> int:
         )
     log(f"      ffmpeg {ff} 个 / whisper {wh} 个 / 模型 {md} 个")
 
+    # ---- VC++ 运行库 ----
+    # whisper.cpp 是 MSVC 编译的，依赖 MSVCP140 / VCRUNTIME140 / VCOMP140 这几个 DLL。
+    # 一体机上未必装过 Visual C++ Redistributable，缺了它本地转写会直接失败
+    # （报「找不到 MSVCP140.dll」），而且往往是在课后处理时才炸 —— 那时课早就录完了。
+    # 这几个是微软允许随应用再发行的组件，放进 exe 同目录即可被优先加载，用户不必再装。
+    sys32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+    vc_names = [
+        "MSVCP140.dll",
+        "MSVCP140_1.dll",
+        "MSVCP140_2.dll",
+        "VCRUNTIME140.dll",
+        "VCRUNTIME140_1.dll",
+        "VCOMP140.DLL",
+        "CONCRT140.dll",
+    ]
+    vc_dir = out / "tools" / "whisper"
+    vc_dir.mkdir(parents=True, exist_ok=True)
+    got = 0
+    for name in vc_names:
+        p = sys32 / name
+        if p.is_file():
+            shutil.copy2(p, vc_dir / name)
+            got += 1
+    log(f"      VC++ 运行库 {got}/{len(vc_names)} 个")
+    if got < 4:
+        log("      警告：VC++ 运行库不全，目标机可能需要另装 Visual C++ Redistributable")
+
     # ---- 配置模板 ----
-    cfg_dst = out / "config" / "profiles" / "default"
+    # 放 `config/` 根下，而不是 profiles/default/：程序找不到课表时会按
+    # `config/schedule.example.yaml` 这条路径回退，放错地方等于没放。
+    # （模板本身也编在 exe 里，这里放一份是为了让用户能直接看到内容照着改。）
+    cfg_dst = out / "config"
     cfg_dst.mkdir(parents=True, exist_ok=True)
     copied = 0
     src_cfg = ROOT / "config"
@@ -251,6 +292,8 @@ def main() -> int:
             copied += 1
     if copied == 0:
         log("      警告：没有找到配置模板（config/*.example.yaml）")
+    # 真正生效的配置在 profiles/default/ 下，由「首次设置」生成。
+    (out / "config" / "profiles" / "default").mkdir(parents=True, exist_ok=True)
 
     # ---- 汇总 ----
     total = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())

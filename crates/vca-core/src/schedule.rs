@@ -275,6 +275,20 @@ pub fn next_transition(windows: &[OverlayWindow], now: LocalDateTime) -> Option<
     best
 }
 
+/// 两条课表的单双周是否恰好互斥（一条单周、一条双周）。
+///
+/// 互斥的两条不会同时生效，排在同一时段是正常用法，不算冲突。
+fn parity_exclusive(a: Option<&str>, b: Option<&str>) -> bool {
+    let (pa, pb) = (
+        WeekParity::parse(a.unwrap_or("")),
+        WeekParity::parse(b.unwrap_or("")),
+    );
+    matches!(
+        (pa, pb),
+        (WeekParity::Odd, WeekParity::Even) | (WeekParity::Even, WeekParity::Odd)
+    )
+}
+
 /// 判断时间表与课程表是否自洽（用于导入预校验，返回问题列表）。
 pub fn validate(timetable: Option<&Timetable>, plan: &ClassPlan) -> Vec<String> {
     let mut issues = Vec::new();
@@ -317,12 +331,18 @@ pub fn validate(timetable: Option<&Timetable>, plan: &ClassPlan) -> Vec<String> 
                 LocalDateTime::parse_hhmm(&b.end),
             ) {
                 if s1 < e2 && s2 < e1 {
-                    issues.push(format!(
-                        "第 {} 条与第 {} 条在 {} 时间重叠",
-                        i + 1,
-                        j + 1,
-                        a.day
-                    ));
+                    // 单双周互斥：同一天同一时段排「单周 A / 双周 B」是学校里
+                    // 的常规做法，它们不会同时生效，**不是冲突**。
+                    // 不特判的话，用户每次启动都会看到一条莫名其妙的
+                    // 「时间重叠」，然后去改本来完全正确的课表。
+                    if !parity_exclusive(a.cycle.as_deref(), b.cycle.as_deref()) {
+                        issues.push(format!(
+                            "第 {} 条与第 {} 条在 {} 时间重叠",
+                            i + 1,
+                            j + 1,
+                            a.day
+                        ));
+                    }
                 }
             }
         }
@@ -569,6 +589,32 @@ mod tests {
             entry("Mon", "08:30", "09:30", "语文", "t2", true),
         ]);
         let issues = validate(None, &p);
+        assert!(issues.iter().any(|s| s.contains("重叠")));
+    }
+
+    #[test]
+    fn odd_even_same_slot_is_not_a_conflict() {
+        // 同一天同一时段排「单周 A / 双周 B」是常规做法，两条不会同时生效。
+        // 以前会被误报成「时间重叠」，用户看到只会去改本来正确的课表。
+        let mut a = entry("Mon", "08:00", "09:00", "数学", "t1", true);
+        a.cycle = Some("odd".into());
+        let mut b = entry("Mon", "08:30", "09:30", "语文", "t2", true);
+        b.cycle = Some("even".into());
+        let issues = validate(None, &plan(vec![a, b]));
+        assert!(
+            !issues.iter().any(|s| s.contains("重叠")),
+            "单双周互斥不该算冲突：{issues:?}"
+        );
+    }
+
+    #[test]
+    fn same_parity_still_conflicts() {
+        // 两条都是单周 —— 那才是真的撞车，必须报出来
+        let mut a = entry("Mon", "08:00", "09:00", "数学", "t1", true);
+        a.cycle = Some("odd".into());
+        let mut b = entry("Mon", "08:30", "09:30", "语文", "t2", true);
+        b.cycle = Some("odd".into());
+        let issues = validate(None, &plan(vec![a, b]));
         assert!(issues.iter().any(|s| s.contains("重叠")));
     }
 

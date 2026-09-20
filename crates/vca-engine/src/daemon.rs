@@ -107,14 +107,27 @@ impl Daemon {
         }
         settings.apply_performance_profile();
 
-        // 课程表
+        // 课程表：用户配置 → 配置目录里的示例 → 内置模板。
+        //
+        // 三级兜底是有必要的：用户完全可能直接 `vca.exe run`（跳过首次设置），
+        // 这时三个文件一个都不在 —— 原先会在这里 `?` 出去、程序直接起不来，
+        // 用户看到的就是"双击没反应"。用内置模板起来之后，后续流程会明确
+        // 提示去补课表，比崩掉强得多。
         let sc_path = layout.config_root.join("schedule").join("current.yaml");
-        let sc_path = if sc_path.exists() {
-            sc_path
+        let sc_example = layout.config_root.join("schedule.example.yaml");
+        let schedule = if sc_path.exists() {
+            load_schedule_file(&sc_path)?
+        } else if sc_example.exists() {
+            load_schedule_file(&sc_example)?
         } else {
-            PathBuf::from("config/schedule.example.yaml")
+            let f: ScheduleFile = serde_yaml::from_str(vca_core::setup::SCHEDULE_TEMPLATE)?;
+            tracing::warn!(
+                "没有找到课表（{}），已用内置模板启动；\
+                 跑一次 `vca doctor --fix` 或 `vca setup` 生成后再填课程",
+                sc_path.display()
+            );
+            f
         };
-        let schedule = load_schedule_file(&sc_path)?;
 
         // 时间表
         let tt_path = layout.config_root.join("timetable").join("current.yaml");

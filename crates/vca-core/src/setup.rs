@@ -315,34 +315,129 @@ pub fn ready(rep: &RepairReport) -> bool {
 ///
 /// 之所以不做 YAML 反序列化再序列化：那会**丢掉全部注释**，
 /// 而示例配置里的注释正是给用户看的说明。
+///
+/// **必须按完整路径逐级定位，不能只看最后一段的 key 名。**
+/// 旧写法是拿 `llm.model` 的末段 `model` 去匹配**第一个** `model:` 行，
+/// 于是改掉了 transcriber 段的 `model: tiny`（那是 whisper 的模型名），
+/// 而 llm 段真正要改的 `model: "<模型名>"` 一个字符都没动 ——
+/// 用户看到的现象就是「配好的模型名，重启一遍没了」。
+/// 同理 `llm.provider` 会误伤 push 段的 `provider:`，
+/// 把推送渠道写成模型服务商的名字（`push.provider: deepseek`），于是推送永远发不出去。
+///
+/// 路径里的字段在模板中不存在时**追加到该段末尾**，而不是静默返回 false：
+/// 模板里没有 `provider:` 行很正常，静默失败等于「配置压根没保存」。
 pub fn patch_settings_line(path: &Path, key_path: &str, new_value: &str) -> std::io::Result<bool> {
     let text = std::fs::read_to_string(path)?;
-    let key = key_path.rsplit('.').next().unwrap_or(key_path);
-    let mut out: Vec<String> = Vec::new();
-    let mut done = false;
-    for line in text.lines() {
-        let trimmed = line.trim_start();
-        if !done && trimmed.starts_with(&format!("{key}:")) {
-            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-            // 保留行尾注释
-            let comment = line.find('#').map(|i| &line[i..]).unwrap_or("");
-            if comment.is_empty() {
-                out.push(format!("{indent}{key}: {new_value}"));
-            } else {
-                out.push(format!("{indent}{key}: {new_value}  {comment}"));
-            }
-            done = true;
-        } else {
-            out.push(line.to_string());
-        }
-    }
-    if !done {
+    let mut lines: Vec<String> = text.lines().map(|s| s.to_string()).collect();
+    let parts: Vec<&str> = key_path.split('.').filter(|s| !s.is_empty()).collect();
+    if parts.is_empty() {
         return Ok(false);
     }
-    let mut s = out.join("\n");
+    let leaf = *parts.last().unwrap_or(&"");
+
+    match locate(&lines, &parts) {
+        Some(li) => {
+            let line = lines[li].clone();
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+            // 保留行尾注释（模板里的说明全靠它）
+            let comment = line
+                .find('#')
+                .map(|i| line[i..].to_string())
+                .unwrap_or_default();
+            lines[li] = if comment.is_empty() {
+                format!("{indent}{leaf}: {new_value}")
+            } else {
+                format!("{indent}{leaf}: {new_value}  {comment}")
+            };
+        }
+        None => {
+            // 父段都不存在（顶层字段名写错了，或模板缺这一整段）：
+            // 宁可不写，也不要往文件里塞一个孤儿字段 —— 那会做出一个
+            // 结构畸形的配置，下次解析直接失败。
+            if parts.len() > 1 && locate(&lines, &parts[..parts.len() - 1]).is_none() {
+                return Ok(false);
+            }
+            let (at, indent) = insertion_point(&lines, &parts);
+            lines.insert(at, format!("{indent}{leaf}: {new_value}"));
+        }
+    }
+
+    let mut s = lines.join("\n");
     s.push('\n');
     std::fs::write(path, s)?;
     Ok(true)
+}
+
+/// 按 `a.b.c` 逐级定位行号：每一级都必须落在上一级的缩进块里。
+///
+/// 顶层字段要求顶格（缩进 0），否则会在别人的子块里找到同名 key。
+fn locate(lines: &[String], parts: &[&str]) -> Option<usize> {
+    let mut start = 0usize;
+    let mut parent_indent: Option<usize> = None;
+    let mut hit: Option<usize> = None;
+
+    for part in parts {
+        let needle = format!("{part}:");
+        let mut j = start;
+        let mut found: Option<(usize, usize)> = None;
+        while j < lines.len() {
+            let line = &lines[j];
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                j += 1;
+                continue;
+            }
+            let indent = line.len() - trimmed.len();
+            match parent_indent {
+                Some(base) if indent <= base => break, // 已经走出父段
+                None if indent != 0 => {
+                    j += 1;
+                    continue; // 顶层字段必须顶格
+                }
+                _ => {}
+            }
+            if trimmed.starts_with(&needle) {
+                found = Some((j, indent));
+                break;
+            }
+            j += 1;
+        }
+        let (li, ind) = found?;
+        hit = Some(li);
+        parent_indent = Some(ind);
+        start = li + 1;
+    }
+    hit
+}
+
+/// 字段不存在时该插到哪：父段内最后一个子行的下一行（即父段末尾）。
+fn insertion_point(lines: &[String], parts: &[&str]) -> (usize, String) {
+    let parents: Vec<&str> = parts[..parts.len() - 1].to_vec();
+    let (from, parent_indent) = if parents.is_empty() {
+        (0usize, 0usize)
+    } else {
+        match locate(lines, &parents) {
+            Some(li) => {
+                let trimmed = lines[li].trim_start();
+                (li + 1, lines[li].len() - trimmed.len())
+            }
+            None => (0usize, 0usize),
+        }
+    };
+
+    let mut at = lines.len();
+    for (j, line) in lines.iter().enumerate().skip(from) {
+        let trimmed = line.trim_start();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let indent = line.len() - trimmed.len();
+        if indent <= parent_indent {
+            at = j;
+            break;
+        }
+    }
+    (at, " ".repeat(parent_indent + 2))
 }
 
 #[cfg(test)]
@@ -353,6 +448,60 @@ mod tests {
         let base = std::env::temp_dir().join(format!("vca_setup_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         Layout::new(base.join("data"), base.join("config"))
+    }
+
+    /// 造一个「模板已就位」的 profile，返回 (布局, settings.yaml 路径)。
+    fn tmp_with_settings(tag: &str) -> (Layout, std::path::PathBuf) {
+        let l = tmp(tag);
+        std::fs::create_dir_all(l.profile_config_dir("default")).unwrap();
+        let p = l.profile_config_dir("default").join("settings.yaml");
+        std::fs::write(&p, SETTINGS_TEMPLATE).unwrap();
+        (l, p)
+    }
+
+    #[test]
+    fn patch_hits_the_right_section() {
+        // 回归：模板里 transcriber 段有 `model: tiny`。
+        // 旧实现只拿末段 key 名去匹配第一个 `model:` 行，于是把 **whisper 的
+        // 模型名**改成了 LLM 模型名，而 llm 段该改的那行纹丝不动 ——
+        // 用户看到的现象就是「配好的模型名，重启一遍没了」。
+        let (l, p) = tmp_with_settings("patch_section");
+
+        assert!(patch_settings_line(&p, "llm.model", "\"deepseek-chat\"").unwrap());
+        let s: crate::config::Settings = load_settings(&p).unwrap();
+        assert_eq!(s.llm.model, "deepseek-chat");
+        assert_eq!(s.transcriber.model, "tiny", "不能误伤 whisper 的模型名");
+        let _ = std::fs::remove_dir_all(&l.data_root);
+    }
+
+    #[test]
+    fn patch_does_not_touch_push_provider() {
+        // 回归：`llm.provider` 曾经改到 push 段的 `provider:` 上，
+        // 把推送渠道写成模型服务商的名字 —— 于是推送永远发不出去，
+        // 而界面上还显示「未配置推送」，用户完全找不到问题在哪。
+        let (l, p) = tmp_with_settings("patch_push");
+
+        assert!(patch_settings_line(&p, "llm.provider", "\"deepseek\"").unwrap());
+        let s: crate::config::Settings = load_settings(&p).unwrap();
+        assert_eq!(s.llm.provider, "deepseek");
+        assert_ne!(
+            s.push.provider, "deepseek",
+            "push.provider 不该被模型服务商的名字污染"
+        );
+        let _ = std::fs::remove_dir_all(&l.data_root);
+    }
+
+    #[test]
+    fn patch_appends_missing_key_into_its_section() {
+        // 模板的 llm 段里没有 provider 行；这时应当**追加进 llm 段**，
+        // 而不是静默返回 false（那等于「配置压根没保存」）。
+        let (l, p) = tmp_with_settings("patch_append");
+
+        assert!(patch_settings_line(&p, "llm.provider", "\"moonshot\"").unwrap());
+        let s: crate::config::Settings = load_settings(&p).unwrap();
+        assert_eq!(s.llm.provider, "moonshot");
+        assert_ne!(s.push.provider, "moonshot", "别落到 push 段去");
+        let _ = std::fs::remove_dir_all(&l.data_root);
     }
 
     #[test]
@@ -493,11 +642,28 @@ mod tests {
     }
 
     #[test]
-    fn patch_settings_returns_false_for_unknown_key() {
+    fn patch_settings_appends_but_never_silently_drops() {
+        // 旧语义是「找不到 key 就返回 false」，调用方一路 `let _ =` 忽略掉 ——
+        // 结果就是用户以为配好了、其实一个字段都没写进去。
+        // 现在的语义：**段在就把字段追加进段里**；连段都不存在才返回 false。
         let l = tmp("patch2");
         let _ = repair(&l, "default");
         let p = l.profile_config_dir("default").join("settings.yaml");
-        assert!(!patch_settings_line(&p, "no.such.key", "1").unwrap());
+
+        assert!(
+            !patch_settings_line(&p, "no.such.key", "1").unwrap(),
+            "连顶层段都没有，就别往文件里塞孤儿字段"
+        );
+        assert!(
+            patch_settings_line(&p, "llm.extra_field", "\"x\"").unwrap(),
+            "段存在、字段缺失时必须真的写进去"
+        );
+
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.contains("extra_field: \"x\""), "缺字段应被追加");
+        assert!(!text.contains("no.such.key"), "不存在的那条不该落盘");
+        let s: Settings = serde_yaml::from_str(&text).expect("追加后仍是合法 YAML");
+        assert!(!s.llm.model.is_empty(), "原有字段不受影响");
         let _ = std::fs::remove_dir_all(&l.data_root);
     }
 

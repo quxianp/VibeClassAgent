@@ -1,34 +1,42 @@
 # ============================================================================
-# 课程表示例  格式示例，请按实际课表修改
+# 课程表 —— 默认是**空的**，请填上你自己的课，或用 `vca import` 导入。
 # ----------------------------------------------------------------------------
-# 课程表 = 时间表骨架上的课程填充，含任课教师与「是否录制」勾选。
-# 导入方式：手工填写 / CSV / Excel / ClassIsland 导入（策划书附录 B、D）。
-# 注意：示例中的课程与教师均为虚构占位，不涉及任何真实学校数据。
+# 为什么默认空着：示例课程会让人以为「程序自带课表」，而每所学校的课
+# 都不一样。空着启动时程序会明确说「今天没有课」，比假装有课清楚得多。
+#
+# 怎么填（三个办法，任选）
+#   1) 交互界面里选「3 课表管理」→「导入」（推荐）
+#   2) 命令行：vca import classisland "C:\...\Default.json"
+#   3) 直接改这个文件（格式见下）
+#
+# 字段说明
+#   day        星期，Mon / Tue / Wed / Thu / Fri / Sat / Sun
+#   period     第几节，仅用于显示
+#   start/end  起止时间 HH:MM，应当落在时间表里 type: class 的时段内
+#   course     课程名
+#   teacherId  教师 id，对应下面 teachers 里的 id
+#   record     这节课要不要录（true / false）—— 不想录的设 false
+#   cycle      单双周：every（默认）/ odd（单周）/ even（双周）
+#
+# 一条长这样（去掉行首的 # 即可启用）：
+#   - { day: Mon, period: 1, start: "08:00", end: "08:45", course: "语文", teacherId: t1, record: true }
+#
+# 单双周排在同一时段是正常用法，程序不会当成冲突：
+#   - { day: Wed, period: 1, start: "08:00", end: "08:45", course: "单周课", teacherId: t1, record: true, cycle: odd }
+#   - { day: Wed, period: 1, start: "08:00", end: "08:45", course: "双周课", teacherId: t1, record: true, cycle: even }
 # ============================================================================
 
 teachers:
-  - { id: teacher_a, name: "教师甲", profile: teacher_a }
-  - { id: teacher_b, name: "教师乙", profile: teacher_b }
+  - { id: t1, name: "我的课", profile: default }
 
 week_template:
-  cycle: "1"            # 1/单周/双周/every
-  entries:
-    - { day: Mon, period: 1, start: "08:00", end: "08:45", course: "课程一", teacherId: teacher_a, record: true,  room: "教室一" }
-    - { day: Mon, period: 2, start: "08:55", end: "09:40", course: "课程一", teacherId: teacher_a, record: true,  merge: true }
-    - { day: Mon, period: 3, start: "10:00", end: "10:45", course: "课程二", teacherId: teacher_b, record: false }
-    - { day: Tue, period: 1, start: "08:00", end: "08:45", course: "课程二", teacherId: teacher_b, record: true }
+  cycle: "every"
+  entries: []
 
-    # 条目级单双周：同一天同一节，单周上数学、双周上语文
-    - { day: Wed, period: 1, start: "08:00", end: "08:45", course: "课程四", teacherId: teacher_b, record: false, cycle: odd }
-    - { day: Wed, period: 1, start: "08:00", end: "08:45", course: "课程五", teacherId: teacher_a, record: false, cycle: even }
-
+# 周末课表：source 为 new 表示用下面自己的 entries；想沿用工作日课表就写 source: inherit
 weekend_template:
-  source: new           # new（新建）| inherit（沿用历史）
-  inherit_from: ""      # source=inherit 时填写历史周次或版本号
-  entries:
-    - { day: Sat, start: "09:00", end: "10:30", course: "课程三", teacherId: teacher_a, record: true }
+  source: new
+  entries: []
 
-overrides:
-  # 临时调课 / 停课
-  - { date: "2025-03-20", action: cancel }
-  - { date: "2025-03-21", action: move, target: { day: Mon, start: "08:00", end: "08:45", course: "课程一", teacherId: teacher_a, record: true } }
+# 临时调课：某一天替换掉某节课，格式与 entries 相同
+overrides: []

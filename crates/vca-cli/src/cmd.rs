@@ -523,12 +523,16 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
         )
     );
     println!();
-    println!("{}", vca_core::i18n::t("cmd.out.接下来建议按顺序做"));
-    println!("{}", vca_core::i18n::t("cmd.out.1vcadoctor--fi"));
-    println!("{}", vca_core::i18n::t("cmd.out.2vcadebugrecor"));
-    println!("{}", vca_core::i18n::t("cmd.out.3vcaoverlaypla"));
-    println!("{}", vca_core::i18n::t("cmd.out.4vcarun--dry-r"));
-    println!("{}", vca_core::i18n::t("cmd.out.5vcarun正式运行"));
+    // 这里给的是**主菜单里的序号**，不是 shell 命令。
+    // 之前写的是 `vca doctor --fix` 这类外部命令 —— 用户双击进来之后根本没法执行，
+    // 只能退出去再开一个 cmd 窗口，等于给了一串看不懂的提示。
+    println!("{}", vca_core::i18n::t("cmd.out.接下来这样走回主菜单输"));
+    println!("{}", vca_core::i18n::t("cmd.out.   3课表管理导入你的课"));
+    println!("{}", vca_core::i18n::t("cmd.out.   2配置推送配好之后文"));
+    println!("{}", vca_core::i18n::t("cmd.out.   4环境自检与修复再"));
+    println!("{}", vca_core::i18n::t("cmd.out.   5录制测试录10秒"));
+    println!("{}", vca_core::i18n::t("cmd.out.   8试运行不真录不"));
+    println!("{}", vca_core::i18n::t("cmd.out.   9正式运行按课表自"));
     println!();
     println!(
         "{}",
@@ -1163,11 +1167,135 @@ fn style_from(s: &OverlaySettings) -> overlay::OverlayStyle {
 ///
 /// `panic` 用于**验证崩溃静默退出**：安装崩溃处理器后主动 panic，
 /// 期望行为是「写入 crash.log 并以退出码 70 静默结束，不打印、不弹窗」。
+/// 密钥打码：只留长度与首尾几位，用来确认「填没填、填对没填对」。
+fn mask_secret(s: &str) -> String {
+    let t = s.trim();
+    if t.is_empty() {
+        return "（未设置）".to_string();
+    }
+    let n = t.chars().count();
+    if n <= 8 {
+        return format!("已设置（{n} 字符）");
+    }
+    let head: String = t.chars().take(4).collect();
+    let tail: String = t.chars().skip(n - 4).collect();
+    format!("{head}…{tail}（{n} 字符）")
+}
+
+/// 直接发一条测试消息，验证推送渠道到底通不通。
+///
+/// 为什么需要它：推送链路上任何一环不对 —— 地址、token、群号、机器人不在线、
+/// NapCat 没开 HTTP 服务 —— 症状全是同一个「课后没收到消息」。
+/// 等真上完一节课才发现发不出去，代价太大。这个命令让配置完就能立刻验证，
+/// 而且报的是**原始错误**（HTTP 状态码 + 服务端返回体），可以直接拿去搜。
+pub fn push_test(layout: &Layout, profile: &str) -> Result<()> {
+    use vca_platform::push::{
+        make_pusher, send_with_retry, Provider as PushProvider, PushConfig, PushDoc,
+    };
+
+    let settings_path = layout.profile_config_dir(profile).join("settings.yaml");
+    let s = vca_core::config::load_settings(&settings_path).unwrap_or_default();
+
+    println!("{}", "-".repeat(62));
+    println!("{}", vca_core::i18n::t("push.test_title"));
+    println!("{}", "-".repeat(62));
+
+    let id = s.push.provider.trim().to_string();
+    if id.is_empty() {
+        println!("{}", vca_core::i18n::t("push.test_no_provider"));
+        return Ok(());
+    }
+    let Some(provider) = PushProvider::parse(&id) else {
+        println!("{}", vca_core::i18n::tf("push.test_unknown", &[("p", &id)]));
+        println!("   可用渠道：wecom / qq / onebot / serverchan / webhook / wechat-personal");
+        return Ok(());
+    };
+
+    // 与 pipeline.rs 完全一致的取值逻辑：配置优先，空则回落到环境变量。
+    // 两处必须一致 —— 否则会出现「测试通过、真推送失败」这种最难查的偏差。
+    let endpoint = if s.push.endpoint.trim().is_empty() {
+        std::env::var("VCA_PUSH_ENDPOINT").unwrap_or_default()
+    } else {
+        s.push.endpoint.clone()
+    };
+    let token = std::env::var("VCA_PUSH_TOKEN").unwrap_or_default();
+
+    println!("   provider          = {id}");
+    println!(
+        "   endpoint          = {}",
+        if endpoint.is_empty() {
+            "（空）"
+        } else {
+            &endpoint
+        }
+    );
+    println!(
+        "   target            = {}（{}）",
+        s.push.target.clone().unwrap_or_default(),
+        s.push.target_type
+    );
+    println!("   VCA_PUSH_TOKEN    = {}", mask_secret(&token));
+    if provider == PushProvider::QqOfficial {
+        println!(
+            "   VCA_QQ_APP_ID     = {}",
+            mask_secret(&std::env::var("VCA_QQ_APP_ID").unwrap_or_default())
+        );
+        println!(
+            "   VCA_QQ_APP_SECRET = {}",
+            mask_secret(&std::env::var("VCA_QQ_APP_SECRET").unwrap_or_default())
+        );
+    }
+    println!();
+
+    let cfg = PushConfig {
+        provider,
+        endpoint,
+        token,
+        target: s.push.target.clone().unwrap_or_default(),
+        target_type: s.push.target_type.clone(),
+        app_id: std::env::var("VCA_QQ_APP_ID").unwrap_or_default(),
+        app_secret: std::env::var("VCA_QQ_APP_SECRET").unwrap_or_default(),
+        max_retries: 1,
+        timeout_ms: 30_000,
+    };
+    let pusher = make_pusher(&cfg);
+    let doc = PushDoc {
+        title: "VibeClassAgent 推送测试".to_string(),
+        summary: "这是一条测试消息。收到它就说明推送链路是通的。".to_string(),
+        docx: None,
+        pdf: None,
+        target: s.push.target.clone(),
+    };
+
+    println!("{}", vca_core::i18n::t("push.test_sending"));
+    let out = send_with_retry(pusher.as_ref(), &doc, 1);
+    println!();
+    if out.success {
+        println!(
+            "{}",
+            vca_core::i18n::tf(
+                "push.test_ok",
+                &[("id", out.message_id.as_deref().unwrap_or("-"))]
+            )
+        );
+    } else {
+        println!("{}", vca_core::i18n::t("push.test_fail"));
+        println!(
+            "   {}",
+            out.error.unwrap_or_else(|| "（没有更多信息）".to_string())
+        );
+    }
+    println!();
+    println!("{}", vca_core::i18n::t("push.test_notes"));
+    Ok(())
+}
+
 pub fn debug(layout: &Layout, action: &str) -> Result<()> {
     let log_dir = layout.profile_data_dir("default").join("logs");
     let handler = vca_platform::crash::CrashHandler::new(&log_dir);
 
     match action {
+        "push-test" => push_test(layout, "default"),
         "panic" => {
             handler.install();
             // 主动制造一次 panic，用于端到端验证静默退出。
@@ -1744,6 +1872,266 @@ pub fn clean(layout: &Layout, dry_run: bool) -> Result<()> {
 /// - `classisland <Default.json>`：从 ClassIsland 导入（**只读**，不改动其文件）；
 /// - `csv <file.csv>`：从 CSV 导入；
 /// - `template csv|timetable`：输出模板到标准输出。
+// 问一句、读一行（空白输入返回空串，调用方自行决定是否算跳过）。
+fn ask(key: &str) -> Result<String> {
+    use std::io::Write as _;
+    print!("      {}", vca_core::i18n::t(key));
+    let _ = std::io::stdout().flush();
+    Ok(read_line().trim().to_string())
+}
+
+/// 交互式配置推送渠道。
+///
+/// 为什么把它做成一等功能：推送是「课后把文档送到老师手上」的最后一环 ——
+/// 配不通的话，前面录得再认真也没人看得到。而它偏偏又是配置项最多、
+/// 各家差异最大的一环：企业微信只要一个 URL，QQ 官方要 appid+secret+群号，
+/// OneBot 还要本地服务地址。让用户对着示例文件逐个字段猜，
+/// 实际结果就是「这软件好像没有推送功能」。
+pub fn push_setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
+    let profile = profile.unwrap_or("default");
+    let settings_path = layout.profile_config_dir(profile).join("settings.yaml");
+    if !settings_path.exists() {
+        let _ = vca_core::setup::repair(layout, profile);
+    }
+    let secrets_path = vca_core::secrets::default_path(&layout.config_root);
+
+    println!("{}", "-".repeat(62));
+    println!("{}", vca_core::i18n::t("push.setup_title"));
+    println!("{}", "-".repeat(62));
+
+    let cur = vca_core::config::load_settings(&settings_path).unwrap_or_default();
+    if !cur.push.provider.trim().is_empty() {
+        println!(
+            "{}",
+            vca_core::i18n::tf("push.current", &[("p", &cur.push.provider)])
+        );
+    }
+    println!();
+
+    // 顺序即推荐度：OneBot 最灵活（自建 NapCat），企业微信最省事
+    let channels: &[(&str, &str, &str)] = &[
+        (
+            "onebot",
+            "OneBot 11（NapCat / Lagrange）",
+            "本地自建 QQ 机器人，功能全、可发群",
+        ),
+        ("wecom", "企业微信机器人", "只要一个 Webhook 地址，最省事"),
+        ("qq", "QQ 官方机器人", "需开放平台审核，凭据较多"),
+        ("serverchan", "Server 酱", "推到微信，只要一个 SendKey"),
+        ("webhook", "通用 Webhook", "发到你自己的服务"),
+        (
+            "wechat-personal",
+            "个人微信（第三方协议）",
+            "有账号风险，请自行评估",
+        ),
+    ];
+    for (i, (_, name, note)) in channels.iter().enumerate() {
+        println!("   {:>2}) {:<30} {}", i + 1, name, note);
+    }
+    println!("    {:>2}) {}", 0, vca_core::i18n::t("push.skip"));
+    println!();
+    let idx: usize = ask(&vca_core::i18n::tf(
+        "push.pick",
+        &[("n", &channels.len().to_string())],
+    ))?
+    .parse()
+    .unwrap_or(0);
+
+    if idx == 0 || idx > channels.len() {
+        println!("{}", vca_core::i18n::t("push.skipped"));
+        return Ok(());
+    }
+    let (id, name, _) = channels[idx - 1];
+
+    // 写配置：全部走 patch_settings_line，它按 llm./push. 这样的完整路径定位，
+    // 不会误伤别的段（曾经它只看末段 key 名，把 llm.provider 写到 push 段上）。
+    let set = |k: &str, v: &str| {
+        let _ = vca_core::setup::patch_settings_line(&settings_path, k, v);
+    };
+    let mut saved_secret = false;
+    let mut save = |key: &str, val: &str| -> Result<()> {
+        if !val.is_empty() {
+            vca_core::secrets::upsert(&secrets_path, key, val)?;
+            saved_secret = true;
+        }
+        Ok(())
+    };
+
+    match id {
+        "wecom" => {
+            let url = ask("push.ask_wecom_url")?;
+            if url.is_empty() {
+                println!("{}", vca_core::i18n::t("push.skipped"));
+                return Ok(());
+            }
+            set("push.provider", "\"wecom\"");
+            set("push.endpoint", &format!("\"{url}\""));
+        }
+        "qq" => {
+            let group = ask("push.ask_group")?;
+            let appid = ask("push.ask_appid")?;
+            let secret = ask("push.ask_secret")?;
+            set("push.provider", "\"qq\"");
+            set("push.target", &format!("\"{group}\""));
+            set("push.target_type", "\"group\"");
+            save("VCA_QQ_APP_ID", &appid)?;
+            save("VCA_QQ_APP_SECRET", &secret)?;
+        }
+        "onebot" => {
+            let ep = ask("push.ask_endpoint")?;
+            let ep = if ep.is_empty() {
+                "http://127.0.0.1:3000".to_string()
+            } else {
+                ep
+            };
+            let group = ask("push.ask_group")?;
+            let token = ask("push.ask_token")?;
+            set("push.provider", "\"onebot\"");
+            set("push.endpoint", &format!("\"{ep}\""));
+            set("push.target", &format!("\"{group}\""));
+            set("push.target_type", "\"group\"");
+            save("VCA_PUSH_TOKEN", &token)?;
+        }
+        "serverchan" => {
+            let key = ask("push.ask_sendkey")?;
+            if key.is_empty() {
+                println!("{}", vca_core::i18n::t("push.skipped"));
+                return Ok(());
+            }
+            set("push.provider", "\"serverchan\"");
+            save("VCA_PUSH_TOKEN", &key)?;
+        }
+        "webhook" => {
+            let url = ask("push.ask_webhook")?;
+            if url.is_empty() {
+                println!("{}", vca_core::i18n::t("push.skipped"));
+                return Ok(());
+            }
+            let token = ask("push.ask_token")?;
+            set("push.provider", "\"webhook\"");
+            set("push.endpoint", &format!("\"{url}\""));
+            save("VCA_PUSH_TOKEN", &token)?;
+        }
+        "wechat-personal" => {
+            let ep = ask("push.ask_endpoint")?;
+            let target = ask("push.ask_user")?;
+            let token = ask("push.ask_token")?;
+            set("push.provider", "\"wechat-personal\"");
+            set("push.endpoint", &format!("\"{ep}\""));
+            set("push.target", &format!("\"{target}\""));
+            set("push.target_type", "\"private\"");
+            save("VCA_PUSH_TOKEN", &token)?;
+        }
+        _ => {}
+    }
+
+    println!();
+    println!("{}", vca_core::i18n::tf("push.done", &[("name", name)]));
+    // 立刻回读一遍：确认真的写进去了（这曾经是个静默失败的地方）
+    let after = vca_core::config::load_settings(&settings_path).unwrap_or_default();
+    if after.push.provider.trim() != id {
+        println!("{}", vca_core::i18n::t("push.write_failed"));
+        return Ok(());
+    }
+    println!("   push.provider = {}", after.push.provider);
+    if let Some(t) = &after.push.target {
+        if !t.is_empty() {
+            println!("   push.target   = {t}（{}）", after.push.target_type);
+        }
+    }
+    if !after.push.endpoint.is_empty() {
+        println!("   push.endpoint = {}", after.push.endpoint);
+    }
+    if saved_secret {
+        println!(
+            "{}",
+            vca_core::i18n::tf(
+                "push.secret_saved",
+                &[("p", &secrets_path.display().to_string())]
+            )
+        );
+    }
+    println!();
+    println!("{}", vca_core::i18n::t("push.verify_hint"));
+    Ok(())
+}
+
+/// 课表管理：查看 / 导入 / 取模板。
+///
+/// 课表是「该录哪节课」的唯一依据，但它同时是**用户数据**而不是配置 ——
+/// 每学期都要换、临时还要调。让它只能靠手改 yaml 是说不过去的。
+pub fn schedule_menu(layout: &Layout, profile: Option<&str>) -> Result<()> {
+    let profile = profile.unwrap_or("default");
+    println!("{}", "-".repeat(62));
+    println!("{}", vca_core::i18n::t("sched.title"));
+    println!("{}", "-".repeat(62));
+
+    // 现状：文件在哪、有几条、今天几节
+    let sc_path = layout.config_root.join("schedule").join("current.yaml");
+    let (ok, n) = schedule_state(layout, profile);
+    println!(
+        "{}",
+        vca_core::i18n::tf("sched.where", &[("p", &sc_path.display().to_string())])
+    );
+    if ok {
+        println!(
+            "{}",
+            vca_core::i18n::tf("sched.count", &[("n", &n.to_string())])
+        );
+    } else {
+        println!("{}", vca_core::i18n::t("sched.empty"));
+    }
+    println!();
+
+    println!("   1) {}", vca_core::i18n::t("sched.m_import_classisland"));
+    println!("   2) {}", vca_core::i18n::t("sched.m_import_csv"));
+    println!("   3) {}", vca_core::i18n::t("sched.m_template"));
+    println!("   4) {}", vca_core::i18n::t("sched.m_open"));
+    println!("   5) {}", vca_core::i18n::t("sched.m_edit"));
+    println!("   0) {}", vca_core::i18n::t("sched.m_back"));
+    println!();
+    let pick: usize = ask("sched.pick")?.parse().unwrap_or(0);
+
+    match pick {
+        1 => {
+            let p = ask("sched.ask_classisland")?;
+            if p.is_empty() {
+                return Ok(());
+            }
+            import(layout, "classisland", Some(&p), None)?;
+        }
+        2 => {
+            let p = ask("sched.ask_csv")?;
+            if p.is_empty() {
+                return Ok(());
+            }
+            import(layout, "csv", Some(&p), None)?;
+        }
+        3 => {
+            println!();
+            print!("{}", vca_core::import::csv_template());
+            println!();
+            println!("{}", vca_core::i18n::t("sched.template_hint"));
+        }
+        4 => {
+            let dir = layout.config_root.join("schedule");
+            println!(
+                "{}",
+                vca_core::i18n::tf("sched.opened", &[("p", &dir.display().to_string())])
+            );
+            let _ = std::process::Command::new("explorer").arg(&dir).spawn();
+        }
+        5 => {
+            println!(
+                "{}",
+                vca_core::i18n::tf("sched.edit_hint", &[("p", &sc_path.display().to_string())])
+            );
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
 pub fn import(
     layout: &Layout,
     source: &str,

@@ -222,7 +222,7 @@ fn print_welcome(layout: &Layout, profile: &str) {
     // 斜杠命令在同一个提示符下并存 —— 输数字走菜单，输 / 开头走命令，
     // 两者互不影响，也不需要切换模式。
     println!("  {}{}{}", c::ACCENT, t("menu.title"), c::RESET);
-    for key in ["1", "2", "3", "4", "5", "6", "7", "8", "0"] {
+    for key in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"] {
         println!(
             "   {}{}{}  {}",
             c::CYAN,
@@ -303,13 +303,14 @@ pub fn dispatch(layout: &Layout, profile: &str, line: &str) -> Result<Flow> {
 fn menu_action(layout: &Layout, profile: &str, n: u32) -> Result<Flow> {
     match n {
         1 => crate::cmd::setup(layout, Some(profile))?,
-        2 => crate::cmd::doctor(layout, true, Some(profile))?,
-        3 => crate::cmd::debug(layout, "record-test")?,
-        4 => process(layout, profile, &[])?,
-        5 => status(layout, profile)?,
-        6 => crate::cmd::run(layout, None, true)?,
-        7 => crate::cmd::run(layout, None, false)?,
-        8 => crate::cmd::clean(layout, true)?,
+        2 => crate::cmd::push_setup(layout, Some(profile))?,
+        3 => crate::cmd::schedule_menu(layout, Some(profile))?,
+        4 => crate::cmd::doctor(layout, true, Some(profile))?,
+        5 => crate::cmd::debug(layout, "record-test")?,
+        6 => process(layout, profile, &[])?,
+        7 => status(layout, profile)?,
+        8 => crate::cmd::run(layout, None, true)?,
+        9 => crate::cmd::run(layout, None, false)?,
         0 => return Ok(Flow::Quit),
         other => {
             println!(
@@ -333,7 +334,7 @@ fn help() {
 
     println!();
     println!("  {}{}{}", c::TEXT, t("cmd.help_menu_section"), c::RESET);
-    for key in ["1", "2", "3", "4", "5", "6", "7", "8", "0"] {
+    for key in ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0"] {
         println!(
             "   {}{}{}  {}",
             c::CYAN,

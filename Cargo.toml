@@ -12,6 +12,7 @@ members = [
     "crates/vca-cli",
     "crates/vca-engine",
     "crates/vca-core",
+    "crates/vca-gui",
     "crates/vca-ipc",
     "crates/vca-plugin-host",
     "crates/vca-platform",
@@ -36,6 +37,7 @@ vca-ipc = { path = "crates/vca-ipc" }
 vca-plugin-host = { path = "crates/vca-plugin-host" }
 vca-platform = { path = "crates/vca-platform" }
 vca-engine = { path = "crates/vca-engine" }
+vca-gui = { path = "crates/vca-gui" }
 
 # --- 外部依赖（框架骨架所需最小集合） ---
 serde = { version = "1", features = ["derive"] }

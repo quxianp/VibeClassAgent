@@ -1,0 +1,20 @@
+[package]
+name = "vca-gui"
+version.workspace = true
+edition.workspace = true
+description = "VibeClassAgent 图形界面：内嵌 HTTP 服务 + 系统浏览器应用模式"
+
+[dependencies]
+vca-core = { workspace = true }
+vca-platform = { workspace = true }
+vca-engine = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+
+# tiny_http：同步、极小、零 tokio。
+# 为什么不用 axum/warp：那些都要拉 tokio 全家桶，为了几十行路由不值 ——
+# 而且本项目其余部分（录制、转写）全是同步阻塞的，混一套异步运行时只会更复杂。
+tiny_http = "0.12"

@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 vca-core.workspace = true
+vca-gui.workspace = true
 vca-ipc.workspace = true
 vca-plugin-host.workspace = true
 vca-platform.workspace = true

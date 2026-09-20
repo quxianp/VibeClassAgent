@@ -145,7 +145,16 @@ enum Command {
         /// 动作：`panic` / `crash-info` / `paths` / `audio` / `record-test`。
         action: String,
     },
-    /// 交互式命令行界面（不带子命令时默认进入）。
+    /// 图形界面（推荐）：本机起一个小服务，用 Edge 以应用模式打开独立窗口。
+    Gui {
+        /// 端口；0 表示自动挑一个空闲端口。
+        #[arg(long, default_value_t = 0)]
+        port: u16,
+        /// 只起服务、不自动开窗口（排查用，会打印地址）。
+        #[arg(long)]
+        no_open: bool,
+    },
+    /// 交互式命令行界面（CLI 已存档，日常请用 `vca gui`）。
     Chat,
     /// profile 管理（多教师共用）。
     Profile {
@@ -193,8 +202,20 @@ fn main() -> Result<()> {
     }
 
     match cli.command {
-        // 不带子命令时进入交互界面：像 Claude Code 那样敲 `vca` 就直接开始用。
-        None => repl::run(&layout, cli.profile.as_deref().unwrap_or("default")),
+        // 不带子命令时进图形界面：现在 GUI 是主形态，双击就该看到界面。
+        // （CLI 仍然完整可用，用 `vca chat` 显式进入。）
+        None => run_gui(
+            &layout,
+            cli.profile.as_deref().unwrap_or("default"),
+            0,
+            false,
+        ),
+        Some(Command::Gui { port, no_open }) => run_gui(
+            &layout,
+            cli.profile.as_deref().unwrap_or("default"),
+            port,
+            no_open,
+        ),
         Some(Command::Chat) => repl::run(&layout, cli.profile.as_deref().unwrap_or("default")),
         Some(Command::Import {
             source,
@@ -220,6 +241,29 @@ fn main() -> Result<()> {
         Some(Command::Debug { action }) => cmd::debug(&layout, &action),
         Some(Command::Profile { action, name }) => cmd::profile(&layout, &action, name.as_deref()),
     }
+}
+
+/// 启动图形界面。
+///
+/// 在本机起一个只监听回环地址的小服务，再用 Edge 的 `--app=` 模式打开独立窗口
+/// （没有地址栏和标签栏，观感上就是个原生程序）。细节见 `vca_gui` crate 文档。
+fn run_gui(
+    layout: &vca_core::paths::Layout,
+    profile: &str,
+    port: u16,
+    no_open: bool,
+) -> Result<()> {
+    vca_gui::serve(vca_gui::ServeOptions {
+        config_root: layout.config_root.clone(),
+        data_root: layout.data_root.clone(),
+        profile: profile.to_string(),
+        open_browser: !no_open,
+        port,
+        // 开发时把 VCA_WEB_DIR 指向 assets/web 就能改页面即时看到效果
+        web_dir: std::env::var("VCA_WEB_DIR")
+            .ok()
+            .map(std::path::PathBuf::from),
+    })
 }
 
 /// 初始化日志。`RUST_LOG` 控制级别，默认 `info`。

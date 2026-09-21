@@ -4,14 +4,33 @@
    为什么不用 React/Vue：这是个单机工具界面，交互量很小；引一套框架就得配
    npm + 打包，而发布形态是"拷个文件夹过去双击"。原生 JS 够用，且改一行
    刷新就能看到，调试成本最低。
+
+   文案全部来自语言文件（后端 /api/i18n 提供 `web.*` 段），这里不写死中文 ——
+   否则 CLI 有语言文件、界面没有，换语言等于只换一半。
    ========================================================================== */
 
 const TOKEN = new URLSearchParams(location.search).get('t') || '';
 const view = document.getElementById('view');
 const titleEl = document.getElementById('page-title');
 
-/** 当前页面缓存的数据，切换页面时不用重新拉。 */
-const state = { status: null, llm: null, push: null, providers: [], timetable: null, schedule: null };
+/** 语言表：key -> 文案。 */
+let L = {};
+
+/** 取一条文案；缺翻译时返回 key 本身（一眼能看出漏了哪条）。 */
+function t(key, vars) {
+  let s = L[key];
+  if (s === undefined) return key;
+  if (vars) {
+    for (const k of Object.keys(vars)) s = s.split('{' + k + '}').join(vars[k]);
+  }
+  return s;
+}
+
+/** 当前页面缓存的数据。 */
+const state = {
+  status: null, llm: null, push: null, providers: [],
+  timetable: null, schedule: null,
+};
 
 /* ------------------------------------------------------------------ 工具 */
 
@@ -43,9 +62,35 @@ function esc(s) {
 }
 
 function el(html) {
-  const t = document.createElement('template');
-  t.innerHTML = html.trim();
-  return t.content.firstElementChild;
+  const tpl = document.createElement('template');
+  tpl.innerHTML = html.trim();
+  return tpl.content.firstElementChild;
+}
+
+/** 把界面上的 data-i18n 占位替换成当前语言。 */
+function applyStatic() {
+  document.querySelectorAll('[data-i18n]').forEach(n => {
+    const v = t(n.dataset.i18n);
+    if (v !== n.dataset.i18n) n.textContent = v;
+  });
+}
+
+/** 渲染左上角的 ASCII 字符画；语言文件里没有就退回纯文字。 */
+function paintBrand() {
+  // 语言文件里 logo 是一整段多行字符串（JSON 里写数组要额外转义，不划算），
+  // 所以这里两种形态都接：数组按行拼，字符串直接按 \n 切。
+  const raw = L['logo'];
+  const lines = Array.isArray(raw) ? raw : String(raw == null ? '' : raw).split('\n');
+  const pre = document.getElementById('brand-logo');
+  const txt = document.getElementById('brand-text');
+  if (lines.some(s => s.trim().length)) {
+    pre.textContent = lines.join('\n');
+    pre.style.display = '';
+    txt.style.display = 'none';
+  } else {
+    pre.style.display = 'none';
+    txt.style.display = '';
+  }
 }
 
 /* ------------------------------------------------------------------ 概览 */
@@ -53,59 +98,169 @@ function el(html) {
 async function renderOverview() {
   const s = await api('/api/status');
   state.status = s;
-  if (!s.ok) { view.innerHTML = `<div class="empty">读取状态失败：${esc(s.error)}</div>`; return; }
+  if (!s.ok) { view.innerHTML = `<div class="empty">${esc(s.error)}</div>`; return; }
 
   paintDots(s);
 
-  view.innerHTML = '';
-  const grid = el(`<div class="grid"></div>`);
   const stats = [
-    ['模型 API', s.llm.ready ? '已配置' : '未配置', s.llm.ready ? 'ok' : 'bad', s.llm.model || '—'],
-    ['推送渠道', s.push.ready ? s.push.provider : '未配置', s.push.ready ? 'ok' : 'bad', s.push.target || '—'],
-    ['本地转写', s.whisper_ready ? '就绪' : '缺失', s.whisper_ready ? 'ok' : 'bad', 'whisper.cpp'],
-    ['作业', `${s.jobs.total}`, '', `待处理 ${s.jobs.pending}`],
+    [t('nav.model'), s.llm.ready ? t('ov.model_ready') : t('ov.model_bad'),
+     s.llm.ready ? 'ok' : 'bad', s.llm.model || '—'],
+    [t('nav.push'), s.push.ready ? s.push.provider : t('ov.push_ready'),
+     s.push.ready ? 'ok' : 'bad', s.push.target || '—'],
+    [t('side.stt'), s.whisper_ready ? t('ov.stt_ready') : t('ov.stt_bad'),
+     s.whisper_ready ? 'ok' : 'bad', 'whisper.cpp'],
+    [t('ov.jobs'), String(s.jobs.total), '', `${t('ov.pending')} ${s.jobs.pending}`],
   ];
+
+  let grid = '<div class="grid">';
   for (const [k, v, cls, sub] of stats) {
-    grid.appendChild(el(`<div class="stat">
+    grid += `<div class="stat">
       <div class="k">${esc(k)}</div>
       <div class="v ${cls}">${esc(v)}</div>
       <div class="k" style="margin:6px 0 0">${esc(sub)}</div>
-    </div>`));
+    </div>`;
   }
-  view.appendChild(grid);
+  grid += '</div>';
 
-  const paths = el(`<div class="card">
-    <h2>位置</h2>
-    <p class="hint">数据和配置都在程序文件夹里，整个文件夹拷走就能换机器。</p>
-    <table>
-      <tr><th style="width:120px">配置</th><td>${esc(s.config_root)}</td></tr>
-      <tr><th>数据</th><td>${esc(s.data_root)}</td></tr>
-    </table>
-  </div>`);
-  view.appendChild(paths);
-
-  const next = el(`<div class="card">
-    <h2>怎么开始用</h2>
-    <p class="hint">三步走完就能按课表自动录课。</p>
+  const next = `
     <div class="note">
-      <b>1. 填模型 API</b> —— 左侧「模型 API」，选服务商、粘 Key、保存。<br>
-      <b>2. 配推送</b> —— 左侧「推送」，选渠道填参数，点「发送测试消息」确认能收到。<br>
-      <b>3. 填时间表与课表</b> —— 左侧对应页面，导入或手工加。<br>
-      都齐了之后，程序会在上课时段自动录制、在午休与晚餐时段自动处理并推送。
-    </div>
-  </div>`);
-  view.appendChild(next);
+      <b>1. ${esc(t('ov.start_1'))}</b> —— ${esc(t('ov.start_1_d'))}<br>
+      <b>2. ${esc(t('ov.start_2'))}</b> —— ${esc(t('ov.start_2_d'))}<br>
+      <b>3. ${esc(t('ov.start_3'))}</b> —— ${esc(t('ov.start_3_d'))}<br>
+      <br>${esc(t('ov.start_footer'))}
+    </div>`;
+
+  view.innerHTML = grid + `
+  <div class="card">
+    <h2>${esc(t('ov.locations'))}</h2>
+    <p class="hint">${esc(t('ov.locations_hint'))}</p>
+    <table>
+      <tr><th style="width:120px">${esc(t('ov.config'))}</th><td>${esc(s.config_root)}</td></tr>
+      <tr><th>${esc(t('ov.data'))}</th><td>${esc(s.data_root)}</td></tr>
+    </table>
+  </div>
+  <div class="card">
+    <h2>${esc(t('ov.start_title'))}</h2>
+    <p class="hint">${esc(t('ov.start_hint'))}</p>
+    ${next}
+  </div>`;
 }
 
 function paintDots(s) {
-  document.getElementById('pill-profile').textContent = s.profile || 'default';
+  const pill = document.getElementById('pill-profile');
+  if (pill) pill.textContent = s.profile || 'default';
   const set = (id, on) => {
     const d = document.getElementById(id);
-    d.className = 'dot ' + (on ? 'on' : 'off');
+    if (d) d.className = 'dot ' + (on ? 'on' : 'off');
   };
   set('dot-llm', s.llm.ready);
   set('dot-push', s.push.ready);
   set('dot-stt', s.whisper_ready);
+}
+
+/* ------------------------------------------------------------------ 运行 */
+
+async function renderRun() {
+  const d = await api('/api/daemon/status');
+  const s = state.status || (await api('/api/status'));
+  const dot = d.running ? 'ok' : 'bad';
+
+  view.innerHTML = `
+  <div class="card">
+    <h2>${esc(t('run.title'))}</h2>
+    <p class="hint">${t('run.hint')}</p>
+
+    <div class="grid">
+      <div class="stat">
+        <div class="k">${esc(t('run.state'))}</div>
+        <div class="v ${dot}">${esc(d.running ? t('run.running') : t('run.stopped'))}</div>
+        <div class="k" style="margin:6px 0 0">${d.running ? esc(d.uptime) : '—'}</div>
+      </div>
+      <div class="stat">
+        <div class="k">${esc(t('run.model_push'))}</div>
+        <div class="v small ${s.llm.ready ? 'ok' : 'bad'}">${esc(s.llm.ready ? t('ov.model_ready') : t('ov.model_bad'))}</div>
+        <div class="k" style="margin:6px 0 0">${s.push.ready ? esc(s.push.provider) : esc(t('run.push_not_set'))}</div>
+      </div>
+      <div class="stat">
+        <div class="k">${esc(t('run.mode'))}</div>
+        <div class="v small ${d.dry_run ? 'bad' : ''}">${d.running ? esc(d.dry_run ? t('run.mode_dry') : t('run.mode_real')) : '—'}</div>
+        <div class="k" style="margin:6px 0 0">${d.running ? '' : esc(t('run.mode_na'))}</div>
+      </div>
+    </div>
+
+    <div class="row wrap">
+      <button class="btn primary" id="btn-start" ${d.running ? 'disabled' : ''}>${esc(t('run.start'))}</button>
+      <button class="btn" id="btn-dry" ${d.running ? 'disabled' : ''}>${esc(t('run.start_dry'))}</button>
+      <button class="btn danger" id="btn-stop" ${d.running ? '' : 'disabled'}>${esc(t('run.stop'))}</button>
+      <span class="spacer"></span>
+      <button class="btn ghost sm" id="btn-log">${esc(t('run.log'))}</button>
+    </div>
+
+    <div class="note" id="run-note" style="display:none"></div>
+  </div>`;
+
+  const note = document.getElementById('run-note');
+  const show = (html, kind) => {
+    note.style.display = 'block';
+    note.innerHTML = html;
+    note.style.borderLeftColor =
+      kind === 'err' ? '#e05c5c' : kind === 'warn' ? '#d9a343' : '#2f2f2f';
+  };
+
+  // 启动前把「还缺什么」说清楚：等它跑起来什么都不干，用户只会以为坏了
+  const precheck = () => {
+    const miss = [];
+    if (!s.llm.ready) miss.push(t('run.miss_llm'));
+    if (!s.push.ready) miss.push(t('run.miss_push'));
+    if (!s.whisper_ready) miss.push(t('run.miss_stt'));
+    return miss;
+  };
+
+  const start = async (dry) => {
+    const miss = precheck();
+    const warn = miss.length ? miss.join('\n· ') + '\n\n' : '';
+    if (!confirm(warn + t(dry ? 'run.dry_confirm' : 'run.start_confirm'))) return;
+    const r = await api('/api/daemon/start', { dry_run: dry });
+    if (r.ok) {
+      const w = r.warnings || [];
+      show(`<b style="color:#7fd3ba">${esc(t(dry ? 'run.started_dry' : 'run.started'))}</b>` +
+        (w.length ? `<br>${esc(t('run.also_note'))}<br>· ` + w.map(esc).join('<br>· ') : '') +
+        `<br><br>${esc(t('run.auto_refresh'))}`);
+      setTimeout(renderRun, 1200);
+    } else {
+      show(`<b style="color:#e05c5c">${esc(t('run.start_failed'))}</b><br><code>${esc(r.error || '')}</code>`, 'err');
+    }
+  };
+
+  document.getElementById('btn-start').addEventListener('click', () => start(false));
+  document.getElementById('btn-dry').addEventListener('click', () => start(true));
+  document.getElementById('btn-stop').addEventListener('click', async () => {
+    const r = await api('/api/daemon/stop', {});
+    if (r.ok) {
+      show(esc(t('run.stop_requested')) + (r.note ? '<br>' + esc(r.note) : '') +
+        '<br>' + esc(t('run.stop_wait')));
+      setTimeout(renderRun, 2500);
+    } else {
+      show(esc(r.error || ''), 'err');
+    }
+  });
+
+  document.getElementById('btn-log').addEventListener('click', async () => {
+    const l = await api('/api/logs');
+    if (!l.ok) { show(esc(l.error || ''), 'err'); return; }
+    const lines = l.lines || [];
+    show(`<b>${esc(t('run.log_title'))}</b>（${esc(t('run.log_recent'))} ${lines.length} ` +
+      `${esc(t('run.log_lines'))} / ${esc(t('run.log_total'))} ${l.total_lines || 0}）<br>
+      <code style="display:block;max-height:280px;overflow:auto;margin-top:8px;white-space:pre-wrap">${
+        lines.length ? esc(lines.join('\n')) : esc(t('run.log_empty'))}</code>`);
+  });
+
+  if (d.last_error) {
+    show(`<b style="color:#e05c5c">${esc(t('run.last_error'))}</b><br><code>${esc(d.last_error)}</code>`, 'err');
+  }
+  if (d.running) {
+    setTimeout(() => { if (current === 'run') renderRun(); }, 5000);
+  }
 }
 
 /* ------------------------------------------------------------------ 模型 */
@@ -116,57 +271,52 @@ async function renderModel() {
   state.providers = prov.providers || [];
   if (!cfg.ok) { view.innerHTML = `<div class="empty">${esc(cfg.error)}</div>`; return; }
 
-  const opts = ['<option value="">— 手动填写地址 —</option>']
+  const opts = [`<option value="">${esc(t('model.manual'))}</option>`]
     .concat(state.providers.map(p =>
       `<option value="${esc(p.id)}" data-url="${esc(p.base_url)}" ${p.id === cfg.provider ? 'selected' : ''}>${esc(p.name)}${p.note ? ' · ' + esc(p.note) : ''}</option>`))
     .join('');
 
-  view.innerHTML = '';
-  const card = el(`<div class="card">
-    <h2>要点提取用的模型</h2>
-    <p class="hint">
-      只有在转写成文字之后，才会把文本发给这个模型 —— 录屏与录音本身不会上传。<br>
-      不配也能跑：提取会降级成「原文摘要」，文档照常生成。
-    </p>
+  view.innerHTML = `
+  <div class="card">
+    <h2>${esc(t('model.title'))}</h2>
+    <p class="hint">${t('model.hint')}</p>
 
-    <label class="field"><span>服务商</span>
+    <label class="field"><span>${esc(t('model.provider'))}</span>
       <select id="prov">${opts}</select>
     </label>
 
-    <label class="field"><span>接口地址（OpenAI 兼容）</span>
+    <label class="field"><span>${esc(t('model.base_url'))}</span>
       <input type="text" id="base" value="${esc(cfg.base_url)}" placeholder="https://api.deepseek.com/v1">
     </label>
 
-    <label class="field"><span>模型名</span>
+    <label class="field"><span>${esc(t('model.model'))}</span>
       <div class="row">
         <input type="text" id="model" value="${esc(cfg.model)}" placeholder="deepseek-chat">
-        <button class="btn sm" id="btn-models">拉取列表</button>
+        <button class="btn sm" id="btn-models">${esc(t('model.fetch'))}</button>
       </div>
       <div class="note" id="models-note" style="display:none"></div>
     </label>
 
-    <label class="field"><span>API Key ${cfg.key_set ? '<span class="tag ok">已设置</span>' : '<span class="tag bad">未设置</span>'}</span>
-      <input type="password" id="key" placeholder="留空表示不改；填了会写进 secrets.env（不入库）">
+    <label class="field"><span>${esc(t('model.api_key'))} ${
+      cfg.key_set ? `<span class="tag ok">${esc(t('model.key_set'))}</span>`
+                  : `<span class="tag bad">${esc(t('model.key_unset'))}</span>`}</span>
+      <input type="password" id="key" placeholder="${esc(t('model.key_ph'))}">
     </label>
 
-    <label class="field"><span>DeepSeek 错峰</span>
+    <label class="field"><span>${esc(t('model.peak'))}</span>
       <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-dim)">
         <input type="checkbox" id="defer" style="width:auto" ${cfg.defer_on_peak ? 'checked' : ''}>
-        高峰时段自动积压，等闲时（半价）再跑
+        ${esc(t('model.peak_label'))}
       </label>
     </label>
 
     <div class="row">
-      <button class="btn primary" id="btn-save">保存</button>
+      <button class="btn primary" id="btn-save">${esc(t('common.save'))}</button>
       <span class="spacer"></span>
     </div>
 
-    <div class="note">
-      高峰 = 工作日 UTC 01:00–04:00 与 06:00–10:00，即<b>北京时间 09:00–12:00 与 14:00–18:00</b>
-      （正好是上课时间）；其余时间半价。开着它，撞上高峰的处理任务会先积压、进闲时自动补跑。
-    </div>
-  </div>`);
-  view.appendChild(card);
+    <div class="note">${t('model.peak_note')}</div>
+  </div>`;
 
   document.getElementById('prov').addEventListener('change', e => {
     const url = e.target.selectedOptions[0]?.dataset?.url;
@@ -184,23 +334,27 @@ async function renderModel() {
     if (k) payload.api_key = k;
     const r = await api('/api/config/llm', payload);
     if (r.ok) {
-      toast('已保存', '写入字段：' + (r.wrote || []).join('、'));
+      toast(t('common.saved'), t('common.wrote_fields') + (r.wrote || []).join('、'));
       document.getElementById('key').value = '';
       renderModel();
       refreshDots();
     } else {
-      toast('保存失败', r.error || '未知原因', 'err');
+      toast(t('common.save_failed'), r.error || t('common.unknown'), 'err');
     }
   });
 
   document.getElementById('btn-models').addEventListener('click', async () => {
     const note = document.getElementById('models-note');
     note.style.display = 'block';
-    note.textContent = '正在拉取…';
-    const r = await api('/api/models', {});
-    if (!r.ok) { note.textContent = '拉取失败：' + (r.error || ''); return; }
-    if (!r.models || !r.models.length) { note.textContent = '服务端没有返回模型列表，请手动填写模型名。'; return; }
-    note.innerHTML = '可用模型（点一个填进去）：<br>' + r.models.slice(0, 40)
+    note.textContent = t('model.fetching');
+    // 允许用「刚填还没保存」的地址与 Key 试拉：不该逼用户先存一次
+    const key = document.getElementById('key').value.trim();
+    const body = { base_url: document.getElementById('base').value.trim() };
+    if (key) body.api_key = key;
+    const r = await api('/api/models', body);
+    if (!r.ok) { note.textContent = t('model.fetch_failed') + (r.error || ''); return; }
+    if (!r.models || !r.models.length) { note.textContent = t('model.fetch_empty'); return; }
+    note.innerHTML = esc(t('model.pick_model')) + '<br>' + r.models.slice(0, 40)
       .map(m => `<a href="#" data-m="${esc(m)}" style="color:#7fd3ba;margin-right:10px">${esc(m)}</a>`).join('');
     note.querySelectorAll('a[data-m]').forEach(a => a.addEventListener('click', ev => {
       ev.preventDefault();
@@ -228,35 +382,30 @@ async function renderPush() {
   const opts = CHANNELS.map(c =>
     `<option value="${c.id}" ${c.id === cfg.provider ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
 
-  view.innerHTML = '';
-  const card = el(`<div class="card">
-    <h2>课后文档发到哪里</h2>
-    <p class="hint">
-      推荐 <b>OneBot 11</b>：本机跑一个 <a href="https://github.com/NapNeko/NapCatQQ" target="_blank" style="color:#7fd3ba">NapCat</a>
-      登录 QQ，它开 HTTP 服务，这里填地址和群号即可（能发文件）。<br>
-      最省事的是<b>企业微信机器人</b>：只要一个 Webhook 地址，不用装任何东西。
-    </p>
+  view.innerHTML = `
+  <div class="card">
+    <h2>${esc(t('push.title'))}</h2>
+    <p class="hint">${t('push.hint')}</p>
 
-    <label class="field"><span>渠道</span><select id="prov">${opts}</select></label>
+    <label class="field"><span>${esc(t('push.channel'))}</span><select id="prov">${opts}</select></label>
 
     <div id="dyn"></div>
 
-    <div class="row">
-      <button class="btn primary" id="btn-save">保存</button>
-      <button class="btn" id="btn-test">发送测试消息</button>
+    <div class="row wrap">
+      <button class="btn primary" id="btn-save">${esc(t('common.save'))}</button>
+      <button class="btn" id="btn-test">${esc(t('push.test'))}</button>
+      <button class="btn ghost sm" id="btn-detect">${esc(t('push.detect'))}</button>
       <span class="spacer"></span>
     </div>
 
     <div class="note" id="test-note" style="display:none"></div>
+    <div class="note" id="detect-note" style="display:none"></div>
+    <div class="note">${t('push.note')}</div>
+  </div>
 
-    <div class="note">
-      <b>OneBot / NapCat</b>：确认 NapCat 已登录 QQ 且开了 HTTP 服务（默认 <code>http://127.0.0.1:3000</code>），
-      token 与这里填的一致；发群要选「群」。<br>
-      <b>403</b> = token 不对；<b>connection refused</b> = 服务没起来或端口不对；<br>
-      显示成功但群里没消息 → 多半是 target 填成了 QQ 号，发群必须选「群」。
-    </div>
-  </div>`);
-  view.appendChild(card);
+  <!-- 机器人卡片单独挂一个容器：装/起/停之后只需要重画这一块，
+       整页重绘会把用户已经填了一半的表单冲掉。 -->
+  <div id="bot-host"></div>`;
 
   const dyn = document.getElementById('dyn');
   const drawFields = () => {
@@ -264,22 +413,26 @@ async function renderPush() {
     const ch = CHANNELS.find(c => c.id === id) || { needs: [] };
     const has = n => ch.needs.includes(n);
     dyn.innerHTML = `
-      ${has('endpoint') ? `<label class="field"><span>服务地址 / Webhook URL</span>
+      ${has('endpoint') ? `<label class="field"><span>${esc(t('push.onebot_url'))}</span>
         <input type="text" id="endpoint" value="${esc(cfg.endpoint)}" placeholder="http://127.0.0.1:3000"></label>` : ''}
-      ${has('target') ? `<label class="field"><span>目标</span>
+      ${has('target') ? `<label class="field"><span>${esc(t('push.target'))}</span>
         <div class="row">
-          <input type="text" id="target" value="${esc(cfg.target)}" placeholder="群号或 QQ 号">
+          <input type="text" id="target" value="${esc(cfg.target)}" placeholder="${esc(t('push.target_ph'))}">
           <select id="ttype" style="width:130px">
-            <option value="group" ${cfg.target_type === 'group' ? 'selected' : ''}>群</option>
-            <option value="private" ${cfg.target_type === 'private' ? 'selected' : ''}>私聊</option>
+            <option value="group" ${cfg.target_type === 'group' ? 'selected' : ''}>${esc(t('push.group'))}</option>
+            <option value="private" ${cfg.target_type === 'private' ? 'selected' : ''}>${esc(t('push.private'))}</option>
           </select>
         </div></label>` : ''}
-      ${has('qq_app_id') ? `<label class="field"><span>AppID ${cfg.qq_appid_set ? '<span class="tag ok">已设置</span>' : ''}</span>
-        <input type="text" id="qq_app_id" placeholder="QQ 开放平台 AppID"></label>` : ''}
-      ${has('qq_app_secret') ? `<label class="field"><span>AppSecret ${cfg.qq_secret_set ? '<span class="tag ok">已设置</span>' : ''}</span>
-        <input type="password" id="qq_app_secret" placeholder="QQ 开放平台 AppSecret"></label>` : ''}
-      ${has('token') ? `<label class="field"><span>访问令牌 ${cfg.token_set ? '<span class="tag ok">已设置</span>' : '<span class="tag">未设置</span>'}</span>
-        <input type="password" id="token" placeholder="留空表示不改；OneBot 里设的 access_token"></label>` : ''}
+      ${has('qq_app_id') ? `<label class="field"><span>${esc(t('push.appid'))} ${
+        cfg.qq_appid_set ? `<span class="tag ok">${esc(t('model.key_set'))}</span>` : ''}</span>
+        <input type="text" id="qq_app_id" placeholder="${esc(t('push.appid'))}"></label>` : ''}
+      ${has('qq_app_secret') ? `<label class="field"><span>${esc(t('push.secret'))} ${
+        cfg.qq_secret_set ? `<span class="tag ok">${esc(t('model.key_set'))}</span>` : ''}</span>
+        <input type="password" id="qq_app_secret" placeholder="${esc(t('push.secret'))}"></label>` : ''}
+      ${has('token') ? `<label class="field"><span>${esc(t('push.token'))} ${
+        cfg.token_set ? `<span class="tag ok">${esc(t('model.key_set'))}</span>`
+                      : `<span class="tag">${esc(t('push.token_unset'))}</span>`}</span>
+        <input type="password" id="token" placeholder="${esc(t('push.token_ph'))}"></label>` : ''}
     `;
   };
   drawFields();
@@ -296,24 +449,146 @@ async function renderPush() {
 
   document.getElementById('btn-save').addEventListener('click', async () => {
     const r = await api('/api/config/push', collect());
-    if (r.ok) { toast('已保存', '写入字段：' + (r.wrote || []).join('、')); renderPush(); refreshDots(); }
-    else toast('保存失败', r.error || '没有可写的字段', 'err');
+    if (r.ok) {
+      toast(t('common.saved'), t('common.wrote_fields') + (r.wrote || []).join('、'));
+      renderPush();
+      refreshDots();
+    } else {
+      toast(t('common.save_failed'), r.error || t('common.unknown'), 'err');
+    }
   });
 
   document.getElementById('btn-test').addEventListener('click', async () => {
     const note = document.getElementById('test-note');
     note.style.display = 'block';
-    note.textContent = '正在发送…';
+    note.textContent = t('push.testing');
     const r = await api('/api/push/test', {});
     if (r.ok) {
-      note.innerHTML = `<b style="color:#7fd3ba">发送成功</b>（消息 id = ${esc(r.message_id || '-')}）。
-        去群里看一眼，应该收到一条「VibeClassAgent 推送测试」。`;
-      toast('推送成功', '消息已发出');
+      note.innerHTML = `<b style="color:#7fd3ba">${esc(t('push.test_ok'))}</b>` +
+        `（${esc(t('push.msg_id'))} = ${esc(r.message_id || '-')}）。${esc(t('push.test_ok_msg'))}`;
+      toast(t('push.test_ok'), t('push.test_ok_msg'));
     } else {
-      note.innerHTML = `<b style="color:#e05c5c">发送失败</b><br><code>${esc(r.error || '未知原因')}</code>`;
-      toast('推送失败', r.error || '', 'err');
+      note.innerHTML = `<b style="color:#e05c5c">${esc(t('push.test_fail'))}</b><br><code>${esc(r.error || t('common.unknown'))}</code>`;
+      toast(t('push.test_fail'), r.error || '', 'err');
     }
   });
+
+  // 检测本机有没有跑机器人服务：端口上有没有东西在听，是最有用的线索
+  document.getElementById('btn-detect').addEventListener('click', async () => {
+    const note = document.getElementById('detect-note');
+    note.style.display = 'block';
+    note.textContent = t('push.detecting');
+    const r = await api('/api/detect-bot', {});
+    if (!r.ok) { note.textContent = esc(r.error || ''); return; }
+    const found = r.found || [];
+    if (found.length) {
+      note.innerHTML = `<b style="color:#7fd3ba">${esc(t('push.detect_found'))}</b><br>` +
+        found.map(p =>
+          `· <code>http://127.0.0.1:${p}</code> ` +
+          `<a href="#" data-port="${p}" style="color:#7fd3ba">${esc(t('push.fill'))}</a>`
+        ).join('<br>');
+      note.querySelectorAll('a[data-port]').forEach(a => a.addEventListener('click', ev => {
+        ev.preventDefault();
+        const sel = document.getElementById('prov');
+        if (sel) { sel.value = 'onebot'; drawFields(); }
+        const ep = document.getElementById('endpoint');
+        if (ep) ep.value = 'http://127.0.0.1:' + a.dataset.port;
+      }));
+    } else {
+      note.innerHTML = `<b>${esc(t('push.detect_none'))}</b><br><br>` +
+        `${esc(t('push.detect_install'))}<br>` +
+        `<a href="${esc(r.napcat_url)}" target="_blank" style="color:#7fd3ba">${esc(r.napcat_url)}</a>` +
+        `<br><br>${esc(t('push.napcat_hint'))}`;
+    }
+  });
+
+  /* -------- QQ 机器人（NapCat）：装 / 起 / 停 / 看日志 -------- */
+  // 为什么塞在推送页、不单开一页：用户是在「配推送」的时候才想到要装机器人，
+  // 单独一个导航项只会让他多点一次，还得自己记得绕回来。
+  const botHost = document.getElementById('bot-host');
+
+  const botHtml = (b) => {
+    const st = !b.installed
+      ? `<span class="tag">${esc(t('bot.not_installed'))}</span>`
+      : (b.running
+        ? `<span class="tag ok">${esc(t('bot.running'))}${b.pid ? ' · pid ' + b.pid : ''}</span>`
+        : `<span class="tag">${esc(t('bot.stopped'))}</span>`);
+    // 进程活着不等于服务起好了：NapCat 要登录成功之后才会开 OneBot 的 HTTP 端口，
+    // 所以「端口在听没有」才是真正能判断推送能不能用的信号。
+    const svc = b.port_open
+      ? `<span class="tag ok">${esc(t('bot.service_up'))} :${b.port}</span>`
+      : `<span class="tag">${esc(t('bot.service_down'))}</span>`;
+
+    const buttons = [];
+    if (!b.installed) {
+      buttons.push(`<button class="btn primary" data-bot="install">${esc(t('bot.install'))}</button>`);
+    } else {
+      buttons.push(b.running
+        ? `<button class="btn" data-bot="stop">${esc(t('bot.stop'))}</button>` +
+          `<button class="btn primary" data-bot="start">${esc(t('bot.restart'))}</button>`
+        : `<button class="btn primary" data-bot="start">${esc(t('bot.start'))}</button>`);
+      buttons.push(`<button class="btn ghost sm" data-bot="install">${esc(t('bot.reinstall'))}</button>`);
+      buttons.push(`<button class="btn ghost sm" data-bot="opendir">${esc(t('bot.dir'))}</button>`);
+    }
+    const dlPage = b.download_page || '';
+    if (dlPage) {
+      buttons.push(`<a class="btn ghost sm" href="${esc(dlPage)}" target="_blank">`
+        + `${esc(t('bot.download_page'))}</a>`);
+    }
+
+    const log = String(b.log || '').trim();
+    return `
+    <div class="card">
+      <h2>${esc(t('bot.title'))}</h2>
+      <p class="hint">${esc(t('bot.hint'))}</p>
+      <table>
+        <tr><th style="width:110px">${esc(t('bot.state'))}</th><td>${st} ${svc}</td></tr>
+        <tr><th>${esc(t('bot.dir'))}</th><td><code>${esc(b.root || '')}</code>${
+          b.flavor ? ' · ' + esc(b.flavor) : ''}</td></tr>
+        <tr><th>${esc(t('bot.version'))}</th><td>${esc(b.version || '—')}</td></tr>
+      </table>
+      <div class="row wrap" style="margin:12px 0">${buttons.join(' ')}</div>
+      ${b.installing ? `<div class="note" style="display:block">${esc(t('bot.installing'))}</div>` : ''}
+      ${b.install_error ? `<div class="note" style="display:block"><b style="color:#e05c5c">${
+        esc(t('common.save_failed'))}</b><br><code style="white-space:pre-wrap">${
+        esc(b.install_error)}</code></div>` : ''}
+      <div class="note" id="bot-note" style="display:none"></div>
+      <p class="hint" style="margin:12px 0 6px">${esc(t('bot.log'))}</p>
+      <pre class="logbox">${esc(log || t('bot.log_empty'))}</pre>
+      <p class="hint" style="margin-top:10px">${esc(t('bot.scan_hint'))}</p>
+      <p class="hint">${esc(t('bot.manual'))}</p>
+    </div>`;
+  };
+
+  const paintBot = async () => {
+    const b = await api('/api/bot/napcat');
+    if (!b.ok) { botHost.innerHTML = ''; return; }
+    botHost.innerHTML = botHtml(b);
+    // 安装是后端的**后台任务**（下载几十 MB，界面不能卡住等），
+    // 所以没结束之前每 2 秒回来看一眼：装完自动变成「启动」按钮，
+    // 用户不需要自己按刷新。
+    if (b.installing) setTimeout(paintBot, 2000);
+    botHost.querySelectorAll('button[data-bot]').forEach(btn =>
+      btn.addEventListener('click', async () => {
+        const act = btn.dataset.bot;
+        if (act === 'opendir') { await api('/api/bot/napcat/open', {}); return; }
+        const n = document.getElementById('bot-note');
+        n.style.display = 'block';
+        // 下载几十 MB 要等一会儿，先把「正在干活」摆出来，别让人以为按钮没反应
+        n.textContent = act === 'install' ? t('bot.installing') : '…';
+        btn.disabled = true;
+        const r = await api(`/api/bot/napcat/${act}`, {});
+        btn.disabled = false;
+        if (!r.ok) {
+          n.innerHTML = `<b style="color:#e05c5c">${esc(t('common.save_failed'))}</b><br>`
+            + `<code style="white-space:pre-wrap">${esc(r.error || t('common.unknown'))}</code>`;
+        } else if (r.message) {
+          toast(t('bot.title'), r.message);
+        }
+        await paintBot();
+      }));
+  };
+  await paintBot();
 }
 
 /* ---------------------------------------------------------------- 时间表 */
@@ -324,27 +599,30 @@ async function renderTimetable() {
   if (!d.ok) { view.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
 
   const slots = d.slots || [];
-  view.innerHTML = '';
-  const card = el(`<div class="card">
-    <h2>作息时间表</h2>
-    <p class="hint">
-      把一天分成「上课」与「休息」两类时段。程序据此做两件事：<br>
-      · 上课时段录屏录音；<br>
-      · <b>自动挑出名字带「午休 / 晚餐 / 放学」的休息段</b>作为课后处理窗口
-        （这也正好是 DeepSeek 的闲时）。
-    </p>
+  view.innerHTML = `
+  <div class="card">
+    <h2>${esc(t('st.title'))}</h2>
+    <p class="hint">${t('st.hint')}</p>
+
+    <div class="row wrap" style="margin-bottom:12px">
+      <button class="btn sm" id="btn-ci">${esc(t('st.import_ci'))}</button>
+      <input type="file" id="ci-file" accept=".json,application/json" style="display:none">
+      <span class="spacer"></span>
+    </div>
+
     <div class="slot-row slot-head">
-      <div>#</div><div>开始</div><div>结束</div><div>类型</div><div>名称</div><div></div>
+      <div>${esc(t('st.col_no'))}</div><div>${esc(t('st.col_start'))}</div>
+      <div>${esc(t('st.col_end'))}</div><div>${esc(t('st.col_kind'))}</div>
+      <div>${esc(t('st.col_name'))}</div><div></div>
     </div>
     <div id="slots"></div>
     <div class="row" style="margin-top:12px">
-      <button class="btn sm" id="btn-add">+ 加一段</button>
+      <button class="btn sm" id="btn-add">${esc(t('st.add'))}</button>
       <span class="spacer"></span>
-      <button class="btn primary" id="btn-save">保存</button>
+      <button class="btn primary" id="btn-save">${esc(t('common.save'))}</button>
     </div>
     <div class="note" id="win-note" style="display:none"></div>
-  </div>`);
-  view.appendChild(card);
+  </div>`;
 
   const host = document.getElementById('slots');
   const addRow = (s) => {
@@ -353,10 +631,10 @@ async function renderTimetable() {
       <input type="text" value="${esc(s.start || '08:00')}" placeholder="08:00">
       <input type="text" value="${esc(s.end || '08:45')}" placeholder="08:45">
       <select>
-        <option value="class" ${s.kind === 'class' ? 'selected' : ''}>上课</option>
-        <option value="break" ${s.kind === 'break' ? 'selected' : ''}>休息</option>
+        <option value="class" ${s.kind === 'class' ? 'selected' : ''}>${esc(t('st.kind_class'))}</option>
+        <option value="break" ${s.kind === 'break' ? 'selected' : ''}>${esc(t('st.kind_break'))}</option>
       </select>
-      <input type="text" value="${esc(s.name || '')}" placeholder="例：午餐午休">
+      <input type="text" value="${esc(s.name || '')}" placeholder="${esc(t('st.name_ph'))}">
       <button class="btn sm danger">×</button>
     </div>`);
     row.querySelector('button').addEventListener('click', () => {
@@ -366,122 +644,173 @@ async function renderTimetable() {
     host.appendChild(row);
   };
   slots.forEach(addRow);
-  if (!slots.length) { addRow({ start: '08:00', end: '08:45', kind: 'class', name: '' }); }
+  if (!slots.length) addRow({ start: '08:00', end: '08:45', kind: 'class', name: '' });
 
   document.getElementById('btn-add').addEventListener('click', () => addRow({}));
 
+  const collect = () => [...host.children].map((r, i) => {
+    const ins = r.querySelectorAll('input');
+    const sel = r.querySelector('select');
+    return {
+      period: i + 1,
+      start: ins[0].value.trim(),
+      end: ins[1].value.trim(),
+      kind: sel.value,
+      name: ins[2].value.trim() || null,
+    };
+  });
+
+  const showWindows = (w) => {
+    const note = document.getElementById('win-note');
+    note.style.display = 'block';
+    note.innerHTML = (w && w.length)
+      ? `<b>${esc(t('st.windows'))}</b><br>` + w.map(x =>
+          `· ${esc(x.name)}（${esc(x.start)}–${esc(x.end)}，scope=${esc(x.scope)}）`).join('<br>')
+      : `<b style="color:#d9a343">${esc(t('st.no_windows'))}</b>${esc(t('st.no_windows_why'))}`;
+  };
+
   document.getElementById('btn-save').addEventListener('click', async () => {
-    const list = [...host.children].map((r, i) => {
-      const ins = r.querySelectorAll('input');
-      const sel = r.querySelector('select');
-      return {
-        period: i + 1,
-        start: ins[0].value.trim(),
-        end: ins[1].value.trim(),
-        kind: sel.value,
-        name: ins[2].value.trim() || null,
-      };
-    });
     const payload = {
       timetables: [{
-        id: 'default', name: d.name || '我的作息', is_active: true, source: 'manual',
-        slots: list,
+        id: 'default', name: d.name || 'default', is_active: true, source: 'manual',
+        slots: collect(),
       }],
     };
     const r = await api('/api/timetable', payload);
     if (r.ok) {
-      toast('已保存', `共 ${r.slots} 段`);
-      const note = document.getElementById('win-note');
-      const w = r.windows || [];
-      note.style.display = 'block';
-      note.innerHTML = w.length
-        ? '<b>自动推导出的处理窗口：</b><br>' + w.map(x =>
-            `· ${esc(x.name)}（${esc(x.start)}–${esc(x.end)}，scope=${esc(x.scope)}）`).join('<br>')
-        : '<b style="color:#d9a343">没有推导出处理窗口</b>：时间表里缺少名字带「午休 / 晚餐 / 放学」的休息段。';
-    } else toast('保存失败', r.error || '', 'err');
+      toast(t('common.saved'), String(r.slots));
+      showWindows(r.windows);
+    } else {
+      toast(t('common.save_failed'), r.error || '', 'err');
+    }
+  });
+
+  // --- ClassIsland 导入 ---
+  // 浏览器拿不到文件真实路径（安全限制），只能读内容，所以整份 JSON 传给后端解析。
+  // 后端那边是只读的，不会改 ClassIsland 的任何文件。
+  document.getElementById('btn-ci').addEventListener('click', () => {
+    document.getElementById('ci-file').click();
+  });
+  document.getElementById('ci-file').addEventListener('change', async (e) => {
+    const f = e.target.files && e.target.files[0];
+    if (!f) return;
+    const note = document.getElementById('win-note');
+    note.style.display = 'block';
+    note.textContent = t('st.imported') + '…';
+    const text = await f.text();
+    const r = await api('/api/import/classisland', { json: text });
+    e.target.value = '';
+    if (!r.ok) {
+      note.innerHTML = `<b style="color:#e05c5c">${esc(t('common.save_failed'))}</b><br><code>${esc(r.error || '')}</code>`;
+      return;
+    }
+    toast(t('st.imported'), `${r.timetable_name || ''} · ${r.slots} / ${r.entries}`);
+    await renderTimetable();
+    showWindows(null);
+    // renderTimetable() 重建了 DOM，note 得重新取一次。
+    // 导入进来的课默认全部勾上「录制」，用户接下来要做的事正是「挑掉不想录的」，
+    // 所以把提示摆好、再把人送过去，省得他自己在页面之间找。
+    const n2 = document.getElementById('win-note');
+    if (n2) {
+      n2.style.display = 'block';
+      n2.innerHTML =
+        `<b>${esc(t('st.imported'))}</b> · ${esc(r.timetable_name || '')} ` +
+        `<span style="color:var(--text-dim2)">${r.slots} / ${r.entries}</span><br>` +
+        `${esc(t('st.import_hint'))}`;
+    }
+    setTimeout(() => go('schedule'), 1200);
   });
 }
 
 /* ---------------------------------------------------------------- 课表 */
 
-const DAYS = [['Mon', '周一'], ['Tue', '周二'], ['Wed', '周三'], ['Thu', '周四'],
-              ['Fri', '周五'], ['Sat', '周六'], ['Sun', '周日']];
-const CYCLES = [['every', '每周'], ['odd', '单周'], ['even', '双周']];
+const DAYS = [['Mon', 'day_mon'], ['Tue', 'day_tue'], ['Wed', 'day_wed'],
+              ['Thu', 'day_thu'], ['Fri', 'day_fri'], ['Sat', 'day_sat'], ['Sun', 'day_sun']];
+const CYCLES = [['every', 'cycle_every'], ['odd', 'cycle_odd'], ['even', 'cycle_even']];
 
 async function renderSchedule() {
   const d = await api('/api/schedule');
   state.schedule = d;
   if (!d.ok) { view.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
 
-  view.innerHTML = '';
-  const card = el(`<div class="card">
-    <h2>课程表</h2>
-    <p class="hint">
-      决定「哪节课要录」。单双周可以排在同一时段，程序不会当成冲突。
-      导入后记得检查一下时间是否落在上面的上课时段内。
-    </p>
-    <div class="row wrap" style="margin-bottom:14px">
-      <button class="btn sm" id="btn-add">+ 加一条</button>
-      <button class="btn sm" id="btn-csv">导出 CSV 模板</button>
+  view.innerHTML = `
+  <div class="card">
+    <h2>${esc(t('sc.title'))}</h2>
+    <p class="hint">${t('sc.hint')}</p>
+    <div class="row wrap" style="margin-bottom:12px">
+      <button class="btn sm" id="btn-add">${esc(t('sc.add'))}</button>
+      <button class="btn sm" id="btn-csv">${esc(t('sc.export'))}</button>
       <span class="spacer"></span>
       <span style="font-size:12px;color:var(--text-dim2)" id="cnt"></span>
-      <button class="btn primary" id="btn-save">保存</button>
+      <button class="btn primary" id="btn-save">${esc(t('common.save'))}</button>
     </div>
     <div id="rows"></div>
     <div class="note" id="save-note" style="display:none"></div>
-  </div>`);
-  view.appendChild(card);
+  </div>`;
 
   const host = document.getElementById('rows');
   const addRow = (e) => {
-    const row = el(`<div class="slot-row" style="grid-template-columns:110px 92px 92px 1fr 110px 74px 34px">
-      <select>${DAYS.map(([v, n]) => `<option value="${v}" ${e.day === v ? 'selected' : ''}>${n}</option>`).join('')}</select>
+    // 是否录制：默认开。用户可以只录一部分课 ——
+    // 比如只关心自己任教的科目，或者某节是自习课没必要录。
+    const rec = e.record === undefined ? true : !!e.record;
+    const row = el(`<div class="slot-row" style="grid-template-columns:104px 84px 84px 1fr 96px 70px 60px 32px">
+      <select>${DAYS.map(([v, k]) => `<option value="${v}" ${e.day === v ? 'selected' : ''}>${esc(t('sc.' + k))}</option>`).join('')}</select>
       <input type="text" value="${esc(e.start || '08:00')}">
       <input type="text" value="${esc(e.end || '08:45')}">
-      <input type="text" value="${esc(e.course || '')}" placeholder="课程名">
-      <input type="text" value="${esc(e.teacherId || 't1')}" placeholder="教师 id">
-      <select style="width:74px">${CYCLES.map(([v, n]) => `<option value="${v}" ${(e.cycle || 'every') === v ? 'selected' : ''}>${n}</option>`).join('')}</select>
+      <input type="text" value="${esc(e.course || '')}" placeholder="${esc(t('sc.course_ph'))}">
+      <input type="text" value="${esc(e.teacherId || 't1')}" placeholder="${esc(t('sc.teacher_ph'))}">
+      <select style="width:70px">${CYCLES.map(([v, k]) => `<option value="${v}" ${(e.cycle || 'every') === v ? 'selected' : ''}>${esc(t('sc.' + k))}</option>`).join('')}</select>
+      <label class="check" title="${esc(t('sc.record_hint'))}">
+        <input type="checkbox" ${rec ? 'checked' : ''}> ${esc(t('sc.record'))}
+      </label>
       <button class="btn sm danger">×</button>
     </div>`);
     row.querySelector('button').addEventListener('click', () => { row.remove(); upd(); });
+    row.querySelector('input[type=checkbox]').addEventListener('change', upd);
     host.appendChild(row);
     upd();
   };
   const upd = () => {
-    document.getElementById('cnt').textContent = `共 ${host.children.length} 条`;
+    const rows = [...host.children];
+    const n = rows.filter(r => r.querySelector('input[type=checkbox]').checked).length;
+    document.getElementById('cnt').textContent =
+      `${t('sc.count')} ${rows.length} ${t('sc.entries')} · ${t('sc.recording')} ${n}`;
   };
   (d.entries || []).forEach(addRow);
+  upd();
 
   document.getElementById('btn-add').addEventListener('click', () => addRow({}));
 
   document.getElementById('btn-csv').addEventListener('click', () => {
-    const rows = [[...DAYS.map(d => d[1]), '节次', '开始', '结束', '课程', '教师', '周次'].join(',')];
+    const rows = [['day', 'period', 'start', 'end', 'course', 'teacher', 'cycle', 'record'].join(',')];
     [...host.children].forEach((r, i) => {
-      const ins = r.querySelectorAll('input');
+      const ins = r.querySelectorAll('input[type=text]');
       const sels = r.querySelectorAll('select');
-      const day = DAYS.find(([v]) => v === sels[0].value)[1];
-      rows.push([day, i + 1, ins[0].value, ins[1].value, ins[2].value, ins[3].value, sels[1].value].join(','));
+      const rec = r.querySelector('input[type=checkbox]').checked ? 'true' : 'false';
+      rows.push([sels[0].value, i + 1, ins[0].value, ins[1].value,
+                 ins[2].value, ins[3].value, sels[1].value, rec].join(','));
     });
     const blob = new Blob(['\ufeff' + rows.join('\n')], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a');
     a.href = URL.createObjectURL(blob);
     a.download = 'schedule.csv';
     a.click();
-    toast('已导出', '可以用 Excel 打开编辑');
+    toast(t('sc.exported'), t('sc.exported_d'));
   });
 
   document.getElementById('btn-save').addEventListener('click', async () => {
     const entries = [...host.children].map((r, i) => {
-      const ins = r.querySelectorAll('input');
+      const ins = r.querySelectorAll('input[type=text]');
       const sels = r.querySelectorAll('select');
       return {
         day: sels[0].value,
         period: i + 1,
         start: ins[0].value.trim(),
         end: ins[1].value.trim(),
-        course: ins[2].value.trim() || '未命名课程',
+        course: ins[2].value.trim() || 'Lesson',
         teacherId: ins[3].value.trim() || 't1',
-        record: true,
+        // 这一节要不要录 —— 由用户逐条勾选
+        record: r.querySelector('input[type=checkbox]').checked,
         cycle: sels[1].value,
       };
     });
@@ -495,13 +824,15 @@ async function renderSchedule() {
     };
     const r = await api('/api/schedule', payload);
     if (r.ok) {
-      toast('已保存', `${r.entries} 条条目`);
+      toast(t('common.saved'), String(r.entries));
       const note = document.getElementById('save-note');
       note.style.display = 'block';
       note.innerHTML = (r.issues && r.issues.length)
-        ? '<b style="color:#d9a343">有几处要确认：</b><br>· ' + r.issues.map(esc).join('<br>· ')
-        : '<b style="color:#7fd3ba">课表检查通过</b>，没有发现时间重叠或漏填教师。';
-    } else toast('保存失败', r.error || '', 'err');
+        ? `<b style="color:#d9a343">${esc(t('sc.issues'))}</b><br>· ` + r.issues.map(esc).join('<br>· ')
+        : `<b style="color:#7fd3ba">${esc(t('sc.ok'))}</b>${esc(t('sc.ok_d'))}`;
+    } else {
+      toast(t('common.save_failed'), r.error || '', 'err');
+    }
   });
 }
 
@@ -511,60 +842,60 @@ async function renderRecord() {
   const d = await api('/api/config/general');
   if (!d.ok) { view.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
 
-  view.innerHTML = '';
-  const card = el(`<div class="card">
-    <h2>录制参数</h2>
-    <p class="hint">默认值是按「占用尽量低」选的：720p / 8 帧 / 每 3 分钟一张截图。<br>
-      一体机配置一般，不建议调高 —— 一节课 45 分钟大约 100 MB。</p>
+  view.innerHTML = `
+  <div class="card">
+    <h2>${esc(t('rc.title'))}</h2>
+    <p class="hint">${t('rc.hint')}</p>
 
     <div class="grid">
-      <label class="field"><span>画质（高度，像素）</span>
+      <label class="field"><span>${esc(t('rc.height'))}</span>
         <input type="number" id="height" value="${d.record.height}"></label>
-      <label class="field"><span>帧率</span>
+      <label class="field"><span>${esc(t('rc.fps'))}</span>
         <input type="number" id="fps" value="${d.record.fps}"></label>
-      <label class="field"><span>截图间隔（秒）</span>
+      <label class="field"><span>${esc(t('rc.shot'))}</span>
         <input type="number" id="shot" value="${d.record.screenshot_interval_secs}"></label>
-      <label class="field"><span>录像保留（小时）</span>
+      <label class="field"><span>${esc(t('rc.ret'))}</span>
         <input type="number" id="ret" value="${d.cleanup.retention_hours}"></label>
     </div>
 
-    <label class="field"><span>录音来源</span>
+    <label class="field"><span>${esc(t('rc.audio'))}</span>
       <select id="audio">
-        <option value="both" ${d.record.audio_source === 'both' ? 'selected' : ''}>系统声音 + 麦克风（推荐）</option>
-        <option value="system" ${d.record.audio_source === 'system' ? 'selected' : ''}>仅系统声音</option>
-        <option value="mic" ${d.record.audio_source === 'mic' ? 'selected' : ''}>仅麦克风</option>
+        <option value="both" ${d.record.audio_source === 'both' ? 'selected' : ''}>${esc(t('rc.audio_both'))}</option>
+        <option value="system" ${d.record.audio_source === 'system' ? 'selected' : ''}>${esc(t('rc.audio_sys'))}</option>
+        <option value="mic" ${d.record.audio_source === 'mic' ? 'selected' : ''}>${esc(t('rc.audio_mic'))}</option>
       </select>
     </label>
 
-    <label class="field"><span>桌面悬浮窗</span>
-      <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--text-dim)">
-        <input type="checkbox" id="ov" style="width:auto" ${d.overlay.enabled ? 'checked' : ''}> 下课时在屏幕角落显示提示
+    <label class="field"><span>${esc(t('rc.overlay'))}</span>
+      <label class="check">
+        <input type="checkbox" id="ov" ${d.overlay.enabled ? 'checked' : ''}> ${esc(t('rc.overlay_label'))}
       </label>
     </label>
 
-    <label class="field"><span>悬浮窗文字</span>
+    <label class="field"><span>${esc(t('rc.overlay_text'))}</span>
       <input type="text" id="ovtext" value="${esc(d.overlay.text)}"></label>
 
+    <label class="field"><span>${esc(t('rc.tray'))}</span>
+      <label class="check">
+        <input type="checkbox" id="tray" ${d.ui && d.ui.tray_icon ? 'checked' : ''}> ${esc(t('rc.tray_label'))}
+      </label>
+    </label>
+
     <div class="row">
-      <button class="btn primary" id="btn-save">保存</button>
+      <button class="btn primary" id="btn-save">${esc(t('common.save'))}</button>
       <span class="spacer"></span>
     </div>
-  </div>`);
-  view.appendChild(card);
+  </div>
 
-  const files = el(`<div class="card">
-    <h2>清理策略</h2>
-    <p class="hint">
-      从<b>推送成功那一刻</b>开始倒计时；推送一直失败就一直留着本地录像 ——
-      宁可占点磁盘，也不能把没送出去的东西删掉。
-    </p>
+  <div class="card">
+    <h2>${esc(t('rc.clean_title'))}</h2>
+    <p class="hint">${t('rc.clean_hint')}</p>
     <div class="row">
-      <button class="btn" id="btn-clean">预览可清理的录像</button>
+      <button class="btn" id="btn-clean">${esc(t('rc.clean_preview'))}</button>
       <span class="spacer"></span>
     </div>
     <div class="note" id="clean-note" style="display:none"></div>
-  </div>`);
-  view.appendChild(files);
+  </div>`;
 
   document.getElementById('btn-save').addEventListener('click', async () => {
     const payload = {
@@ -575,129 +906,22 @@ async function renderRecord() {
       audio_source: document.getElementById('audio').value,
       overlay_enabled: document.getElementById('ov').checked,
       overlay_text: document.getElementById('ovtext').value,
+      tray_icon: document.getElementById('tray').checked,
     };
     const r = await api('/api/config/general', payload);
-    if (r.ok) toast('已保存', '写入字段：' + (r.wrote || []).join('、'));
-    else toast('保存失败', r.error || '', 'err');
+    if (r.ok) toast(t('common.saved'), t('common.wrote_fields') + (r.wrote || []).join('、'));
+    else toast(t('common.save_failed'), r.error || '', 'err');
   });
 
   document.getElementById('btn-clean').addEventListener('click', async () => {
     const note = document.getElementById('clean-note');
     note.style.display = 'block';
-    note.textContent = '正在扫描…';
+    note.textContent = t('rc.scanning');
     const r = await api('/api/clean/preview', {});
-    if (!r.ok) { note.textContent = '扫描失败：' + (r.error || ''); return; }
-    note.innerHTML = `扫描到 ${r.scanned} 项，可删除 ${r.deleting} 项，未到期跳过 ${r.skipped} 项。` +
-      (r.deleting ? '<br><span style="color:#d9a343">真正删除请点下面的按钮。</span>' : '');
+    if (!r.ok) { note.textContent = esc(r.error || ''); return; }
+    note.innerHTML = esc(t('rc.clean_result', { s: r.scanned, d: r.deleting, k: r.skipped })) +
+      (r.deleting ? `<br><span style="color:#d9a343">${esc(t('rc.clean_warn'))}</span>` : '');
   });
-}
-
-/* ---------------------------------------------------------------- 运行 */
-
-async function renderRun() {
-  const d = await api('/api/daemon/status');
-  const s = state.status || (await api('/api/status'));
-
-  view.innerHTML = '';
-  const dot = d.running ? 'ok' : 'bad';
-
-  const card = el(`<div class="card">
-    <h2>守护进程</h2>
-    <p class="hint">
-      打开它，程序就会自己干活：<b>上课时段自动录屏录音</b>（含系统声音与麦克风），
-      <b>午休与晚餐时段自动处理</b>（转写 → 提取 → 配图 → 生成文档 → 推送），
-      推送成功 72 小时后自动清理录像。
-    </p>
-
-    <div class="grid" style="margin-bottom:16px">
-      <div class="stat">
-        <div class="k">状态</div>
-        <div class="v ${dot}">${d.running ? '运行中' : '已停止'}</div>
-        <div class="k" style="margin:6px 0 0">${d.running ? esc(d.uptime) : '—'}</div>
-      </div>
-      <div class="stat">
-        <div class="k">模型 / 推送</div>
-        <div class="v small ${s.llm.ready ? 'ok' : 'bad'}">${s.llm.ready ? '已配置' : '未配置'}</div>
-        <div class="k" style="margin:6px 0 0">${s.push.ready ? esc(s.push.provider) : '推送未配置'}</div>
-      </div>
-      <div class="stat">
-        <div class="k">模式</div>
-        <div class="v small ${d.dry_run ? 'bad' : ''}">${d.running ? (d.dry_run ? '演练（不真录不真推）' : '正式运行') : '—'}</div>
-        <div class="k" style="margin:6px 0 0">${d.running ? '' : '点下面按钮启动'}</div>
-      </div>
-    </div>
-
-    <div class="row wrap">
-      <button class="btn primary" id="btn-start" ${d.running ? 'disabled' : ''}>开始工作</button>
-      <button class="btn" id="btn-dry" ${d.running ? 'disabled' : ''}>先演练一遍</button>
-      <button class="btn danger" id="btn-stop" ${d.running ? '' : 'disabled'}>停止</button>
-      <span class="spacer"></span>
-      <button class="btn ghost sm" id="btn-log">查看日志</button>
-    </div>
-
-    <div class="note" id="run-note" style="display:none"></div>
-  </div>`);
-  view.appendChild(card);
-
-  const note = document.getElementById('run-note');
-  const show = (html, kind) => {
-    note.style.display = 'block';
-    note.innerHTML = html;
-    note.style.borderLeftColor = kind === 'err' ? '#e05c5c' : kind === 'warn' ? '#d9a343' : '#2f2f2f';
-  };
-
-  // 启动前把「还缺什么」说清楚：等它跑起来什么都不干，用户只会以为坏了
-  const precheck = () => {
-    const miss = [];
-    if (!s.llm.ready) miss.push('模型 API 没配 → 课后提取会降级成原文摘要');
-    if (!s.push.ready) miss.push('推送渠道没配 → 文档只会存在本地');
-    if (!s.whisper_ready) miss.push('本地转写缺失 → 需要云端转写 Key，否则转写会失败');
-    return miss;
-  };
-
-  const start = async (dry) => {
-    const miss = precheck();
-    const warn = miss.length ? '注意：\n· ' + miss.join('\n· ') + '\n\n' : '';
-    if (!confirm(`${warn}${dry ? '以演练模式启动' : '开始工作'}？`)) return;
-    const r = await api('/api/daemon/start', { dry_run: dry });
-    if (r.ok) {
-      const w = r.warnings || [];
-      show(`<b style="color:#7fd3ba">已启动${dry ? '（演练模式）' : ''}</b>` +
-        (w.length ? '<br>同时提醒：<br>· ' + w.map(esc).join('<br>· ') : '') +
-        '<br><br>这个页面会自动刷新状态。');
-      setTimeout(renderRun, 1200);
-    } else {
-      show(`<b style="color:#e05c5c">启动失败</b><br><code>${esc(r.error || '')}</code>`, 'err');
-    }
-  };
-
-  document.getElementById('btn-start').addEventListener('click', () => start(false));
-  document.getElementById('btn-dry').addEventListener('click', () => start(true));
-  document.getElementById('btn-stop').addEventListener('click', async () => {
-    const r = await api('/api/daemon/stop', {});
-    if (r.ok) {
-      show('已请求停止。' + (r.note ? '<br>' + esc(r.note) : '') + '<br>稍等几秒后这里会变成「已停止」。');
-      setTimeout(renderRun, 2500);
-    } else {
-      show(esc(r.error || ''), 'err');
-    }
-  });
-
-  document.getElementById('btn-log').addEventListener('click', async () => {
-    const l = await api('/api/logs');
-    if (!l.ok) { show(esc(l.error || ''), 'err'); return; }
-    const lines = l.lines || [];
-    show(`<b>日志</b>（最近 ${lines.length} 行 / 共 ${l.total_lines || 0} 行）<br>
-      <code style="display:block;max-height:280px;overflow:auto;margin-top:8px;white-space:pre-wrap">${
-        lines.length ? esc(lines.join('\n')) : esc(l.note || '（空）')}</code>`);
-  });
-
-  if (d.last_error) {
-    show(`<b style="color:#e05c5c">上次退出时报错</b><br><code>${esc(d.last_error)}</code>`, 'err');
-  }
-
-  // 运行中时自动刷新一次，让用户看到状态变化
-  if (d.running) setTimeout(() => { if (current === 'run') renderRun(); }, 5000);
 }
 
 /* ---------------------------------------------------------------- 作业 */
@@ -706,57 +930,55 @@ async function renderJobs() {
   const d = await api('/api/jobs');
   if (!d.ok) { view.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
 
-  view.innerHTML = '';
-  const card = el(`<div class="card">
-    <h2>作业</h2>
-    <p class="hint">每上完一节课生成一条。状态走完 <code>已录 → 已转写 → 已出文档 → 已推送</code> 就算结束。</p>
-    <table>
-      <thead><tr><th>日期</th><th>课程</th><th>状态</th><th>文档</th><th>备注</th></tr></thead>
-      <tbody id="tb"></tbody>
-    </table>
-    <div class="empty" id="none" style="display:none">还没有作业。等上完一节课就有了。</div>
-  </div>`);
-  view.appendChild(card);
-
-  const tb = document.getElementById('tb');
-  for (const j of (d.jobs || [])) {
-    tb.appendChild(el(`<tr>
+  const rows = (d.jobs || []).map(j => `<tr>
       <td>${esc(j.date)}</td>
       <td class="mono-dim">${esc(j.course)}</td>
       <td><span class="tag ${j.state === 'PUSHED' ? 'ok' : ''}">${esc(j.state)}</span></td>
       <td class="mono-dim" style="font-size:11.5px">${esc(j.docx ? j.docx.split('\\').pop() : '—')}</td>
       <td class="mono-dim">${esc(j.last_error || '')}</td>
-    </tr>`));
-  }
-  if (!(d.jobs || []).length) document.getElementById('none').style.display = 'block';
+    </tr>`).join('');
+
+  view.innerHTML = `
+  <div class="card">
+    <h2>${esc(t('jb.title'))}</h2>
+    <p class="hint">${t('jb.hint')}</p>
+    <table>
+      <thead><tr>
+        <th>${esc(t('jb.date'))}</th><th>${esc(t('jb.course'))}</th>
+        <th>${esc(t('jb.state'))}</th><th>${esc(t('jb.doc'))}</th><th>${esc(t('jb.note'))}</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    ${rows ? '' : `<div class="empty">${esc(t('jb.empty'))}</div>`}
+  </div>`;
 }
 
 /* ---------------------------------------------------------------- 路由 */
 
 const PAGES = {
-  overview: ['概览', renderOverview],
-  run: ['运行', renderRun],
-  model: ['模型 API', renderModel],
-  push: ['推送', renderPush],
-  timetable: ['时间表', renderTimetable],
-  schedule: ['课表', renderSchedule],
-  record: ['录制与文件', renderRecord],
-  jobs: ['作业', renderJobs],
+  overview: ['nav.overview', renderOverview],
+  run: ['nav.run', renderRun],
+  model: ['nav.model', renderModel],
+  push: ['nav.push', renderPush],
+  timetable: ['nav.timetable', renderTimetable],
+  schedule: ['nav.schedule', renderSchedule],
+  record: ['nav.record', renderRecord],
+  jobs: ['nav.jobs', renderJobs],
 };
 
 let current = 'overview';
 
 async function go(page) {
   current = page;
-  const [title, fn] = PAGES[page] || PAGES.overview;
-  titleEl.textContent = title;
+  const [titleKey, fn] = PAGES[page] || PAGES.overview;
+  titleEl.textContent = t(titleKey);
   document.querySelectorAll('.nav-item').forEach(b =>
     b.classList.toggle('active', b.dataset.page === page));
-  view.innerHTML = '<div class="empty">载入中…</div>';
+  view.innerHTML = `<div class="empty">${esc(t('common.loading'))}</div>`;
   try {
     await fn();
   } catch (e) {
-    view.innerHTML = `<div class="empty">出错了：${esc(e.message)}</div>`;
+    view.innerHTML = `<div class="empty">${esc(t('common.error_prefix'))}${esc(e.message)}</div>`;
   }
 }
 
@@ -776,18 +998,24 @@ document.getElementById('btn-refresh').addEventListener('click', () => go(curren
 // 退出：关窗口 ≠ 退程序（窗口是 --app 拉起的独立进程，后台服务还在跑），
 // 所以必须给一个明确的出口，并且把这件事说清楚。
 document.getElementById('btn-quit').addEventListener('click', async () => {
-  const yes = confirm(
-    '确定退出 VibeClassAgent 吗？\n\n' +
-    '注意：直接关掉这个窗口只会关掉窗口，后台服务还在运行。\n' +
-    '要彻底退出请用这个按钮。'
-  );
-  if (!yes) return;
+  if (!confirm(t('common.quit_body') + '\n\n' + t('common.quit_note'))) return;
   await api('/api/quit', {});
   document.body.innerHTML =
-    '<div style="padding:80px;text-align:center;color:#8f8f8f;font-family:Segoe UI,sans-serif">' +
-    '<div style="font-size:16px;color:#ededed">已退出</div>' +
-    '<div style="margin-top:8px">这个窗口可以关掉了。</div></div>';
+    `<div style="padding:80px;text-align:center;color:#8f8f8f;font-family:Segoe UI,sans-serif">` +
+    `<div style="font-size:16px;color:#ededed">${esc(t('common.quit_done'))}</div>` +
+    `<div style="margin-top:8px">${esc(t('common.quit_done_note'))}</div></div>`;
 });
 
-go('overview');
-refreshDots();
+/* ---------------------------------------------------------------- 启动 */
+
+(async function boot() {
+  try {
+    const r = await api('/api/i18n');
+    if (r.ok) L = r.strings || {};
+    document.documentElement.lang = r.lang || 'zh-CN';
+  } catch { /* 拿不到就退回 key 本身，至少不会白屏 */ }
+  applyStatic();
+  paintBrand();
+  go('overview');
+  refreshDots();
+})();

@@ -7,8 +7,23 @@ VCA 的推送目标不是某个平台的 SDK，而是**一个 HTTP 端点**。
 
 ## 一、最短可用路径：NapCat
 
-1. 下载 [NapCat](https://github.com/NapNeko/NapCatQQ)，按它的文档登录一个 QQ 号
-   （**建议用小号**：这属于第三方协议登录，有账号风险）
+1. **装 NapCat**。两种走法，任选：
+
+   - **界面里一键装**（推荐）：「推送」页下半部分那张「QQ 机器人（NapCat）」卡片
+     → 点「一键安装」→ 点「启动」→ 首次启动要扫码登录 QQ，
+     二维码就在卡片下方的「启动日志」里。
+     装到 `<程序目录>\tools\napcat\`，不写 C 盘。
+     自动下载失败（校园网访问 GitHub 不通）时，卡片会给出提示；
+     点「打开下载页」手动下 `NapCat.Shell.zip`，再点「打开目录」解压进去，
+     刷新后即可自动识别。
+   - **自己装**：下载 [NapCat](https://github.com/NapNeko/NapCatQQ)，
+     按它的文档登录一个 QQ 号。
+
+   > **建议用小号**：这属于第三方协议登录，有账号风险。
+
+   注意：Shell 包需要本机已装 QQ（它是 QQ 的注入式插件）；没装 QQ 就用便携包。
+   程序识别这两种形态，入口找不到时不会瞎启动，而是直接告诉你缺什么。
+
 2. 在 NapCat 配置里打开 **HTTP 服务端**，记下端口（默认 `3000`）与 access token
 3. 把这个 QQ 号拉进你要接收课堂纪要的群
 4. 配 VCA 的 `config/profiles/default/settings.yaml`：

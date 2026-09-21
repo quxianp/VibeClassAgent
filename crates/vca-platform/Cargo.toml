@@ -14,6 +14,11 @@ tracing.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ureq = { version = "3.4.2", features = ["json"] }
+# zip：解压 NapCat 的发布包（标准 deflate，够用）。
+# 默认特性一律关掉：zip 8 的 default 会拉进 aes / bzip2 / lzma / zstd / xz
+# 一堆本机依赖缓存里压根没有的 crate，离线构建直接失败。
+# deflate-flate2 走纯 Rust 的 miniz_oxide，与依赖树里已有的那份一致。
+zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
 tungstenite = "0.30.0"
 docx-rs = "0.4.22"
 image = { version = "0.25.9", default-features = false, features = ["jpeg"] }

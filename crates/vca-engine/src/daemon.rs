@@ -279,6 +279,39 @@ impl Daemon {
             tracing::warn!("课表问题: {i}");
         }
 
+        // 「一课都没勾录制」是这套系统里最容易静默失败的配置：
+        // 守护进程照常运转、日志一切正常、处理窗口也照开，却一节课都不会录。
+        // 只靠 GUI 上的勾选框是看不出来的（用户未必看得懂 record 的含义），
+        // 所以启动时必须当面说清楚。注意 record 是**逐条**的，要连周末模板一起数。
+        let total_lessons = self.schedule.week_template.entries.len()
+            + self
+                .schedule
+                .weekend_template
+                .as_ref()
+                .map(|w| w.entries.len())
+                .unwrap_or(0);
+        let to_record = self
+            .schedule
+            .week_template
+            .entries
+            .iter()
+            .filter(|e| e.record)
+            .count()
+            + self
+                .schedule
+                .weekend_template
+                .as_ref()
+                .map(|w| w.entries.iter().filter(|e| e.record).count())
+                .unwrap_or(0);
+        if total_lessons > 0 && to_record == 0 {
+            tracing::warn!(
+                "课表里有 {total_lessons} 节课，但没有一节勾了「录制」——本轮不会录任何课。\n\
+                 请在界面「课表」页把要录的课勾上（命令行运行 `vca doctor` 也能看到这一项）。"
+            );
+        } else if to_record > 0 {
+            tracing::info!("课表 {total_lessons} 节课，其中 {to_record} 节会录制");
+        }
+
         // 处理窗口自检（未配置时由时间表推导，推导结果也要校验）
         let pws = self.processing_windows();
         for i in windows::validate_windows(&pws) {

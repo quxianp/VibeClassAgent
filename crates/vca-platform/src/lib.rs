@@ -11,6 +11,7 @@
 //! - [`http`]     极简 HTTP 客户端（WinHTTP，零第三方依赖）
 //! - [`push`]     内置推送通道（企业微信 / Webhook / Server 酱 / dry-run）
 //! - [`llm`]      要点提取（OpenAI 兼容接口，仅上传转写文本）
+//! - [`napcat`]   NapCat（QQ 机器人）的安装、启动与日志
 //! - [`overlay`]  桌面悬浮窗（Win32 无边框置顶小窗）
 //! - [`crash`]    崩溃静默退出
 //! - [`shutdown`] 优雅退出（Ctrl+C 时先停 ffmpeg 再退）
@@ -34,6 +35,7 @@ pub mod docgen;
 pub mod doctor;
 pub mod http;
 pub mod llm;
+pub mod napcat;
 pub mod overlay;
 pub mod probe;
 pub mod proc;

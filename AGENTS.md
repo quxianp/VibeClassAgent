@@ -11,7 +11,7 @@
 
 - 技术栈：**纯 Rust**（无 Python 运行时）
 - 规模：约 1.2 万行源码，39 个 `.rs`
-- 状态：**四大核心功能已实测通过**，206 个单元测试全绿，clippy 零告警
+- 状态：**四大核心功能已实测通过**，249 个单元测试全绿，clippy 零告警（`scripts\gate.cmd`）
 
 ## 接续工作前必读
 
@@ -27,29 +27,43 @@
    这是用户给出"太垃圾了"评价的直接原因。**不确定就标注为待确认。**
 2. **绝不提交凭据**。token / webhook / password 一律走环境变量或
    `secrets.env`（已被 `.gitignore` 排除）。推送 GitHub 时注意别把 token 打进输出。
-3. **改动过三关再提交**：`cargo fmt --all` → `cargo clippy --workspace --all-targets`
-   （必须零告警）→ `cargo test --workspace`（当前 206 个全绿）。
+3. **改动过三关再提交**：直接跑 `scripts\gate.cmd`（= `cargo fmt --check` →
+   `clippy --workspace --all-targets -- -D warnings` → `cargo test --workspace`），
+   三关全过才提交。clippy 加了 `-D warnings`，所以「一个告警」也会让 gate 红。
+   手工跑也是这三条，但漏掉 clippy 的概率很高——这是加脚本的原因。
 
 ## 常用命令
 
 ```powershell
 cd D:\VibeClassAgent
+.\scripts\gate.cmd             # 提交前的三道关（fmt / clippy / test）
+.\scripts\gate.cmd -SkipTest   # 只想快速看格式与静态检查
 .\scripts\dev.cmd              # 编译并进交互界面（数字菜单 + / 命令）
 .\scripts\dev.cmd -Check       # 只做 cargo check
 .\scripts\dev.cmd doctor       # 环境自检
 .\scripts\dev.cmd debug e2e    # 端到端冒烟（录 15 秒跑完整流程）
 .\scripts\dev.cmd plugin list  # 插件列表
+python scripts\smoke.py         # 图形界面的端到端冒烟（起服务打真实 HTTP 接口）
 ```
+
+> `dev.cmd` 与 `gate.cmd` 共用 `scripts\env.ps1` 里的环境准备（本地工具链、
+> 剔除旧 MinGW、dlltool 的 as.exe、CC）。改工具链设置只改那一处，
+> 否则会出现「开发能跑、gate 说找不到 gcc」这种极难查的漂移。
 
 > **PowerShell 里当前目录的脚本必须加 `.\` 前缀**，否则报
 > `The module 'scripts' could not be loaded`。
 > 不想 cd 就用 `& 'D:\VibeClassAgent\scripts\dev.cmd' ...`。
 
-## 本机环境的三个坑（已封装进 dev.ps1，但直接跑 cargo 时要自己注意）
+## 本机环境的四个坑（已封装进 dev.ps1 / gate.ps1，但直接跑 cargo 时要自己注意）
 
 1. **不要在 workspace 内用 `cargo init` 建探针项目** —— 它会污染根 `Cargo.toml` 的 members
 2. **编辑任何 `.ps1` 后必须补 UTF-8 BOM** —— PowerShell 5.1 按 ANSI 读无 BOM 文件，中文注释会破坏语法
 3. **8 GB 内存限制**：`cargo test` 用 `-j 1`，否则可能 `Allocation failed`
+4. **新增依赖会去连本地 sparse 代理（`127.0.0.1:13579`，见 `.toolchain/cargo/config.toml`）** ——
+   代理没在跑时 cargo 只会一遍遍刷 `spurious network error`，看起来像卡死（实测卡过一次 gate）。
+   两条路：把代理起起来；或者 `--offline` 配合**收窄依赖特性**。
+   收窄这条更常用：默认特性常常拖进一串本机缓存里没有的 crate
+   （`zip` 就是这么处理的 —— 关掉 default，只留 `deflate-flate2`）。
 
 ## 临时文件约定
 

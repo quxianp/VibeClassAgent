@@ -24,6 +24,7 @@
 //! 生产环境（一体机）通常直连，什么都不用配。
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
@@ -203,6 +204,48 @@ pub fn request(
             Ok(HttpResponse { status, body })
         }
         Err(e) => Err(HttpError::Network(e.to_string())),
+    }
+}
+
+/// 把响应体**流式**写入文件，返回写入的字节数。
+///
+/// 为什么不复用 [`request`]：那条路会把整个响应体读成一个 `String`。
+/// 下载几十 MB 的安装包时，这既会撑爆内存（本项目的目标机器只有 8 GB），
+/// 也会在遇到非 UTF-8 字节时悄悄丢内容（`read_to_string` 失败即返回空串，
+/// 而调用方看到的只是一个「空的成功响应」）。
+///
+/// 重定向交给 ureq 自己跟：GitHub 的 `releases/latest/download/...`
+/// 就是 302 到 `objects.githubusercontent.com`，手工跟反而容易做错。
+///
+/// 失败时会把写了一半的目标文件删掉 —— 留着半个 zip 只会让下一次
+/// 「解压失败」的报错更难懂。
+pub fn download(url: &str, dest: &Path, timeout_ms: i32) -> Result<u64, HttpError> {
+    let agent = agent_for(timeout_ms)?;
+    let mut resp = agent
+        .get(url)
+        .call()
+        .map_err(|e| HttpError::Network(e.to_string()))?;
+
+    let status = resp.status().as_u16() as u32;
+    if !(200..300).contains(&status) {
+        return Err(HttpError::Network(format!("HTTP {status}")));
+    }
+
+    // 闭包体里要可变借用 resp（读 body），所以声明必须带 mut
+    let mut write = || -> std::io::Result<u64> {
+        let mut reader = resp.body_mut().as_reader();
+        let mut file = std::fs::File::create(dest)?;
+        let n = std::io::copy(&mut reader, &mut file)?;
+        file.sync_all()?;
+        Ok(n)
+    };
+
+    match write() {
+        Ok(n) => Ok(n),
+        Err(e) => {
+            let _ = std::fs::remove_file(dest);
+            Err(HttpError::Network(e.to_string()))
+        }
     }
 }
 

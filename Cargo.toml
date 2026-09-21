@@ -57,6 +57,9 @@ tracing-subscriber = { version = "0.3", default-features = false, features = ["s
 # 安全包装只在 StructuredStorage + Variant 两个 feature 同时开启时生成。
 windows = { version = "0.62", features = [
     "Win32_Foundation",
+    # Threading：OpenProcess / GetExitCodeProcess / TerminateProcess，
+    # 用来判断和结束 NapCat 进程（tasklist 在本机沙箱里是 Access denied）
+    "Win32_System_Threading",
     "Win32_Media_Audio",
     "Win32_System_Com",
     "Win32_System_Com_StructuredStorage",

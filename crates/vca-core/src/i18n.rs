@@ -190,6 +190,24 @@ pub fn t(key: &str) -> String {
         .unwrap_or_else(|| key.to_string())
 }
 
+/// 取某个前缀下的所有文案（返回的 key 已去掉前缀）。
+///
+/// 界面用它**一次性**拿全 `web.*`：界面上有 200 多条文案，
+/// 一条一发请求显然不现实。
+pub fn subtree(prefix: &str) -> std::collections::HashMap<String, String> {
+    ensure();
+    let mut out = std::collections::HashMap::new();
+    let needle = format!("{prefix}.");
+    if let Ok(t) = tables().lock() {
+        for (k, v) in t.iter() {
+            if let Some(rest) = k.strip_prefix(&needle) {
+                out.insert(rest.to_string(), v.clone());
+            }
+        }
+    }
+    out
+}
+
 /// 取一条文案并替换 `{名字}` 占位符。
 ///
 /// ```ignore

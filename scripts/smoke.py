@@ -184,6 +184,9 @@ def main() -> int:
     env = os.environ.copy()
     env["VCA_UI"] = "1"
     env["RUST_LOG"] = "info"
+    # 机器人（NapCat）的安装目录也指到临时目录：否则它会去看真实的
+    # tools/napcat/，测试结果就取决于这台机器上装没装过机器人了
+    env["VCA_NAPCAT_DIR"] = str(WORK / "napcat")
     proc = subprocess.Popen(
         [str(exe), "--config-dir", str(cfg), "--data-dir", str(data),
          "gui", "--no-open", "--port", str(port)],
@@ -403,6 +406,143 @@ def run_checks(api: Api, base: str, mock: MockOneBot, cfg: Path) -> None:
         ok("回读课表一致")
     else:
         bad("回读课表", str(g))
+
+    # 逐条勾选：写进去的 record 必须原样回读，否则「这节课不录」形同虚设
+    ent = g.get("entries") or []
+    if ent and ent[0].get("record") is True:
+        ok("逐条录制开关已落盘", f"record={ent[0].get('record')}")
+    else:
+        bad("录制开关未落盘", json.dumps(ent[:1], ensure_ascii=False)[:160])
+
+    print("\n[6.5] 界面文案接口", flush=True)
+    r = api.call("/api/i18n")[1] or {}
+    strings = r.get("strings") or {}
+    if r.get("ok") and len(strings) >= 150 and strings.get("nav.overview"):
+        ok("GET /api/i18n", f"{len(strings)} 条文案，lang={r.get('lang')}")
+    else:
+        bad("GET /api/i18n", f"{len(strings)} 条，nav.overview={strings.get('nav.overview')!r}")
+    # 左上角那三个字母换成了 ASCII 字符画，缺了会退回字母档
+    logo = strings.get("logo") or ""
+    if logo.count("\n") >= 4 and "█" in logo:
+        ok("ASCII 字符画在", f"{len(logo.splitlines())} 行")
+    else:
+        bad("ASCII 字符画缺失", repr(logo)[:80])
+    # 每条文案都必须真有值，空串会在界面上留白，比缺 key 更难发现
+    empty = sorted(k for k, v in strings.items() if isinstance(v, str) and not v.strip())
+    if not empty:
+        ok("没有空文案")
+    else:
+        bad("存在空文案", ", ".join(empty[:5]))
+
+    print("\n[6.6] 机器人探测", flush=True)
+    r = api.call("/api/detect-bot", {})[1] or {}
+    if r.get("ok") and isinstance(r.get("found"), list) and r.get("candidates"):
+        ok("POST /api/detect-bot", f"扫 {len(r['candidates'])} 个端口，命中 {r['found']}")
+    else:
+        bad("POST /api/detect-bot", str(r)[:160])
+
+    print("\n[6.7] ClassIsland 课表导入", flush=True)
+    ci = {
+        "TimeLayouts": {
+            "aaaaaaaa-0000-0000-0000-000000000001": {
+                "Name": "冒烟作息表",
+                "IsActive": True,
+                "Layouts": [
+                    {"StartTime": "08:00:00", "EndTime": "08:45:00", "TimeType": 0},
+                    {"StartTime": "12:00:00", "EndTime": "13:30:00",
+                     "TimeType": 1, "BreakName": "午餐午休"},
+                    {"StartTime": "14:00:00", "EndTime": "14:45:00", "TimeType": 0},
+                ],
+            }
+        },
+        "Subjects": {
+            "bbbbbbbb-0000-0000-0000-000000000001": {
+                "Name": "导入的语文", "TeacherName": "导入老师",
+            },
+        },
+        "ClassPlans": {
+            "cccccccc-0000-0000-0000-000000000001": {
+                "IsEnabled": True,
+                "TimeLayoutId": "aaaaaaaa-0000-0000-0000-000000000001",
+                "TimeRule": {"WeekDay": 1, "WeekCountDiv": 0},
+                "Classes": [
+                    {"IsEnabled": True,
+                     "SubjectId": "bbbbbbbb-0000-0000-0000-000000000001"},
+                    {"IsEnabled": True,
+                     "SubjectId": "00000000-0000-0000-0000-000000000000"},
+                    {"IsEnabled": True,
+                     "SubjectId": "bbbbbbbb-0000-0000-0000-000000000001"},
+                ],
+            }
+        },
+    }
+    r = api.call("/api/import/classisland",
+                 {"json": json.dumps(ci, ensure_ascii=False), "timetable": "冒烟"},
+                 timeout=25)[1] or {}
+    # 时间表里 TimeType=0 的时段只有 2 段，而 Classes 给了 3 格；
+    # 导入器按下标一一对应，第 3 格（cells[2]）不会被读；
+    # 第 2 格是全零 SubjectId 又没有 DefaultClassId，按设计跳过。
+    # 所以正确结果是 1 条，不是 2 条 —— 这里反过来验证了「按对跳过」。
+    if r.get("ok") and r.get("entries") == 1 and r.get("slots") == 3:
+        ok("导入 ClassIsland 课表",
+           f"{r.get('timetable_name')} / {r['slots']} 时段 / {r['entries']} 节课")
+    else:
+        bad("导入 ClassIsland 课表", json.dumps(r, ensure_ascii=False)[:200])
+
+    # 老师名必须从 Subjects.TeacherName 提取出来，否则录制档案会全是「未分配」
+    g = api.call("/api/schedule")[1] or {}
+    teachers = [t.get("name") for t in (g.get("teachers") or [])]
+    if "导入老师" in teachers:
+        ok("从 Subjects 提取到老师", ", ".join(str(x) for x in teachers))
+    else:
+        bad("老师未提取", f"teachers={teachers}")
+
+    print("\n[6.8] QQ 机器人（NapCat）", flush=True)
+    r = api.call("/api/bot/napcat")[1] or {}
+    root = str(r.get("root") or "")
+    if r.get("ok") and r.get("installed") is False and "napcat" in root.lower():
+        ok("GET /api/bot/napcat", f"未安装，装到 {root}")
+    else:
+        bad("GET /api/bot/napcat", json.dumps(r, ensure_ascii=False)[:200])
+
+    # 没装就点启动：必须给一句人话，而不是一个空错误或一段 panic
+    r = api.call("/api/bot/napcat/start", {})[1] or {}
+    if r.get("ok") is False and "还没装好" in (r.get("error") or ""):
+        ok("未安装时启动会给出明确提示")
+    else:
+        bad("未安装时启动", json.dumps(r, ensure_ascii=False)[:200])
+
+    # 没在跑的时候点停止，应当是好聚好散，不是报错
+    r = api.call("/api/bot/napcat/stop", {})[1] or {}
+    if r.get("ok"):
+        ok("未运行时停止不报错")
+    else:
+        bad("未运行时停止", json.dumps(r, ensure_ascii=False)[:160])
+
+    # 造一个假的安装目录，验证「识别 → 启动 → 停止」这条链
+    fake = Path(WORK) / "napcat"
+    fake.mkdir(parents=True, exist_ok=True)
+    (fake / "launcher.bat").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+    (fake / "package.json").write_text('{"name":"napcat","version":"0.0.0-smoke"}', encoding="utf-8")
+
+    r = api.call("/api/bot/napcat")[1] or {}
+    if r.get("installed") and r.get("version") == "0.0.0-smoke" and "Shell" in (r.get("flavor") or ""):
+        ok("识别出假安装", f"{r.get('flavor')} / {r.get('version')}")
+    else:
+        bad("识别假安装", json.dumps(r, ensure_ascii=False)[:200])
+
+    r = api.call("/api/bot/napcat/start", {}, timeout=20)[1] or {}
+    if r.get("ok") and r.get("pid"):
+        ok("启动返回 pid", f"pid={r['pid']}")
+    else:
+        bad("启动机器人", json.dumps(r, ensure_ascii=False)[:200])
+    # 那个假的 launcher.bat 会立刻退出，所以这里**不去断言它还在跑**；
+    # 真正要验证的是 stop 不会因为进程已经没了就报错
+    r = api.call("/api/bot/napcat/stop", {}, timeout=20)[1] or {}
+    if r.get("ok"):
+        ok("停止请求被接受")
+    else:
+        bad("停止机器人", json.dumps(r, ensure_ascii=False)[:200])
 
     print("\n[7] 守护进程控制", flush=True)
     d = api.call("/api/daemon/status")[1] or {}

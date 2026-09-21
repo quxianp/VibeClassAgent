@@ -38,6 +38,8 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
     let token = make_token();
     let url = format!("http://127.0.0.1:{port}/?t={token}");
 
+    start_tray(&opts);
+
     tracing::info!("界面地址：{url}");
     if opts.open_browser {
         match open_app_window(&url) {
@@ -55,6 +57,66 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// 起任务栏托盘图标。
+///
+/// 界面窗口是独立的浏览器进程，用户关掉它程序还在后台跑 —— 任务栏上有个
+/// 图标，他才知道「它还在」，也才有地方右键退出或打开目录。
+///
+/// 失败不影响主流程：没有托盘，界面照样能用。
+fn start_tray(opts: &ServeOptions) {
+    use vca_platform::tray::{spawn, TrayCommand};
+
+    // 跟着配置走：用户在界面上关掉了就别起
+    let settings = vca_core::config::load_settings(
+        &opts
+            .config_root
+            .join("profiles")
+            .join(&opts.profile)
+            .join("settings.yaml"),
+    )
+    .unwrap_or_default();
+    if !settings.ui.tray_icon {
+        tracing::info!("托盘图标已在配置里关闭");
+        return;
+    }
+
+    match spawn("VibeClassAgent") {
+        Ok((tray, _handle)) => {
+            tracing::info!("托盘图标已创建");
+            let data_root = opts.data_root.clone();
+            // 轮询菜单点击。400ms 一次：人点菜单不会更快，也几乎不耗 CPU。
+            std::thread::spawn(move || loop {
+                match tray.poll() {
+                    Some(TrayCommand::Quit) => {
+                        tracing::info!("托盘菜单：退出");
+                        std::process::exit(0);
+                    }
+                    Some(TrayCommand::StopRecording) => {
+                        tracing::info!("托盘菜单：停止录制");
+                        vca_platform::shutdown::request_shutdown();
+                    }
+                    Some(TrayCommand::OpenDataDir) => {
+                        let _ = std::process::Command::new("explorer")
+                            .arg(&data_root)
+                            .spawn();
+                    }
+                    Some(TrayCommand::OpenLogs) => {
+                        let _ = std::process::Command::new("explorer")
+                            .arg(data_root.join("logs"))
+                            .spawn();
+                    }
+                    None => {}
+                }
+                if !tray.alive() {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(400));
+            });
+        }
+        Err(e) => tracing::warn!("托盘图标创建失败（{e}），界面功能不受影响"),
+    }
 }
 
 /// 处理一个请求。

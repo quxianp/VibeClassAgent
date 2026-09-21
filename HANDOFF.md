@@ -71,6 +71,21 @@ Intel i5-10400 (6C12T) / 8 GB RAM / 64 位 / 十点触控
 
 ## 2. 现在是什么状态
 
+> **交付形态（2026-09 起）**：现在有**两种形态**，主线是 GUI。
+>
+> - **GUI（主线）**：`vca gui` 在本机起一个只绑回环的 HTTP 服务，
+>   用系统自带的 Edge 以「应用模式」打开一个没有地址栏的独立窗口
+>   （有任务栏图标、能最小化）。前端是纯 HTML/CSS/JS，用 `include_str!`
+>   打进 exe —— **目标机器上不需要装任何运行时**。
+>   URL 里带一次性令牌，接口没有令牌一律 403。
+> - **CLI（已存档）**：`vca chat` 仍在、仍能用，但不再往前做，
+>   代码冻结在标签 `cli-archive`。日常一律走 GUI。
+>
+> 代价要知道：**前端资源在 exe 里，改完必须重新编译**（`cargo build`）。
+> 想在开发时不重编，可以把改动放到 `<程序目录>/assets/web/` 下，
+> `web::resolve()` 会优先用外部文件。另外**直接关掉界面窗口不会退出后台服务**
+> ——窗口是 `--app` 拉起的独立进程。要真退出，用界面右上角的「退出」。
+
 ```mermaid
 flowchart LR
   A["录制<br/>已通"] --> B["转写<br/>已通"]
@@ -118,7 +133,8 @@ D:\VibeClassAgent\
 │   │   ├── docgen.rs                ★ 文档生成（Markdown / Word / PDF）
 │   │   ├── shots.rs                 ★ 截图 dHash 去重 + 讲稿时间对齐
 │   │   ├── push.rs                  ★ 六种推送渠道 + send_with_retry
-│   │   ├── http.rs                  ureq + rustls 封装（代理、连接池）
+│   │   ├── napcat.rs                ★ NapCat（QQ 机器人）识别 / 安装 / 起停 / 日志
+│   │   ├── http.rs                  ureq + rustls 封装（代理、连接池、流式下载）
 │   │   ├── proc.rs                  静默子进程 + 外部工具查找
 │   │   ├── doctor.rs                环境自检
 │   │   ├── tray.rs                  托盘图标（优先从 assets/icon.ico 加载）
@@ -128,6 +144,11 @@ D:\VibeClassAgent\
 │   ├── vca-engine/
 │   │   ├── daemon.rs                守护进程（按课表调度录制）
 │   │   └── pipeline.rs              ★ 课后流水线（转写→提取→关联→文档→推送）
+│   ├── vca-gui/                     ★ 图形界面（当前主线）
+│   │   ├── server.rs                只绑回环 + 一次性令牌 + 托盘 + 开 Edge 应用窗
+│   │   ├── api.rs                   /api/* 接口（写操作一律走 patch_settings_line）
+│   │   ├── daemon.rs                在界面里起停守护进程
+│   │   └── web/                     index.html / style.css / app.js（include_str! 进 exe）
 │   └── vca-cli/
 │       ├── main.rs                  入口（无子命令时进 repl）
 │       ├── repl.rs                  ★ 交互界面（数字菜单 + 斜杠命令 + Claude 配色）
@@ -136,7 +157,10 @@ D:\VibeClassAgent\
 ├── assets/icon.ico                  ★ 托盘图标占位（换 LOGO 直接覆盖此文件）
 ├── plugins/                         10 个插件目录（1 个已实现，9 个骨架）
 ├── scripts/
-│   ├── dev.ps1 / dev.cmd            ★ 构建入口（含三处本机环境适配）
+│   ├── env.ps1                      ★ 构建环境准备（dev 与 gate 共用，别再拷第二份）
+│   ├── dev.ps1 / dev.cmd            开发入口（编译 + 运行）
+│   ├── gate.ps1 / gate.cmd          ★ 提交前三道关（fmt / clippy / test）
+│   ├── smoke.py                     ★ GUI 端到端冒烟（起服务打真实 HTTP 接口）
 │   ├── fetch-deps.py                下载 ffmpeg / whisper.cpp / 模型到 tools/
 │   ├── package.py                   打包发布（自带运行时）
 │   └── make-icon.py                 生成占位图标
@@ -228,6 +252,8 @@ Edge 用完整 Chromium 排版引擎，中文零配置、体积小。
 | 3 | **.ps1 中文注释导致语法错** | `Unexpected token` | Windows PowerShell 5.1 按 ANSI 读无 BOM 的 .ps1，中文变乱码破坏语法。**编辑任何 .ps1 后必须补 UTF-8 BOM** |
 | 4 | **cargo 连不上 crates.io** | schannel `SEC_E_NO_CREDENTIALS` | 本机 schannel 被阻断。用 `.toolchain/regproxy.py` 本地 HTTP 代理转发（需系统代理 10818 在跑） |
 | 5 | **PowerShell 内存爆** | `Allocation failed` | 8 GB 机器上 `cargo test` 会同时编译 lib + lib-test。用 `-j 1`，或设 `CARGO_PROFILE_DEV_DEBUG=0` |
+| 5b | **`$ErrorActionPreference="Stop"` 会吃掉原生程序的 stderr**（本轮新增） | 脚本在半路被异常打断：该跑的检查没跑完，结尾也不打印结论，只留一屏编译输出 | cargo 的编译错误与 clippy 告警**全都走 stderr**，PS 会把它当成 terminating error。调外部命令前把偏好切回 `Continue`，用 `$LASTEXITCODE` 判成败（见 `scripts/gate.ps1` 的 `Invoke-Cargo`）。实测第一次跑 gate 就栽在这：报「未通过：fmt / test」，而真正的 clippy 压根没跑完 |
+| 5c | **新增依赖时 cargo 会去连本地 sparse 代理**（本轮新增） | 反复刷 `spurious network error ... 127.0.0.1:13579`，看起来像卡死（实测卡了一次 gate） | 代理没在跑。收窄依赖特性 + `--offline` 是更常用的一条路：`zip` 的 default 会拖进 aes / bzip2 / lzma / zstd / xz 一堆本机缓存里没有的 crate，关掉 default 只留 `deflate-flate2` 就过了 |
 
 ### 5.2 代码类（血泪教训）
 
@@ -245,6 +271,10 @@ Edge 用完整 Chromium 排版引擎，中文零配置、体积小。
 | 15 | **`cargo run` 时数据落到 target/debug** | `cargo clean` 一跑全没。已识别「exe 在 target/{debug,release}」并上溯到仓库根 |
 | 19 | **正在录制的作业被当成待办捞走**（本轮新增） | 录制一开始就把作业标成 `Recorded` 存盘，它立刻出现在 `pending()` 里。若处理窗口与上课时段重叠，**没写完的录像会被捞去处理**，报「转写失败：没有可转写的音视频文件」并标 Failed。已让 `process_scope` 排除正在录制的作业 |
 | 20 | **改了课表时段，已录好的作业就再也匹配不上处理窗口**（本轮新增） | `job_id` 里嵌着**录制开始时刻**（`...T0113...`），而 `process_scope` 是用**当前课表**反算 `job_id` 的。时段一改（临时调课、改作息表、事后补课表），`targets` 非空却不含那个作业 → todo 为空 → **静默返回，无日志无报错**，看上去就像「处理窗口根本没用」。`targets.is_empty()` 的兜底只在当天完全没课表条目时才生效。**排查手段**：用 `window_at` 里的窗口名 + 作业 `job.json` 的 `start` 字段对一遍。改进方向见 §9.1 |
+
+| 21 | **`items_after_test_module` 只有 clippy 拦得住**（本轮新增） | `cargo check --all-targets` 全绿、`cargo test` 也全绿，唯独 `cargo clippy -- -D warnings` 报错：测试模块后面不能再有别的定义。**这就是「三关必须都跑」的实证** —— 少了 clippy 这一关，这个错会一路带进提交。已固化成 `scripts/gate.cmd` |
+| 22 | **前端资源是 `include_str!` 打进 exe 的**（本轮新增） | 改完 `app.js` 打开界面没变化，人会先怀疑缓存、再怀疑后端。真相是 exe 里那份还是旧的：**改前端必须重新编译**。开发时想免编译，把文件放到 `<程序目录>/assets/web/` 下（`web::resolve` 优先外部） |
+| 23 | **登录二维码被丢进 `nul` 就永远扫不到**（本轮新增） | 按「静默启动」的惯例把 NapCat 子进程的 stdout 设成 null，用户看到的是「启动了但一直连不上」的黑箱。**该静默的是窗口，不是信息**：现在输出落到 `logs/vca-launcher.log`，界面直接把日志尾巴显示出来 |
 
 ### 5.3 PowerShell / git 用法类
 
@@ -298,10 +328,21 @@ cargo test --workspace -j 1     # 8 GB 机器建议 -j 1
 ### 7.1 提交前必过三关
 
 ```powershell
-cargo fmt --all
-cargo clippy --workspace --all-targets    # 必须零告警
-cargo test --workspace                    # 当前 206 个全绿
+.\scripts\gate.cmd        # 一次跑完下面三条，全过才提交
 ```
+
+等价于：
+
+```powershell
+cargo fmt --all -- --check               # 不合规就跑 cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings   # 别去掉 -D warnings
+cargo test --workspace
+```
+
+> 三条手工敲很容易漏掉 clippy，而 clippy 恰恰是唯一能拦住
+> `items_after_test_module`（见坑 #21）这类问题的关口。脚本存在的意义就是这个。
+> `gate.cmd` 与 `dev.cmd` 共用 `scripts\env.ps1` 的环境准备，
+> 改工具链设置只改那一处，免得两边漂移成「开发能跑、gate 说找不到 gcc」。
 
 ### 7.2 提交信息
 
@@ -384,6 +425,12 @@ for ($i=1; $i -le 5; $i++) {
 - 清理：登记 72 小时计划
 - 端到端：`vca debug e2e` 跑通，结束状态 `Pushed`
 - 插件：`vca plugin list` 列出 10 个；示例插件五个方法全部应答正确
+- **质量关（本轮）**：`scripts\gate.cmd` 三关全过 —— fmt 合规、clippy（`--workspace --all-targets -- -D warnings`）零告警、249 个单元测试全绿
+- **GUI 形态（本轮）**：`python scripts/smoke.py` 41 项全过 ——
+  静态资源、令牌保护（错误 token 403）、配置写入与回读、真实发送测试消息
+  （自带 mock OneBot 收报文并校验内容）、时间表推导处理窗口、
+  ClassIsland 课表导入、逐条「录制」开关落盘、界面文案接口、
+  机器人探测、守护进程起停、作业与清理预览、退出接口
 - **daemon 全链路（2026-09-20 真实时间轴实测）**：到点自动开录 → 录制中拒绝处理
   → 收尾成 mp4 → 处理窗口内自动跑完转写 / 截图关联 / 生成文档 / 推送 / 登记 72 小时清理。
   终点作业状态 `PUSHED`、`push_succeeded_at` 有值、`expire_at` = +72h、`last_error` 为空；
@@ -398,7 +445,9 @@ for ($i=1; $i -le 5; $i++) {
 | **浏览器自动化模式** | 没有真实站点账号可测 | 需用户提供，或用 `selectors` 覆盖调试 |
 | **QQ / 微信推送真实通道** | 没有真实的机器人凭据 | 需用户配置后试 |
 | **一体机上课时段长跑** | 无真实环境 | 建议先跑一周观察磁盘与日志 |
-| **托盘图标实际显示** | 代码与加载都验过（有测试），但"在任务栏里看得见"需要人眼确认 | 跑 `vca run`，看右下角 |
+| **托盘图标实际显示** | 代码与加载都验过（有测试），但"在任务栏里看得见"需要人眼确认 | 跑 `vca gui`，看右下角与任务栏 |
+| **NapCat 的真实下载**（本轮新增） | 开发机**连不上 GitHub**（直连超时、本地代理没在跑），三个下载源一个都验不到。识别 / 解压 / 起停 / 日志这些**逻辑**用构造的假安装目录测过（含 17 个单元测试），但「真的能从 GitHub 下到 60 MB 的包」没验过 | 在能上网的机器上点一次「一键安装」，确认 `tools/napcat/` 里出现 `launcher.bat` 一类入口 |
+| **NapCat 真实启动与扫码登录**（本轮新增） | 没有真实 NapCat 包，也没有可登录的 QQ 小号 | 装好之后点「启动」，看日志里是否出现二维码、扫码后 OneBot 端口（默认 3000）是否开始监听 |
 
 ---
 

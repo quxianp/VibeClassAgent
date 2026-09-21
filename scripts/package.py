@@ -161,6 +161,9 @@ README_TXT = """VibeClassAgent —— 静默课堂录制与课后总结
 1. 双击「启动.cmd」—— 会打开一个**图形界面窗口**（没有地址栏，观感上就是个原生程序）。
 2. 在界面里依次配好：模型 API → 推送 → 时间表 → 课表。
    每页都有「保存」；推送页还有「发送测试消息」，配完立刻能验证通不通。
+   想推到 QQ 群：推送页下半部分那张「QQ 机器人（NapCat）」卡片能一键装好机器人
+   （不用自己去 GitHub 翻 Release），首次启动扫码登录即可。
+   嫌麻烦就用企业微信机器人 —— 只要一个 Webhook 地址，什么都不用装。
 3. 配完之后挂着就行：上课时段自动录，午休与晚餐时段自动处理并推送。
 
 > 想用命令行：`vca.exe chat` 进交互式 CLI，`vca.exe --help` 看全部子命令。
@@ -212,6 +215,25 @@ README_TXT = """VibeClassAgent —— 静默课堂录制与课后总结
 """
 
 
+NAPCAT_NOTE = """这个目录是给 QQ 机器人（NapCat）留的。
+
+界面「推送」页那张「QQ 机器人（NapCat）」卡片可以一键下载安装，
+装好之后就落在本目录里。
+
+自动下载失败时（校园网访问 GitHub 常常不通）手动做也可以：
+
+  1. 打开 https://github.com/NapNeko/NapCatQQ/releases
+  2. 下载 NapCat.Shell.zip（本机已装 QQ 的话）
+     或便携包版本（自带 QQ，不依赖本机安装）
+  3. 解压到本目录 —— 让 launcher.bat 或 NapCatWinBootMain.exe
+     直接躺在本目录下。多套一层同名子目录也没关系，程序会往下找一层
+  4. 回到界面点「刷新」，卡片会认出它
+
+不用 QQ 的话，这一步完全可以跳过：
+企业微信机器人只需要一个 Webhook 地址，不装任何东西。
+"""
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="打包 VibeClassAgent 发布目录")
     ap.add_argument("--out", default=str(ROOT / "dist"), help="输出根目录")
@@ -236,6 +258,12 @@ def main() -> int:
     (out / "启动.cmd").write_text(LAUNCH_CMD, encoding="utf-8")
     (out / "首次设置.cmd").write_text(SETUP_CMD, encoding="utf-8")
     (out / "README.txt").write_text(README_TXT, encoding="utf-8")
+
+    # 机器人目录只留位置与说明，不打进实际文件（理由见 NAPCAT_NOTE）
+    napcat = out / "tools" / "napcat"
+    napcat.mkdir(parents=True, exist_ok=True)
+    (napcat / "先看这个.txt").write_text(NAPCAT_NOTE, encoding="utf-8")
+    log("已留出 tools\\napcat\\（QQ 机器人，按需下载，包内不含本体）")
 
     # ---- 资源与语言文件 ----
     # 图标是独立文件：拿到正式 LOGO 后直接覆盖 assets/icon.ico 即可，代码不用动。

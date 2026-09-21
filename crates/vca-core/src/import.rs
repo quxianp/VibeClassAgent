@@ -332,7 +332,12 @@ pub fn import_classisland(
                 end: end.clone(),
                 course,
                 teacher_id,
-                record: false,
+                // ClassIsland 的课表里没有「录不录」这个概念，导入时**一律先勾上**。
+                // 导入这个动作本身就是「这些课我要录」的意思。
+                // 反过来（默认不录）是最糟的默认值：守护进程照常跑、日志一切正常，
+                // 却一节课都不会录，用户只会以为程序坏了。
+                // 想跳过某几节，在 GUI 课表页把勾去掉即可。
+                record: true,
                 merge: false,
                 room: None,
                 cycle: Some(cycle.to_string()),

@@ -10,41 +10,43 @@
 <div class="app">
   <aside class="sidebar">
     <div class="brand">
-      <span class="brand-mark">VCA</span>
-      <span class="brand-sub">课堂录制与总结</span>
+      <!-- ASCII 字符画从语言文件读（web.logo）；取不到就退回纯文字 -->
+      <pre class="brand-mark" id="brand-logo"></pre>
+      <span class="brand-text" id="brand-text" style="display:none">VCA</span>
+      <span class="brand-sub" data-i18n="brand_sub">课堂录制与总结</span>
     </div>
 
     <nav class="nav" id="nav">
       <button class="nav-item active" data-page="overview">
-        <span class="nav-ico">◈</span> 概览
+        <span class="nav-ico">◈</span> <span data-i18n="nav.overview">概览</span>
       </button>
       <button class="nav-item" data-page="run">
-        <span class="nav-ico">▶</span> 运行
+        <span class="nav-ico">▶</span> <span data-i18n="nav.run">运行</span>
       </button>
       <button class="nav-item" data-page="model">
-        <span class="nav-ico">✦</span> 模型 API
+        <span class="nav-ico">✦</span> <span data-i18n="nav.model">模型 API</span>
       </button>
       <button class="nav-item" data-page="push">
-        <span class="nav-ico">⇪</span> 推送
+        <span class="nav-ico">⇪</span> <span data-i18n="nav.push">推送</span>
       </button>
       <button class="nav-item" data-page="timetable">
-        <span class="nav-ico">▤</span> 时间表
+        <span class="nav-ico">▤</span> <span data-i18n="nav.timetable">时间表</span>
       </button>
       <button class="nav-item" data-page="schedule">
-        <span class="nav-ico">▦</span> 课表
+        <span class="nav-ico">▦</span> <span data-i18n="nav.schedule">课表</span>
       </button>
       <button class="nav-item" data-page="record">
-        <span class="nav-ico">●</span> 录制与文件
+        <span class="nav-ico">●</span> <span data-i18n="nav.record">录制与文件</span>
       </button>
       <button class="nav-item" data-page="jobs">
-        <span class="nav-ico">≡</span> 作业
+        <span class="nav-ico">≡</span> <span data-i18n="nav.jobs">作业</span>
       </button>
     </nav>
 
     <div class="sidebar-foot">
-      <div class="dot-row"><span class="dot" id="dot-llm"></span> 模型</div>
-      <div class="dot-row"><span class="dot" id="dot-push"></span> 推送</div>
-      <div class="dot-row"><span class="dot" id="dot-stt"></span> 本地转写</div>
+      <div class="dot-row"><span class="dot" id="dot-llm"></span> <span data-i18n="side.llm">模型</span></div>
+      <div class="dot-row"><span class="dot" id="dot-push"></span> <span data-i18n="side.push">推送</span></div>
+      <div class="dot-row"><span class="dot" id="dot-stt"></span> <span data-i18n="side.stt">本地转写</span></div>
     </div>
   </aside>
 
@@ -53,8 +55,8 @@
       <h1 id="page-title">概览</h1>
       <div class="topbar-right">
         <span class="pill" id="pill-profile">default</span>
-        <button class="btn ghost" id="btn-refresh">刷新</button>
-        <button class="btn ghost" id="btn-quit"
+        <button class="btn ghost" id="btn-refresh" data-i18n="common.refresh">刷新</button>
+        <button class="btn ghost" id="btn-quit" data-i18n="common.quit"
                 title="退出程序。注意：直接关掉这个窗口不会退出后台服务。">退出</button>
       </div>
     </header>

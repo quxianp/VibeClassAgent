@@ -250,7 +250,7 @@ Edge 用完整 Chromium 排版引擎，中文零配置、体积小。
 | 1 | **raw-dylib 链接失败** | `dlltool.exe: CreateProcess` | rustup 的 GNU 工具链**自带 dlltool 却不带 as.exe**，而 dlltool 忽略 `AS` 环境变量、只在自己目录找 `as`。把 as.exe 复制到 `self-contained/` 目录即可 |
 | 2 | **ring 编译失败** | `failed to find tool "gcc.exe"` | 需要 C 编译器，但**绝不能把 MinGW 放进 PATH**（它的 ld 会被 rustc 当链接器，报 `cannot find crt2.o / -lwinhttp`）。只用 `CC`/`AR` 环境变量告诉 cc-rs |
 | 3 | **.ps1 中文注释导致语法错** | `Unexpected token` | Windows PowerShell 5.1 按 ANSI 读无 BOM 的 .ps1，中文变乱码破坏语法。**编辑任何 .ps1 后必须补 UTF-8 BOM** |
-| 4 | **cargo 连不上 crates.io** | schannel `SEC_E_NO_CREDENTIALS` | 本机 schannel 被阻断。用 `.toolchain/regproxy.py` 本地 HTTP 代理转发（需系统代理 10818 在跑） |
+| 4 | **cargo 连不上 crates.io** | schannel `SEC_E_NO_CREDENTIALS` | 本机 schannel 被阻断。用 `scripts/regproxy.py` 本地 HTTP 代理转发（需系统代理 10818 在跑） |
 | 5 | **PowerShell 内存爆** | `Allocation failed` | 8 GB 机器上 `cargo test` 会同时编译 lib + lib-test。用 `-j 1`，或设 `CARGO_PROFILE_DEV_DEBUG=0` |
 | 5b | **`$ErrorActionPreference="Stop"` 会吃掉原生程序的 stderr**（本轮新增） | 脚本在半路被异常打断：该跑的检查没跑完，结尾也不打印结论，只留一屏编译输出 | cargo 的编译错误与 clippy 告警**全都走 stderr**，PS 会把它当成 terminating error。调外部命令前把偏好切回 `Continue`，用 `$LASTEXITCODE` 判成败（见 `scripts/gate.ps1` 的 `Invoke-Cargo`）。实测第一次跑 gate 就栽在这：报「未通过：fmt / test」，而真正的 clippy 压根没跑完 |
 | 5c | **新增依赖时 cargo 会去连本地 sparse 代理**（本轮新增） | 反复刷 `spurious network error ... 127.0.0.1:13579`，看起来像卡死（实测卡了一次 gate） | 代理没在跑。收窄依赖特性 + `--offline` 是更常用的一条路：`zip` 的 default 会拖进 aes / bzip2 / lzma / zstd / xz 一堆本机缓存里没有的 crate，关掉 default 只留 `deflate-flate2` 就过了 |
@@ -273,7 +273,7 @@ Edge 用完整 Chromium 排版引擎，中文零配置、体积小。
 | 20 | **改了课表时段，已录好的作业就再也匹配不上处理窗口**（本轮新增） | `job_id` 里嵌着**录制开始时刻**（`...T0113...`），而 `process_scope` 是用**当前课表**反算 `job_id` 的。时段一改（临时调课、改作息表、事后补课表），`targets` 非空却不含那个作业 → todo 为空 → **静默返回，无日志无报错**，看上去就像「处理窗口根本没用」。`targets.is_empty()` 的兜底只在当天完全没课表条目时才生效。**排查手段**：用 `window_at` 里的窗口名 + 作业 `job.json` 的 `start` 字段对一遍。改进方向见 §9.1 |
 
 | 21 | **`items_after_test_module` 只有 clippy 拦得住**（本轮新增） | `cargo check --all-targets` 全绿、`cargo test` 也全绿，唯独 `cargo clippy -- -D warnings` 报错：测试模块后面不能再有别的定义。**这就是「三关必须都跑」的实证** —— 少了 clippy 这一关，这个错会一路带进提交。已固化成 `scripts/gate.cmd` |
-| 24 | **本地 sparse 代理不转发 `/dl/`，cargo 会报 404 NoSuchKey**（本轮新增） | crate 元数据在 index.crates.io，**包体在 static.crates.io**。代理只转发 index 时，cargo 请求 `<代理>/dl/{name}/{version}/download` 会拿到 `NoSuchKey`，而报错里只出现代理地址，很容易误判成「代理没起来」。要把 `/dl/{crate}/{version}/download` 映射成 `static.crates.io/crates/{crate}/{crate}-{version}.crate`（见 `_tmp/regproxy.py`） |
+| 24 | **本地 sparse 代理不转发 `/dl/`，cargo 会报 404 NoSuchKey**（本轮新增） | crate 元数据在 index.crates.io，**包体在 static.crates.io**。代理只转发 index 时，cargo 请求 `<代理>/dl/{name}/{version}/download` 会拿到 `NoSuchKey`，而报错里只出现代理地址，很容易误判成「代理没起来」。要把 `/dl/{crate}/{version}/download` 映射成 `static.crates.io/crates/{crate}/{crate}-{version}.crate`（见 `scripts/regproxy.py`） |
 | 25 | **`cargo test -- --ignored` 这类参数会被 PowerShell 吃掉**（本轮新增） | `-File` 模式下 `--` 之后的参数绑定会失败（`A positional parameter cannot be found`）。给包装脚本加一个专门的 `.ps1` 再 `-File` 跑，别在命令行上拼 `--` |
 | 22 | **前端资源是 `include_str!` 打进 exe 的**（本轮新增） | 改完 `app.js` 打开界面没变化，人会先怀疑缓存、再怀疑后端。真相是 exe 里那份还是旧的：**改前端必须重新编译**。开发时想免编译，把文件放到 `<程序目录>/assets/web/` 下（`web::resolve` 优先外部） |
 | 23 | **登录二维码被丢进 `nul` 就永远扫不到**（本轮新增） | 按「静默启动」的惯例把 NapCat 子进程的 stdout 设成 null，用户看到的是「启动了但一直连不上」的黑箱。**该静默的是窗口，不是信息**：现在输出落到 `logs/vca-launcher.log`，界面直接把日志尾巴显示出来 |

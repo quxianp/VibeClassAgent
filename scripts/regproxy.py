@@ -18,6 +18,7 @@
 """
 
 import http.server
+import json
 import os
 import re
 import urllib.error
@@ -43,6 +44,25 @@ def upstream_for(path: str) -> str:
     return UPSTREAM + path
 
 
+def rewrite_config(data: bytes) -> bytes:
+    """把上游 config.json 里的 dl 地址改成指向本代理。
+
+    不这么做的话会撞上一个很绕的坑：上游给的是**绝对**地址
+    `https://static.crates.io/crates`，cargo 会拿它**直连** ——
+    而本机 schannel 是被拒的（`SEC_E_NO_CREDENTIALS`），于是又变成「下载失败」，
+    报错里却只说 TLS 握手失败，看不出是代理没兜住。
+    指针改到本地之后，包体也走 Python 的 TLS，与 index 同一条路，不再有例外。
+    """
+    try:
+        obj = json.loads(data)
+    except Exception:  # noqa: BLE001 - 上游格式变了就原样透传
+        return data
+    if isinstance(obj, dict) and "dl" in obj:
+        obj["dl"] = f"http://127.0.0.1:{PORT}/dl"
+        return json.dumps(obj).encode()
+    return data
+
+
 class Handler(http.server.BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -52,6 +72,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             req = urllib.request.Request(url, headers={"User-Agent": "vca-regproxy"})
             with urllib.request.urlopen(req, timeout=60) as r:
                 data = r.read()
+                if self.path == "/config.json":
+                    data = rewrite_config(data)
                 self.send_response(r.status)
                 self.send_header("Content-Type", r.headers.get("Content-Type", "text/plain"))
                 self.send_header("Content-Length", str(len(data)))

@@ -10,6 +10,7 @@
 //! - [`doctor`]   环境自检（依赖、权限、编码器、磁盘）
 //! - [`http`]     极简 HTTP 客户端（WinHTTP，零第三方依赖）
 //! - [`push`]     内置推送通道（企业微信 / Webhook / Server 酱 / dry-run）
+//! - [`bots`]     常见 IM 机器人的签名与报文（Telegram / 钉钉 / 飞书 / …）
 //! - [`llm`]      要点提取（OpenAI 兼容接口，仅上传转写文本）
 //! - [`napcat`]   NapCat（QQ 机器人）的安装、启动与日志
 //! - [`overlay`]  桌面悬浮窗（Win32 无边框置顶小窗）
@@ -28,6 +29,7 @@
 #![warn(missing_docs)]
 
 pub mod audio;
+pub mod bots;
 pub mod browser_bot;
 pub mod capture;
 pub mod clock;

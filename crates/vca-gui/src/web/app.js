@@ -370,6 +370,14 @@ const CHANNELS = [
   { id: 'wecom', name: '企业微信机器人（Webhook）', needs: ['endpoint'] },
   { id: 'wecom-aibot', name: '企业微信智能机器人（新版）',
     needs: ['endpoint', 'target', 'wecom_bot_id', 'wecom_bot_secret'] },
+  { id: 'telegram', name: 'Telegram Bot', needs: ['tg_token', 'tg_chat'] },
+  { id: 'dingtalk', name: '钉钉机器人', needs: ['endpoint', 'sign_secret', 'mobiles'] },
+  { id: 'feishu', name: '飞书机器人', needs: ['endpoint', 'sign_secret'] },
+  { id: 'discord', name: 'Discord Webhook', needs: ['endpoint'] },
+  { id: 'slack', name: 'Slack Webhook', needs: ['endpoint'] },
+  { id: 'bark', name: 'Bark（iOS 推送）', needs: ['server', 'bark_key'] },
+  { id: 'ntfy', name: 'ntfy（可自建）', needs: ['server', 'topic', 'ntfy_token'] },
+  { id: 'pushplus', name: 'PushPlus（推微信）', needs: ['pp_token'] },
   { id: 'qq', name: 'QQ 官方机器人', needs: ['target', 'qq_app_id', 'qq_app_secret'] },
   { id: 'serverchan', name: 'Server 酱', needs: ['token'] },
   { id: 'webhook', name: '通用 Webhook', needs: ['endpoint', 'token'] },
@@ -414,39 +422,127 @@ async function renderPush() {
     const id = document.getElementById('prov').value;
     const ch = CHANNELS.find(c => c.id === id) || { needs: [] };
     const has = n => ch.needs.includes(n);
-    // 智能机器人复用同样的两个后端字段，但语义不同：
-    // endpoint = 自定义 ws 地址（一般留空），target = 会话 id。
-    const isAibot = id === 'wecom-aibot';
-    dyn.innerHTML = `
-      ${has('endpoint') ? `<label class="field"><span>${esc(isAibot ? t('push.aibot_ws') : t('push.onebot_url'))}</span>
-        <input type="text" id="endpoint" value="${esc(cfg.endpoint)}" placeholder="${esc(isAibot ? 'wss://openws.work.weixin.qq.com' : 'http://127.0.0.1:3000')}"></label>` : ''}
-      ${has('target') ? `<label class="field"><span>${esc(isAibot ? t('push.aibot_chatid') : t('push.target'))}</span>
+    // 字段名是复用的（endpoint / token / target 三个），但每个渠道叫法不同 ——
+    // 所以按 needs 决定渲染哪个位置、写什么标签。
+    const F = {
+      endpoint: { id: 'endpoint', key: 'push.f_webhook', ph: 'https://…',
+                  val: cfg.endpoint, badge: '' },
+      // OneBot 的地址是「我们自己起个 HTTP 服务，把地址给它」，不是 Webhook
+      onebot: { id: 'endpoint', key: 'push.onebot_url', ph: 'http://127.0.0.1:3000',
+                val: cfg.endpoint, badge: '' },
+      server: { id: 'endpoint', key: 'push.f_server', ph: 'push.f_server_ph',
+                val: cfg.endpoint, badge: '' },
+      token: { id: 'token', key: 'push.token', ph: 'push.token_ph',
+               val: '', badge: cfg.token_set ? t('model.key_set') : t('push.token_unset'), pw: true },
+      sign_secret: { id: 'token', key: 'push.f_sign_secret', ph: 'push.f_sign_secret_ph',
+                     val: '', badge: cfg.token_set ? t('model.key_set') : t('push.f_optional'), pw: true },
+      tg_token: { id: 'token', key: 'push.f_tg_token', ph: 'push.f_tg_token_ph',
+                  val: '', badge: cfg.token_set ? t('model.key_set') : '', pw: true },
+      bark_key: { id: 'token', key: 'push.f_bark_key', ph: 'push.f_bark_key_ph',
+                  val: '', badge: cfg.token_set ? t('model.key_set') : '', pw: true },
+      ntfy_token: { id: 'token', key: 'push.f_ntfy_token', ph: 'push.f_optional',
+                    val: '', badge: cfg.token_set ? t('model.key_set') : t('push.f_optional'), pw: true },
+      pp_token: { id: 'token', key: 'push.f_pp_token', ph: 'push.f_pp_token_ph',
+                  val: '', badge: cfg.token_set ? t('model.key_set') : '', pw: true },
+      // ttype: 只有「群号 / 用户号」这种目标才需要「群 / 私聊」下拉
+      target: { id: 'target', key: 'push.target', ph: 'push.target_ph',
+                val: cfg.target, badge: '', ttype: true },
+      tg_chat: { id: 'target', key: 'push.f_tg_chat', ph: 'push.f_tg_chat_ph',
+                 val: cfg.target, badge: '' },
+      mobiles: { id: 'target', key: 'push.f_mobiles', ph: 'push.f_mobiles_ph',
+                 val: cfg.target, badge: '' },
+      topic: { id: 'target', key: 'push.f_topic', ph: 'push.f_topic_ph',
+               val: cfg.target, badge: '' },
+    };
+    const field = (f) => {
+      const badge = f.badge ? ` <span class="tag ok">${esc(f.badge)}</span>` : '';
+      const ph = f.ph.includes('.') ? t(f.ph) : f.ph;
+      const type = f.pw ? 'password' : 'text';
+      const btn = f.id === 'target' && has('tg_chat')
+        ? `<button class="btn ghost sm" id="btn-chats">${esc(t('push.f_tg_discover'))}</button>` : '';
+      const ttype = f.ttype
+        ? `<select id="ttype" style="width:130px">
+             <option value="group" ${cfg.target_type === 'group' ? 'selected' : ''}>${esc(t('push.group'))}</option>
+             <option value="private" ${cfg.target_type === 'private' ? 'selected' : ''}>${esc(t('push.private'))}</option>
+           </select>` : '';
+      return `<label class="field"><span>${esc(t(f.key))}${badge}</span>
         <div class="row">
-          <input type="text" id="target" value="${esc(cfg.target)}" placeholder="${esc(isAibot ? t('push.aibot_chatid_ph') : t('push.target_ph'))}">
-          ${isAibot ? '' : `<select id="ttype" style="width:130px">
-            <option value="group" ${cfg.target_type === 'group' ? 'selected' : ''}>${esc(t('push.group'))}</option>
-            <option value="private" ${cfg.target_type === 'private' ? 'selected' : ''}>${esc(t('push.private'))}</option>
-          </select>`}
-        </div></label>` : ''}
-      ${has('wecom_bot_id') ? `<label class="field"><span>${esc(t('push.aibot_id'))} ${
+          <input type="${type}" id="${f.id}" value="${esc(f.val)}" placeholder="${esc(ph)}">
+          ${ttype}${btn}
+        </div></label>`;
+    };
+
+    // 用数组拼，不要写成一长串三元 + `+`：
+    // `?:` 的优先级比 `+` 低，那样写会被解析成 a ? b : ('' + c ? d : …)，
+    // 逻辑全串，而且错得很安静。
+    const parts = [];
+    if (has('wecom_bot_id')) {
+      parts.push(`<label class="field"><span>${esc(t('push.aibot_id'))} ${
         cfg.wecom_bot_set ? `<span class="tag ok">${esc(t('model.key_set'))}</span>` : ''}</span>
-        <input type="text" id="wecom_bot_id" placeholder="${esc(t('push.aibot_id_ph'))}"></label>` : ''}
-      ${has('wecom_bot_secret') ? `<label class="field"><span>${esc(t('push.aibot_secret'))} ${
+        <input type="text" id="wecom_bot_id" placeholder="${esc(t('push.aibot_id_ph'))}"></label>`);
+    }
+    if (has('wecom_bot_secret')) {
+      parts.push(`<label class="field"><span>${esc(t('push.aibot_secret'))} ${
         cfg.wecom_secret_set ? `<span class="tag ok">${esc(t('model.key_set'))}</span>` : ''}</span>
-        <input type="password" id="wecom_bot_secret" placeholder="${esc(t('push.aibot_secret'))}"></label>` : ''}
-      ${isAibot ? `<div class="note">${t('push.aibot_note')}</div>` : ''}
-      ${has('qq_app_id') ? `<label class="field"><span>${esc(t('push.appid'))} ${
+        <input type="password" id="wecom_bot_secret" placeholder="${esc(t('push.aibot_secret'))}"></label>`);
+    }
+    if (has('qq_app_id')) {
+      parts.push(`<label class="field"><span>${esc(t('push.appid'))} ${
         cfg.qq_appid_set ? `<span class="tag ok">${esc(t('model.key_set'))}</span>` : ''}</span>
-        <input type="text" id="qq_app_id" placeholder="${esc(t('push.appid'))}"></label>` : ''}
-      ${has('qq_app_secret') ? `<label class="field"><span>${esc(t('push.secret'))} ${
+        <input type="text" id="qq_app_id" placeholder="${esc(t('push.appid'))}"></label>`);
+    }
+    if (has('qq_app_secret')) {
+      parts.push(`<label class="field"><span>${esc(t('push.secret'))} ${
         cfg.qq_secret_set ? `<span class="tag ok">${esc(t('model.key_set'))}</span>` : ''}</span>
-        <input type="password" id="qq_app_secret" placeholder="${esc(t('push.secret'))}"></label>` : ''}
-      ${has('token') ? `<label class="field"><span>${esc(t('push.token'))} ${
-        cfg.token_set ? `<span class="tag ok">${esc(t('model.key_set'))}</span>`
-                      : `<span class="tag">${esc(t('push.token_unset'))}</span>`}</span>
-        <input type="password" id="token" placeholder="${esc(t('push.token_ph'))}"></label>` : ''}
-    `;
+        <input type="password" id="qq_app_secret" placeholder="${esc(t('push.secret'))}"></label>`);
+    }
+    // 顺序按「最该先填的排前面」：地址 → 凭据 → 目标
+    if (has('server')) parts.push(field(F.server));
+    else if (has('endpoint')) parts.push(field(id === 'onebot' ? F.onebot : F.endpoint));
+    if (has('token')) parts.push(field(F.token));
+    if (has('sign_secret')) parts.push(field(F.sign_secret));
+    if (has('tg_token')) parts.push(field(F.tg_token));
+    if (has('bark_key')) parts.push(field(F.bark_key));
+    if (has('ntfy_token')) parts.push(field(F.ntfy_token));
+    if (has('pp_token')) parts.push(field(F.pp_token));
+    if (has('tg_chat')) parts.push(field(F.tg_chat));
+    else if (has('target')) parts.push(field(F.target));
+    if (has('mobiles')) parts.push(field(F.mobiles));
+    if (has('topic')) parts.push(field(F.topic));
+    if (id === 'wecom-aibot') parts.push(`<div class="note">${t('push.aibot_note')}</div>`);
+    dyn.innerHTML = parts.join('');
+
+    const chatBtn = document.getElementById('btn-chats');
+    if (chatBtn) chatBtn.addEventListener('click', discoverChats);
   };
+
+  // 让程序去问 Telegram「有哪些会话」，省得用户对着 chat_id 发懵
+  const discoverChats = async () => {
+    const note = document.getElementById('test-note');
+    note.style.display = 'block';
+    note.textContent = t('push.f_tg_discovering');
+    const tok = document.getElementById('token');
+    const r = await api('/api/push/discover', { token: tok ? tok.value.trim() : '' });
+    if (!r.ok) {
+      note.innerHTML = `<b style="color:#e05c5c">${esc(t('common.unknown'))}</b><br>` +
+        `<code>${esc(r.error || '')}</code><br>${esc(t('push.f_tg_discover_hint'))}`;
+      return;
+    }
+    const chats = r.chats || [];
+    if (!chats.length) {
+      note.innerHTML = `${esc(t('push.f_tg_none'))}<br>${esc(t('push.f_tg_discover_hint'))}`;
+      return;
+    }
+    note.innerHTML = `<b style="color:#7fd3ba">${esc(t('push.f_tg_found'))}</b><br>` +
+      chats.map(c => `· <code>${esc(c.id)}</code> ${esc(c.name)} ` +
+        `<a href="#" data-chat="${esc(c.id)}" style="color:#7fd3ba">${esc(t('push.fill'))}</a>`).join('<br>');
+    note.querySelectorAll('a[data-chat]').forEach(a => a.addEventListener('click', ev => {
+      ev.preventDefault();
+      const node = document.getElementById('target');
+      if (node) node.value = a.dataset.chat;
+    }));
+  };
+
   drawFields();
   document.getElementById('prov').addEventListener('change', drawFields);
 

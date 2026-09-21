@@ -35,6 +35,7 @@ pub fn dispatch(
         ("GET", "/api/config/push") => get_push(&settings_path),
         ("POST", "/api/config/push") => post_push(&settings_path, &body),
         ("POST", "/api/push/test") => push_test(&settings_path, &body),
+        ("POST", "/api/push/discover") => push_discover(&body),
         ("GET", "/api/config/general") => get_general(&settings_path),
         ("POST", "/api/config/general") => post_general(&settings_path, &body),
         ("GET", "/api/schedule") => get_schedule(opts),
@@ -319,6 +320,39 @@ fn post_push(path: &Path, body: &str) -> Result<Value> {
             "target_type": after.push.target_type,
         }
     }))
+}
+
+/// 帮用户把 Telegram 的会话 id 找出来。
+///
+/// 自己机器人需要 chat_id，而那个东西是一串数字，用户在 Telegram 里根本看不到。
+/// 好在他只要先给机器人发一句话，`getUpdates` 就能把 chat_id 带回来 ——
+/// 这样「配置」这件事就只剩「填个 Token」一步，其余由程序做。
+///
+/// 允许临时传入 token：刚填完还没保存就想试一下，不该强迫他先存一次。
+fn push_discover(body: &str) -> Result<Value> {
+    let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
+    let token = v
+        .get("token")
+        .and_then(|x| x.as_str())
+        .map(str::trim)
+        .filter(|x| !x.is_empty())
+        .map(String::from)
+        .unwrap_or_else(|| vca_core::secrets::get("VCA_PUSH_TOKEN"));
+
+    if token.is_empty() {
+        return Ok(json!({"ok": false, "error": "先填 Bot Token（找 @BotFather 要）"}));
+    }
+
+    match vca_platform::bots::telegram_chat_ids(&token, 20_000) {
+        Ok(list) => Ok(json!({
+            "ok": true,
+            "chats": list
+                .into_iter()
+                .map(|(id, name)| json!({"id": id, "name": name}))
+                .collect::<Vec<_>>(),
+        })),
+        Err(e) => Ok(json!({"ok": false, "error": e.to_string()})),
+    }
 }
 
 /// 发一条测试消息（可选带一个本地文件的绝对路径，用来验证附件通道）。

@@ -427,7 +427,7 @@ for ($i=1; $i -le 5; $i++) {
 - 清理：登记 72 小时计划
 - 端到端：`vca debug e2e` 跑通，结束状态 `Pushed`
 - 插件：`vca plugin list` 列出 10 个；示例插件五个方法全部应答正确
-- **质量关（本轮）**：`scripts\gate.cmd` 三关全过 —— fmt 合规、clippy（`--workspace --all-targets -- -D warnings`）零告警、256 个单元测试全绿
+- **质量关（本轮）**：`scripts\gate.cmd` 三关全过 —— fmt 合规、clippy（`--workspace --all-targets -- -D warnings`）零告警、263 个单元测试全绿
 - **GUI 形态（本轮）**：`python scripts/smoke.py` 41 项全过 ——
   静态资源、令牌保护（错误 token 403）、配置写入与回读、真实发送测试消息
   （自带 mock OneBot 收报文并校验内容）、时间表推导处理窗口、

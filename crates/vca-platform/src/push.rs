@@ -28,6 +28,22 @@ pub enum Provider {
     ServerChan,
     /// 个人微信第三方协议：需用户自建中转服务配合。
     WeChatPersonal,
+    /// Telegram Bot（Bot Token + chat_id）。
+    Telegram,
+    /// 钉钉自定义机器人（Webhook，可选加签）。
+    DingTalk,
+    /// 飞书 / Lark 自定义机器人（Webhook，可选签名）。
+    Feishu,
+    /// Discord Webhook。
+    Discord,
+    /// Slack Incoming Webhook。
+    Slack,
+    /// Bark（iOS 推送，可自建）。
+    Bark,
+    /// ntfy（开源推送，可自建）。
+    Ntfy,
+    /// PushPlus（微信推送）。
+    PushPlus,
     /// 只打印不发送，用于联调与自检。
     DryRun,
 }
@@ -46,6 +62,14 @@ impl Provider {
             "onebot" | "onebot11" | "napcat" | "lagrange" | "gocqhttp" | "第三方qq" => {
                 Some(Self::OneBot)
             }
+            "telegram" | "tg" | "电报" => Some(Self::Telegram),
+            "dingtalk" | "dingding" | "钉钉" => Some(Self::DingTalk),
+            "feishu" | "lark" | "飞书" => Some(Self::Feishu),
+            "discord" => Some(Self::Discord),
+            "slack" => Some(Self::Slack),
+            "bark" => Some(Self::Bark),
+            "ntfy" => Some(Self::Ntfy),
+            "pushplus" | "push_plus" | "push+" => Some(Self::PushPlus),
             "webhook" | "generic" => Some(Self::Webhook),
             "serverchan" | "server_chan" | "sct" => Some(Self::ServerChan),
             "wechat-personal" | "wechat_personal" | "个人微信" => Some(Self::WeChatPersonal),
@@ -58,7 +82,19 @@ impl Provider {
     pub fn is_official(self) -> bool {
         matches!(
             self,
-            Self::WeCom | Self::WeComAibot | Self::QqOfficial | Self::ServerChan
+            // 这些都有官方接口与官方文档，用它们不需要风险提示
+            Self::WeCom
+                | Self::WeComAibot
+                | Self::QqOfficial
+                | Self::ServerChan
+                | Self::Telegram
+                | Self::DingTalk
+                | Self::Feishu
+                | Self::Discord
+                | Self::Slack
+                | Self::Bark
+                | Self::Ntfy
+                | Self::PushPlus
         )
     }
 
@@ -67,6 +103,9 @@ impl Provider {
         match self {
             Self::WeChatPersonal => {
                 Some("使用第三方协议存在账号封禁风险，请自行评估；建议使用小号并定期更换密码。")
+            }
+            Self::Telegram => {
+                Some("Telegram 在部分网络下需要代理才能访问（VCA_PROXY / HTTPS_PROXY 都认）。")
             }
             Self::OneBot => Some(
                 "OneBot 属于第三方协议实现（非腾讯官方）。使用自动化客户端登录 QQ \
@@ -83,6 +122,14 @@ impl Provider {
             Self::WeComAibot => "企业微信智能机器人",
             Self::QqOfficial => "QQ 官方机器人",
             Self::OneBot => "OneBot（自建 QQ 机器人）",
+            Self::Telegram => "Telegram Bot",
+            Self::DingTalk => "钉钉机器人",
+            Self::Feishu => "飞书机器人",
+            Self::Discord => "Discord Webhook",
+            Self::Slack => "Slack Webhook",
+            Self::Bark => "Bark（iOS）",
+            Self::Ntfy => "ntfy",
+            Self::PushPlus => "PushPlus（微信）",
             Self::Webhook => "通用 Webhook",
             Self::ServerChan => "Server 酱",
             Self::WeChatPersonal => "个人微信（第三方协议）",
@@ -223,6 +270,20 @@ pub fn make_pusher(cfg: &PushConfig) -> Box<dyn Pusher + Send + Sync> {
     match cfg.provider {
         Provider::WeCom => Box::new(WeComPusher { cfg: cfg.clone() }),
         Provider::WeComAibot => Box::new(WeComAibotPusher { cfg: cfg.clone() }),
+        Provider::Telegram => Box::new(TelegramPusher { cfg: cfg.clone() }),
+        Provider::DingTalk => Box::new(DingTalkPusher { cfg: cfg.clone() }),
+        Provider::Feishu => Box::new(FeishuPusher { cfg: cfg.clone() }),
+        Provider::Discord => Box::new(SimpleWebhookPusher {
+            cfg: cfg.clone(),
+            provider: Provider::Discord,
+        }),
+        Provider::Slack => Box::new(SimpleWebhookPusher {
+            cfg: cfg.clone(),
+            provider: Provider::Slack,
+        }),
+        Provider::Bark => Box::new(BarkPusher { cfg: cfg.clone() }),
+        Provider::Ntfy => Box::new(NtfyPusher { cfg: cfg.clone() }),
+        Provider::PushPlus => Box::new(PushPlusPusher { cfg: cfg.clone() }),
         Provider::QqOfficial => Box::new(QqOfficialPusher {
             cfg: cfg.clone(),
             token_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -961,6 +1022,200 @@ impl Pusher for WeComAibotPusher {
         let md = crate::wecom_aibot::compose_markdown(&doc.title, &doc.summary, doc.attachment());
         let id = crate::wecom_aibot::send_markdown(&ac, &md)
             .map_err(|e| PushError::Rejected(e.to_string()))?;
+        Ok(PushOutcome::ok(id))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 常见 IM 机器人（签名与报文细节都在 crate::bots 里）
+// ---------------------------------------------------------------------------
+
+/// 纯文本正文：标题 + 摘要 + 附件路径。
+///
+/// 这些渠道大多只吃纯文本（发不了文件），所以结尾把本机文档路径带上 ——
+/// 收件人至少知道完整版在哪儿。
+fn plain_body(doc: &PushDoc) -> String {
+    let mut s = String::new();
+    if !doc.title.trim().is_empty() {
+        s.push_str(doc.title.trim());
+        s.push_str("\n\n");
+    }
+    s.push_str(doc.summary.trim());
+    if let Some(p) = doc.attachment() {
+        s.push_str(&format!("\n\n完整文档：{p}"));
+    }
+    s
+}
+
+/// 缺哪个字段就说哪个，别丢一句「配置不完整」。
+fn need(v: &str, what: &str) -> Result<(), PushError> {
+    if v.trim().is_empty() {
+        return Err(PushError::Missing(format!("还缺：{what}")));
+    }
+    Ok(())
+}
+
+/// Telegram Bot。
+pub struct TelegramPusher {
+    cfg: PushConfig,
+}
+
+impl Pusher for TelegramPusher {
+    fn provider(&self) -> Provider {
+        Provider::Telegram
+    }
+    fn send(&self, doc: &PushDoc) -> Result<PushOutcome, PushError> {
+        need(&self.cfg.token, "Bot Token（找 @BotFather 要）")?;
+        need(
+            &self.cfg.target,
+            "chat_id（界面上有「获取会话」按钮，先给机器人发一句话即可）",
+        )?;
+        let id = crate::bots::telegram_send(
+            self.cfg.token.trim(),
+            self.cfg.target.trim(),
+            &plain_body(doc),
+            self.cfg.timeout_ms,
+        )?;
+        Ok(PushOutcome::ok(id))
+    }
+}
+
+/// 钉钉自定义机器人。`target` 里放要 @ 的手机号（逗号分隔）。
+pub struct DingTalkPusher {
+    cfg: PushConfig,
+}
+
+impl Pusher for DingTalkPusher {
+    fn provider(&self) -> Provider {
+        Provider::DingTalk
+    }
+    fn send(&self, doc: &PushDoc) -> Result<PushOutcome, PushError> {
+        need(&self.cfg.endpoint, "Webhook 地址")?;
+        let mobiles: Vec<String> = self
+            .cfg
+            .target
+            .split([',', '，', ';', '；'])
+            .map(|x| x.trim().to_string())
+            .filter(|x| !x.is_empty())
+            .collect();
+        let id = crate::bots::dingtalk_send(
+            self.cfg.endpoint.trim(),
+            &self.cfg.token,
+            &plain_body(doc),
+            &mobiles,
+            false,
+            self.cfg.timeout_ms,
+        )?;
+        Ok(PushOutcome::ok(id))
+    }
+}
+
+/// 飞书自定义机器人。
+pub struct FeishuPusher {
+    cfg: PushConfig,
+}
+
+impl Pusher for FeishuPusher {
+    fn provider(&self) -> Provider {
+        Provider::Feishu
+    }
+    fn send(&self, doc: &PushDoc) -> Result<PushOutcome, PushError> {
+        need(&self.cfg.endpoint, "Webhook 地址")?;
+        let id = crate::bots::feishu_send(
+            self.cfg.endpoint.trim(),
+            &self.cfg.token,
+            &plain_body(doc),
+            self.cfg.timeout_ms,
+        )?;
+        Ok(PushOutcome::ok(id))
+    }
+}
+
+/// Discord / Slack 这类「POST 一段 JSON 到 webhook 就完事」的渠道。
+pub struct SimpleWebhookPusher {
+    cfg: PushConfig,
+    provider: Provider,
+}
+
+impl Pusher for SimpleWebhookPusher {
+    fn provider(&self) -> Provider {
+        self.provider
+    }
+    fn send(&self, doc: &PushDoc) -> Result<PushOutcome, PushError> {
+        need(&self.cfg.endpoint, "Webhook 地址")?;
+        let text = plain_body(doc);
+        let id = match self.provider {
+            Provider::Discord => {
+                crate::bots::discord_send(self.cfg.endpoint.trim(), &text, self.cfg.timeout_ms)?
+            }
+            _ => crate::bots::slack_send(self.cfg.endpoint.trim(), &text, self.cfg.timeout_ms)?,
+        };
+        Ok(PushOutcome::ok(id))
+    }
+}
+
+/// Bark（iOS）。`endpoint` 留空用官方服务器。
+pub struct BarkPusher {
+    cfg: PushConfig,
+}
+
+impl Pusher for BarkPusher {
+    fn provider(&self) -> Provider {
+        Provider::Bark
+    }
+    fn send(&self, doc: &PushDoc) -> Result<PushOutcome, PushError> {
+        need(&self.cfg.token, "Bark 的 device key")?;
+        let id = crate::bots::bark_send(
+            &self.cfg.endpoint,
+            &self.cfg.token,
+            &doc.title,
+            doc.summary.trim(),
+            self.cfg.timeout_ms,
+        )?;
+        Ok(PushOutcome::ok(id))
+    }
+}
+
+/// ntfy。`target` 是 topic 名。
+pub struct NtfyPusher {
+    cfg: PushConfig,
+}
+
+impl Pusher for NtfyPusher {
+    fn provider(&self) -> Provider {
+        Provider::Ntfy
+    }
+    fn send(&self, doc: &PushDoc) -> Result<PushOutcome, PushError> {
+        need(&self.cfg.target, "topic 名")?;
+        let id = crate::bots::ntfy_send(
+            &self.cfg.endpoint,
+            &self.cfg.target,
+            &self.cfg.token,
+            &doc.title,
+            &plain_body(doc),
+            self.cfg.timeout_ms,
+        )?;
+        Ok(PushOutcome::ok(id))
+    }
+}
+
+/// PushPlus（推到微信）。
+pub struct PushPlusPusher {
+    cfg: PushConfig,
+}
+
+impl Pusher for PushPlusPusher {
+    fn provider(&self) -> Provider {
+        Provider::PushPlus
+    }
+    fn send(&self, doc: &PushDoc) -> Result<PushOutcome, PushError> {
+        need(&self.cfg.token, "PushPlus 的 token")?;
+        let id = crate::bots::pushplus_send(
+            &self.cfg.token,
+            &doc.title,
+            &plain_body(doc),
+            self.cfg.timeout_ms,
+        )?;
         Ok(PushOutcome::ok(id))
     }
 }

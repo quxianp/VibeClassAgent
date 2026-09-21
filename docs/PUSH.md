@@ -81,6 +81,27 @@ vca.exe debug push-test
 
 ---
 
+## 一之三、其它机器人（一行配置就够的）
+
+下面这些都不需要在本地跑任何东西，填一个地址或一个 token 就能用：
+
+| 渠道 | 填什么 | 备注 |
+|---|---|---|
+| Telegram Bot | Bot Token + chat_id | chat_id 可在界面点「获取会话」自动填 |
+| 钉钉机器人 | Webhook（+ 加签密钥） | 加签算法：`hmac(secret, "{ts}\n{secret}")` → base64 → urlencode |
+| 飞书机器人 | Webhook（+ 签名密钥） | 注意与钉钉**不同**：key 是 `"{ts}\n{secret}"`，对**空串**求 HMAC |
+| Discord / Slack | Webhook 地址 | — |
+| Bark | device key | 推到 iOS，可用自建服务器 |
+| ntfy | topic 名 | 开源，可用自建服务器 |
+| PushPlus | token | 推到微信 |
+
+它们的平台协议都不支持附件，所以推送内容是「摘要 + 本机文档路径」。
+要连 Word 一起发，用 OneBot 或企业微信群机器人 Webhook。
+
+凭据（token / 密钥）一律写进 `config/secrets.env`，不进版本库。
+
+---
+
 ## 二、AstrBot 放在哪
 
 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 是**对话机器人框架**，

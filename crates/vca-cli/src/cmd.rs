@@ -1253,8 +1253,8 @@ pub fn push_test(layout: &Layout, profile: &str) -> Result<()> {
         token,
         target: s.push.target.clone().unwrap_or_default(),
         target_type: s.push.target_type.clone(),
-        app_id: std::env::var("VCA_QQ_APP_ID").unwrap_or_default(),
-        app_secret: std::env::var("VCA_QQ_APP_SECRET").unwrap_or_default(),
+        app_id: vca_platform::push::credentials_for(provider).0,
+        app_secret: vca_platform::push::credentials_for(provider).1,
         max_retries: 1,
         timeout_ms: 30_000,
     };

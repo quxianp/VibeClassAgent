@@ -367,7 +367,9 @@ async function renderModel() {
 
 const CHANNELS = [
   { id: 'onebot', name: 'OneBot 11（NapCat / Lagrange）', needs: ['endpoint', 'target', 'token'] },
-  { id: 'wecom', name: '企业微信机器人', needs: ['endpoint'] },
+  { id: 'wecom', name: '企业微信机器人（Webhook）', needs: ['endpoint'] },
+  { id: 'wecom-aibot', name: '企业微信智能机器人（新版）',
+    needs: ['endpoint', 'target', 'wecom_bot_id', 'wecom_bot_secret'] },
   { id: 'qq', name: 'QQ 官方机器人', needs: ['target', 'qq_app_id', 'qq_app_secret'] },
   { id: 'serverchan', name: 'Server 酱', needs: ['token'] },
   { id: 'webhook', name: '通用 Webhook', needs: ['endpoint', 'token'] },
@@ -412,17 +414,27 @@ async function renderPush() {
     const id = document.getElementById('prov').value;
     const ch = CHANNELS.find(c => c.id === id) || { needs: [] };
     const has = n => ch.needs.includes(n);
+    // 智能机器人复用同样的两个后端字段，但语义不同：
+    // endpoint = 自定义 ws 地址（一般留空），target = 会话 id。
+    const isAibot = id === 'wecom-aibot';
     dyn.innerHTML = `
-      ${has('endpoint') ? `<label class="field"><span>${esc(t('push.onebot_url'))}</span>
-        <input type="text" id="endpoint" value="${esc(cfg.endpoint)}" placeholder="http://127.0.0.1:3000"></label>` : ''}
-      ${has('target') ? `<label class="field"><span>${esc(t('push.target'))}</span>
+      ${has('endpoint') ? `<label class="field"><span>${esc(isAibot ? t('push.aibot_ws') : t('push.onebot_url'))}</span>
+        <input type="text" id="endpoint" value="${esc(cfg.endpoint)}" placeholder="${esc(isAibot ? 'wss://openws.work.weixin.qq.com' : 'http://127.0.0.1:3000')}"></label>` : ''}
+      ${has('target') ? `<label class="field"><span>${esc(isAibot ? t('push.aibot_chatid') : t('push.target'))}</span>
         <div class="row">
-          <input type="text" id="target" value="${esc(cfg.target)}" placeholder="${esc(t('push.target_ph'))}">
-          <select id="ttype" style="width:130px">
+          <input type="text" id="target" value="${esc(cfg.target)}" placeholder="${esc(isAibot ? t('push.aibot_chatid_ph') : t('push.target_ph'))}">
+          ${isAibot ? '' : `<select id="ttype" style="width:130px">
             <option value="group" ${cfg.target_type === 'group' ? 'selected' : ''}>${esc(t('push.group'))}</option>
             <option value="private" ${cfg.target_type === 'private' ? 'selected' : ''}>${esc(t('push.private'))}</option>
-          </select>
+          </select>`}
         </div></label>` : ''}
+      ${has('wecom_bot_id') ? `<label class="field"><span>${esc(t('push.aibot_id'))} ${
+        cfg.wecom_bot_set ? `<span class="tag ok">${esc(t('model.key_set'))}</span>` : ''}</span>
+        <input type="text" id="wecom_bot_id" placeholder="${esc(t('push.aibot_id_ph'))}"></label>` : ''}
+      ${has('wecom_bot_secret') ? `<label class="field"><span>${esc(t('push.aibot_secret'))} ${
+        cfg.wecom_secret_set ? `<span class="tag ok">${esc(t('model.key_set'))}</span>` : ''}</span>
+        <input type="password" id="wecom_bot_secret" placeholder="${esc(t('push.aibot_secret'))}"></label>` : ''}
+      ${isAibot ? `<div class="note">${t('push.aibot_note')}</div>` : ''}
       ${has('qq_app_id') ? `<label class="field"><span>${esc(t('push.appid'))} ${
         cfg.qq_appid_set ? `<span class="tag ok">${esc(t('model.key_set'))}</span>` : ''}</span>
         <input type="text" id="qq_app_id" placeholder="${esc(t('push.appid'))}"></label>` : ''}
@@ -440,7 +452,8 @@ async function renderPush() {
 
   const collect = () => {
     const p = { provider: document.getElementById('prov').value };
-    for (const f of ['endpoint', 'target', 'target_type', 'qq_app_id', 'qq_app_secret', 'token']) {
+    for (const f of ['endpoint', 'target', 'target_type', 'qq_app_id', 'qq_app_secret',
+                     'wecom_bot_id', 'wecom_bot_secret', 'token']) {
       const node = document.getElementById(f);
       if (node && node.value.trim()) p[f] = node.value.trim();
     }
@@ -547,6 +560,12 @@ async function renderPush() {
           b.flavor ? ' · ' + esc(b.flavor) : ''}</td></tr>
         <tr><th>${esc(t('bot.version'))}</th><td>${esc(b.version || '—')}</td></tr>
       </table>
+      ${b.installed ? '' : `<label class="field" style="max-width:320px"><span>${esc(t('bot.source'))}</span>
+        <select id="bot-src">
+          <option value="auto">${esc(t('bot.source_auto'))}</option>
+          ${(b.sources || []).map((s, i) =>
+            `<option value="${i}">${esc(s.label)}</option>`).join('')}
+        </select></label>`}
       <div class="row wrap" style="margin:12px 0">${buttons.join(' ')}</div>
       ${b.installing ? `<div class="note" style="display:block">${esc(t('bot.installing'))}</div>` : ''}
       ${b.install_error ? `<div class="note" style="display:block"><b style="color:#e05c5c">${
@@ -577,7 +596,11 @@ async function renderPush() {
         // 下载几十 MB 要等一会儿，先把「正在干活」摆出来，别让人以为按钮没反应
         n.textContent = act === 'install' ? t('bot.installing') : '…';
         btn.disabled = true;
-        const r = await api(`/api/bot/napcat/${act}`, {});
+        // 安装时把选中的下载源带上：校园网下「自动」要等前一个源超时才轮到镜像，
+        // 而用户往往一开始就知道该走哪个。
+        const src = document.getElementById('bot-src');
+        const body = (act === 'install' && src) ? { source: src.value } : {};
+        const r = await api(`/api/bot/napcat/${act}`, body);
         btn.disabled = false;
         if (!r.ok) {
           n.innerHTML = `<b style="color:#e05c5c">${esc(t('common.save_failed'))}</b><br>`
@@ -733,62 +756,172 @@ async function renderSchedule() {
   state.schedule = d;
   if (!d.ok) { view.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
 
+  // 教师 id -> 姓名。ClassIsland 里没填老师名的科目，导入器会落成 unassigned；
+  // 把这种内部 id 直接摆在表格里，用户只会问「unassigned 是什么意思」。
+  // 所以界面上一律显示姓名，保存时再映射回 id。
+  const nameOf = (id) => {
+    if (!id || id === 'unassigned') return '';
+    const hit = (d.teachers || []).find(x => x.id === id);
+    return hit ? hit.name : id;
+  };
+
+  // 唯一的真数据源。两种模式都只改这个数组，所以切换视图天然互通，
+  // 也不需要「切模式时重新读盘」这种补丁。
+  let model = (d.entries || []).map(e => ({
+    day: e.day || 'Mon',
+    start: e.start || '08:00',
+    end: e.end || '08:45',
+    course: e.course || '',
+    teacher: nameOf(e.teacherId),
+    cycle: e.cycle || 'every',
+    record: e.record !== false,
+  }));
+  let mode = 'subject';
+
   view.innerHTML = `
   <div class="card">
     <h2>${esc(t('sc.title'))}</h2>
     <p class="hint">${t('sc.hint')}</p>
     <div class="row wrap" style="margin-bottom:12px">
-      <button class="btn sm" id="btn-add">${esc(t('sc.add'))}</button>
-      <button class="btn sm" id="btn-csv">${esc(t('sc.export'))}</button>
+      <div class="seg" id="mode">
+        <button class="seg-btn" data-mode="subject">${esc(t('sc.mode_subject'))}</button>
+        <button class="seg-btn" data-mode="table">${esc(t('sc.mode_table'))}</button>
+      </div>
+      <button class="btn sm" id="btn-on">${esc(t('sc.all_on'))}</button>
+      <button class="btn sm" id="btn-off">${esc(t('sc.all_off'))}</button>
       <span class="spacer"></span>
       <span style="font-size:12px;color:var(--text-dim2)" id="cnt"></span>
+      <button class="btn sm" id="btn-add">${esc(t('sc.add'))}</button>
+      <button class="btn sm" id="btn-csv">${esc(t('sc.export'))}</button>
       <button class="btn primary" id="btn-save">${esc(t('common.save'))}</button>
     </div>
-    <div id="rows"></div>
+    <div id="body"></div>
     <div class="note" id="save-note" style="display:none"></div>
   </div>`;
 
-  const host = document.getElementById('rows');
-  const addRow = (e) => {
-    // 是否录制：默认开。用户可以只录一部分课 ——
-    // 比如只关心自己任教的科目，或者某节是自习课没必要录。
-    const rec = e.record === undefined ? true : !!e.record;
-    const row = el(`<div class="slot-row" style="grid-template-columns:104px 84px 84px 1fr 96px 70px 60px 32px">
-      <select>${DAYS.map(([v, k]) => `<option value="${v}" ${e.day === v ? 'selected' : ''}>${esc(t('sc.' + k))}</option>`).join('')}</select>
-      <input type="text" value="${esc(e.start || '08:00')}">
-      <input type="text" value="${esc(e.end || '08:45')}">
-      <input type="text" value="${esc(e.course || '')}" placeholder="${esc(t('sc.course_ph'))}">
-      <input type="text" value="${esc(e.teacherId || 't1')}" placeholder="${esc(t('sc.teacher_ph'))}">
-      <select style="width:70px">${CYCLES.map(([v, k]) => `<option value="${v}" ${(e.cycle || 'every') === v ? 'selected' : ''}>${esc(t('sc.' + k))}</option>`).join('')}</select>
-      <label class="check" title="${esc(t('sc.record_hint'))}">
-        <input type="checkbox" ${rec ? 'checked' : ''}> ${esc(t('sc.record'))}
-      </label>
-      <button class="btn sm danger">×</button>
-    </div>`);
-    row.querySelector('button').addEventListener('click', () => { row.remove(); upd(); });
-    row.querySelector('input[type=checkbox]').addEventListener('change', upd);
-    host.appendChild(row);
+  const body = document.getElementById('body');
+  const upd = () => {
+    const n = model.filter(m => m.record).length;
+    document.getElementById('cnt').textContent =
+      `${t('sc.count')} ${model.length} ${t('sc.entries')} · ${t('sc.recording')} ${n}`;
+    document.querySelectorAll('#mode .seg-btn').forEach(b =>
+      b.classList.toggle('active', b.dataset.mode === mode));
+  };
+
+  /* ---- 模式一：按科目选。一个科目一行，适合「只录我自己的课」 ---- */
+  const paintSubjects = () => {
+    const names = [...new Set(model.map(m => m.course))];
+    if (!names.length) {
+      body.innerHTML = `<div class="empty">${esc(t('sc.empty'))}</div>`;
+      return;
+    }
+    body.innerHTML = `<p class="hint" style="margin-bottom:10px">${esc(t('sc.by_subject_hint'))}</p>` +
+      names.map(name => {
+        const list = model.filter(m => m.course === name);
+        return `
+        <div class="slot-row" style="grid-template-columns:1fr 110px 130px">
+          <div>${esc(name)}</div>
+          <div style="color:var(--text-dim2);font-size:12px">${list.length} ${esc(t('sc.lessons'))}</div>
+          <label class="check"><input type="checkbox" data-course="${esc(name)}"> ${esc(t('sc.record'))}</label>
+        </div>`;
+      }).join('');
+
+    // 三态：全录 / 全不录 / 只录了一部分（indeterminate，一眼能看出不齐）
+    body.querySelectorAll('input[data-course]').forEach(cb => {
+      const list = model.filter(m => m.course === cb.dataset.course);
+      const on = list.filter(m => m.record).length;
+      cb.checked = on > 0;
+      cb.indeterminate = on > 0 && on < list.length;
+      cb.addEventListener('change', () => {
+        const v = cb.checked;
+        model.forEach(m => { if (m.course === cb.dataset.course) m.record = v; });
+        paint();
+      });
+    });
+  };
+
+  /* ---- 模式二：逐条编辑。列与时间表页对齐，多了「录制」与「科目」 ---- */
+  const COLS = '96px 78px 78px 1fr 130px 74px 66px 32px';
+  const paintTable = () => {
+    body.innerHTML = `
+      <div class="slot-row slot-head" style="grid-template-columns:${COLS}">
+        <div>${esc(t('sc.col_day'))}</div>
+        <div>${esc(t('sc.col_start'))}</div>
+        <div>${esc(t('sc.col_end'))}</div>
+        <div>${esc(t('sc.col_course'))}</div>
+        <div>${esc(t('sc.col_teacher'))}</div>
+        <div>${esc(t('sc.col_cycle'))}</div>
+        <div>${esc(t('sc.col_record'))}</div>
+        <div></div>
+      </div>` +
+      model.map((m, i) => `
+      <div class="slot-row" data-i="${i}" style="grid-template-columns:${COLS}">
+        <select data-k="day">${DAYS.map(([v, k]) =>
+          `<option value="${v}" ${m.day === v ? 'selected' : ''}>${esc(t('sc.' + k))}</option>`).join('')}</select>
+        <input type="text" data-k="start" value="${esc(m.start)}">
+        <input type="text" data-k="end" value="${esc(m.end)}">
+        <input type="text" data-k="course" value="${esc(m.course)}" placeholder="${esc(t('sc.course_ph'))}">
+        <input type="text" data-k="teacher" value="${esc(m.teacher)}" placeholder="${esc(t('sc.teacher_unset'))}">
+        <select data-k="cycle" style="width:74px">${CYCLES.map(([v, k]) =>
+          `<option value="${v}" ${m.cycle === v ? 'selected' : ''}>${esc(t('sc.' + k))}</option>`).join('')}</select>
+        <label class="check" title="${esc(t('sc.record_hint'))}">
+          <input type="checkbox" data-k="record" ${m.record ? 'checked' : ''}>
+        </label>
+        <button class="btn sm danger" data-del="${i}">×</button>
+      </div>`).join('');
+
+    body.querySelectorAll('.slot-row[data-i]').forEach(row => {
+      const i = Number(row.dataset.i);
+      row.querySelectorAll('[data-k]').forEach(node => {
+        const k = node.dataset.k;
+        if (k === 'record') {
+          node.addEventListener('change', () => { model[i].record = node.checked; upd(); });
+        } else {
+          // 每次击键都同步进 model：切模式之前不需要额外「保存草稿」这一步
+          node.addEventListener('input', () => { model[i][k] = node.value; });
+          node.addEventListener('change', () => { model[i][k] = node.value; });
+        }
+      });
+      row.querySelector('[data-del]').addEventListener('click', () => {
+        model.splice(i, 1);
+        paint();
+      });
+    });
+  };
+
+  const paint = () => {
+    if (mode === 'subject') paintSubjects(); else paintTable();
     upd();
   };
-  const upd = () => {
-    const rows = [...host.children];
-    const n = rows.filter(r => r.querySelector('input[type=checkbox]').checked).length;
-    document.getElementById('cnt').textContent =
-      `${t('sc.count')} ${rows.length} ${t('sc.entries')} · ${t('sc.recording')} ${n}`;
-  };
-  (d.entries || []).forEach(addRow);
-  upd();
 
-  document.getElementById('btn-add').addEventListener('click', () => addRow({}));
+  document.querySelectorAll('#mode .seg-btn').forEach(b =>
+    b.addEventListener('click', () => { mode = b.dataset.mode; paint(); }));
+
+  document.getElementById('btn-on').addEventListener('click', () => {
+    model.forEach(m => { m.record = true; });
+    paint();
+  });
+  document.getElementById('btn-off').addEventListener('click', () => {
+    model.forEach(m => { m.record = false; });
+    paint();
+  });
+
+  document.getElementById('btn-add').addEventListener('click', () => {
+    model.push({
+      day: 'Mon', start: '08:00', end: '08:45', course: '', teacher: '',
+      cycle: 'every', record: true,
+    });
+    // 新加的行在科目视图里会立刻变成一个（还没名字的）科目，那没意义 ——
+    // 直接切到大表，让用户就地填完。
+    mode = 'table';
+    paint();
+  });
 
   document.getElementById('btn-csv').addEventListener('click', () => {
     const rows = [['day', 'period', 'start', 'end', 'course', 'teacher', 'cycle', 'record'].join(',')];
-    [...host.children].forEach((r, i) => {
-      const ins = r.querySelectorAll('input[type=text]');
-      const sels = r.querySelectorAll('select');
-      const rec = r.querySelector('input[type=checkbox]').checked ? 'true' : 'false';
-      rows.push([sels[0].value, i + 1, ins[0].value, ins[1].value,
-                 ins[2].value, ins[3].value, sels[1].value, rec].join(','));
+    model.forEach((m, i) => {
+      rows.push([m.day, i + 1, m.start, m.end, m.course, m.teacher, m.cycle, m.record]
+        .map(v => String(v).replace(/,/g, '，')).join(','));
     });
     const blob = new Blob(['\ufeff' + rows.join('\n')], { type: 'text/csv;charset=utf-8' });
     const a = document.createElement('a');
@@ -799,41 +932,65 @@ async function renderSchedule() {
   });
 
   document.getElementById('btn-save').addEventListener('click', async () => {
-    const entries = [...host.children].map((r, i) => {
-      const ins = r.querySelectorAll('input[type=text]');
-      const sels = r.querySelectorAll('select');
-      return {
-        day: sels[0].value,
-        period: i + 1,
-        start: ins[0].value.trim(),
-        end: ins[1].value.trim(),
-        course: ins[2].value.trim() || 'Lesson',
-        teacherId: ins[3].value.trim() || 't1',
-        // 这一节要不要录 —— 由用户逐条勾选
-        record: r.querySelector('input[type=checkbox]').checked,
-        cycle: sels[1].value,
-      };
-    });
-    const teachers = [...new Set(entries.map(e => e.teacherId))]
-      .map(id => ({ id, name: id, profile: 'default' }));
-    const payload = {
+    // 姓名 -> id：沿用已有教师；输入了新名字就当场建一个。
+    // 名字留空 = 未指定（unassigned），校验那边会提醒，但**不拦保存**。
+    const teachers = (d.teachers || []).map(x => ({ ...x }));
+    const idOf = (name) => {
+      const n = String(name || '').trim();
+      if (!n) return 'unassigned';
+      const hit = teachers.find(x => x.name === n);
+      if (hit) return hit.id;
+      let k = teachers.length + 1;
+      while (teachers.some(x => x.id === 't' + k)) k++;
+      const id = 't' + k;
+      teachers.push({ id, name: n, profile: id });
+      return id;
+    };
+
+    const entries = model.map((m, i) => ({
+      day: m.day,
+      period: i + 1,
+      start: String(m.start || '').trim(),
+      end: String(m.end || '').trim(),
+      course: String(m.course || '').trim() || '未命名课程',
+      teacherId: idOf(m.teacher),
+      record: !!m.record,
+      cycle: m.cycle,
+    }));
+
+    const r = await api('/api/schedule', {
       teachers,
       week_template: { cycle: 'every', entries },
       weekend_template: { source: 'new', entries: [] },
       overrides: [],
-    };
-    const r = await api('/api/schedule', payload);
+    });
+    const note = document.getElementById('save-note');
+    note.style.display = 'block';
     if (r.ok) {
       toast(t('common.saved'), String(r.entries));
-      const note = document.getElementById('save-note');
-      note.style.display = 'block';
+      // 保存会重建教师名单（新名字会被分配 id），回读一遍让界面与磁盘一致
+      const back = await api('/api/schedule');
+      if (back.ok) {
+        state.schedule = back;
+        const names = new Map((back.teachers || []).map(x => [x.id, x.name]));
+        model = (back.entries || []).map(e => ({
+          day: e.day, start: e.start, end: e.end, course: e.course,
+          teacher: e.teacherId === 'unassigned' ? '' : (names.get(e.teacherId) || ''),
+          cycle: e.cycle || 'every', record: e.record !== false,
+        }));
+        paint();
+      }
       note.innerHTML = (r.issues && r.issues.length)
         ? `<b style="color:#d9a343">${esc(t('sc.issues'))}</b><br>· ` + r.issues.map(esc).join('<br>· ')
         : `<b style="color:#7fd3ba">${esc(t('sc.ok'))}</b>${esc(t('sc.ok_d'))}`;
     } else {
       toast(t('common.save_failed'), r.error || '', 'err');
+      note.innerHTML = `<b style="color:#e05c5c">${esc(t('common.save_failed'))}</b><br>` +
+        `<code>${esc(r.error || '')}</code>`;
     }
   });
+
+  paint();
 }
 
 /* ---------------------------------------------------------- 录制与文件 */

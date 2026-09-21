@@ -561,7 +561,14 @@
       "detect_none": "No local bot service detected.",
       "detect_install": "To push into a QQ group, install NapCat first (open source, portable):",
       "napcat_hint": "After installing, enable its HTTP server (default port 3000), invite the QQ account it logged in to your group, then come back and fill in the address and group id.",
-      "fill": "Fill in"
+      "fill": "Fill in",
+      "aibot_id": "Bot ID",
+      "aibot_id_ph": "the bot ID shown on the WeCom Smart Robot page",
+      "aibot_secret": "Bot Secret",
+      "aibot_chatid": "Chat id",
+      "aibot_chatid_ph": "userid for a 1:1 chat, chatid for a group",
+      "aibot_ws": "WebSocket URL (leave empty normally)",
+      "aibot_note": "<b>Text only.</b> The smart robot runs over WebSocket and the protocol supports Markdown and template cards only - <b>no attachments</b>. So the pushed message is a summary plus the local document path; the illustrated Word file stays on this machine. Use the WeCom webhook or OneBot above if you need to send the file itself."
     },
     "st": {
       "title": "Timetable",
@@ -587,7 +594,7 @@
     },
     "sc": {
       "title": "Class plan",
-      "hint": "Decides which lessons get recorded. Odd/even weeks may share the same slot - that is not a conflict. After importing, check that the times fall inside your class periods.",
+      "hint": "Decides which lessons to record. Two ways: by subject (one row per subject) or row by row. Odd/even weeks may share a slot without being treated as a clash.",
       "add": "+ Add entry",
       "export": "Export CSV",
       "count": "total",
@@ -611,7 +618,22 @@
       "exported_d": "open it with Excel",
       "record": "Rec",
       "record_hint": "Whether to record this lesson. Unchecked lessons are skipped entirely.",
-      "recording": "recording"
+      "recording": "recording",
+      "mode_subject": "By subject",
+      "mode_table": "Row by row",
+      "all_on": "Select all",
+      "all_off": "Select none",
+      "by_subject_hint": "One row per subject: tick to record every lesson of that subject, untick to record none. Both modes edit the same data, so switching back and forth never loses your changes.",
+      "lessons": "lessons",
+      "teacher_unset": "not set (no teacher name in the imported subject)",
+      "empty": "No lessons yet. Use \"Add\" or import a ClassIsland file on the Timetable page.",
+      "col_day": "Day",
+      "col_start": "Start",
+      "col_end": "End",
+      "col_course": "Subject",
+      "col_teacher": "Teacher",
+      "col_cycle": "Week",
+      "col_record": "Rec"
     },
     "rc": {
       "title": "Recording",
@@ -677,7 +699,9 @@
       "manual": "If the automatic download fails (GitHub is often unreachable from campus networks), download NapCat's Shell package manually and unpack it into the directory above - this program will pick it up automatically.",
       "download_page": "Open download page",
       "qq_required": "The Shell package needs QQ installed on this machine. Without it, grab the portable build (bundles QQ) instead.",
-      "installed_at": "Detected"
+      "installed_at": "Detected",
+      "source": "Download source",
+      "source_auto": "Automatic (tries each in turn)"
     }
   }
 }

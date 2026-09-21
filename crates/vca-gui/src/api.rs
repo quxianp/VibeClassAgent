@@ -51,7 +51,7 @@ pub fn dispatch(
         ("GET", "/api/i18n") => i18n(),
         ("POST", "/api/detect-bot") => detect_bot(),
         ("GET", "/api/bot/napcat") => bot_status(&settings_path),
-        ("POST", "/api/bot/napcat/install") => bot_install(),
+        ("POST", "/api/bot/napcat/install") => bot_install(&body),
         ("POST", "/api/bot/napcat/start") => bot_start(),
         ("POST", "/api/bot/napcat/stop") => bot_stop(),
         ("POST", "/api/bot/napcat/open") => bot_open_dir(),
@@ -254,6 +254,9 @@ fn get_push(path: &Path) -> Result<Value> {
         "token_set": vca_core::secrets::is_set("VCA_PUSH_TOKEN"),
         "qq_appid_set": vca_core::secrets::is_set("VCA_QQ_APP_ID"),
         "qq_secret_set": vca_core::secrets::is_set("VCA_QQ_APP_SECRET"),
+        // 智能机器人的两条凭据：同样只回「设没设」，不回内容
+        "wecom_bot_set": vca_core::secrets::is_set("VCA_WECOM_BOT_ID"),
+        "wecom_secret_set": vca_core::secrets::is_set("VCA_WECOM_BOT_SECRET"),
     }))
 }
 
@@ -293,6 +296,8 @@ fn post_push(path: &Path, body: &str) -> Result<Value> {
         ("token", "VCA_PUSH_TOKEN"),
         ("qq_app_id", "VCA_QQ_APP_ID"),
         ("qq_app_secret", "VCA_QQ_APP_SECRET"),
+        ("wecom_bot_id", "VCA_WECOM_BOT_ID"),
+        ("wecom_bot_secret", "VCA_WECOM_BOT_SECRET"),
     ] {
         if let Some(val) = v.get(field).and_then(|x| x.as_str()) {
             if !val.trim().is_empty() {
@@ -342,8 +347,8 @@ fn push_test(path: &Path, body: &str) -> Result<Value> {
         token: vca_core::secrets::get("VCA_PUSH_TOKEN"),
         target: s.push.target.clone().unwrap_or_default(),
         target_type: s.push.target_type.clone(),
-        app_id: vca_core::secrets::get("VCA_QQ_APP_ID"),
-        app_secret: vca_core::secrets::get("VCA_QQ_APP_SECRET"),
+        app_id: vca_platform::push::credentials_for(provider).0,
+        app_secret: vca_platform::push::credentials_for(provider).1,
         max_retries: 1,
         timeout_ms: 30_000,
     };
@@ -850,24 +855,42 @@ fn bot_status(settings: &Path) -> Result<Value> {
         "install_message": st.message,
         "install_error": st.error,
         "download_page": vca_platform::napcat::DOWNLOAD_PAGE,
+        "sources": vca_platform::napcat::sources()
+            .into_iter()
+            .map(|(label, url)| json!({"label": label, "url": url}))
+            .collect::<Vec<_>>(),
     }))
 }
 
 /// 一键安装：后台下载官方 Shell 包 → 解压到安装目录。
 ///
 /// **立刻返回**，真正的活在后台线程里跑；前端靠轮询 [`bot_status`] 看进度。
-fn bot_install() -> Result<Value> {
+fn bot_install(body: &str) -> Result<Value> {
     if install_state().running {
         return Ok(json!({"ok": false, "error": "上一次安装还没结束，等它跑完再试"}));
     }
+
+    // source: "auto"（默认，依次试）或 "0"/"1"/"2"（指定某一个源）。
+    // 让用户能指定，是因为自动模式在校园网下要等前一个源超时才轮到镜象，
+    // 而用户往往一开始就知道该走哪个。
+    let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
+    let only = match v.get("source").and_then(|x| x.as_str()).unwrap_or("auto") {
+        "" | "auto" => None,
+        s => s
+            .parse::<usize>()
+            .ok()
+            .filter(|i| *i < vca_platform::napcat::sources().len()),
+    };
+
     set_install(true, "正在下载…", None);
 
-    std::thread::spawn(|| {
+    std::thread::spawn(move || {
         let root = vca_platform::napcat::root();
         let zip = vca_platform::napcat::temp_zip_path();
-        let outcome = vca_platform::napcat::download_shell_zip(&zip, 600_000).and_then(|url| {
-            vca_platform::napcat::install_from_zip(&zip, &root).map(|nc| (url, nc))
-        });
+        let outcome =
+            vca_platform::napcat::download_shell_zip(&zip, 600_000, only).and_then(|url| {
+                vca_platform::napcat::install_from_zip(&zip, &root).map(|nc| (url, nc))
+            });
         // 不管成没成，临时包都不留：失败时留着只会让人下次装的时候多占几十 MB
         let _ = std::fs::remove_file(&zip);
 

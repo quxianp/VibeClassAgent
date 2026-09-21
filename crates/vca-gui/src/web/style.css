@@ -185,6 +185,22 @@ label.check input[type=checkbox] {
   accent-color: var(--accent); cursor: pointer;
 }
 
+/* 分段控件：课表页的「按科目选 / 逐条编辑」切换。
+   用两个按钮拼一个整体，而不是下拉框 —— 只有两个选项时，
+   下拉框要点两下才看得到另一个选项，分段控件一眼就知道有几条路。 */
+.seg {
+  display: inline-flex; border: 1px solid var(--line);
+  border-radius: 8px; overflow: hidden;
+}
+.seg-btn {
+  background: transparent; border: 0; color: var(--text-dim);
+  font-family: inherit; font-size: 12.5px; padding: 7px 14px;
+  cursor: pointer; transition: background .12s, color .12s;
+}
+.seg-btn + .seg-btn { border-left: 1px solid var(--line); }
+.seg-btn:hover { color: var(--text); }
+.seg-btn.active { background: var(--panel-2); color: var(--text); }
+
 .row { display: flex; gap: 10px; align-items: center; }
 .row.wrap { flex-wrap: wrap; }
 .spacer { flex: 1; }

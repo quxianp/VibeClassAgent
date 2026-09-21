@@ -19,7 +19,10 @@ ureq = { version = "3.4.2", features = ["json"] }
 # 一堆本机依赖缓存里压根没有的 crate，离线构建直接失败。
 # deflate-flate2 走纯 Rust 的 miniz_oxide，与依赖树里已有的那份一致。
 zip = { version = "8", default-features = false, features = ["deflate-flate2"] }
-tungstenite = "0.30.0"
+# 企业微信「智能机器人」走 WebSocket，所以要 TLS。
+# 选 webpki-roots 而不是 native-roots：前者是 ring + 内置根证书，
+# 与 ureq 那条链上已有的 rustls/ring/webpki-roots 是同一份，不新增 crate。
+tungstenite = { version = "0.30.0", features = ["rustls-tls-webpki-roots"] }
 docx-rs = "0.4.22"
 image = { version = "0.25.9", default-features = false, features = ["jpeg"] }
 

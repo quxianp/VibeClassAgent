@@ -561,7 +561,14 @@
       "detect_none": "没检测到本地机器人服务。",
       "detect_install": "要推到 QQ 群，先装 NapCat（开源、免安装）：",
       "napcat_hint": "装好后在 NapCat 里开启 HTTP 服务端（默认端口 3000），把它登录的 QQ 号拉进群，再回到这里填上地址和群号。",
-      "fill": "填入"
+      "fill": "填入",
+      "aibot_id": "机器人 ID",
+      "aibot_id_ph": "企业微信后台「智能机器人」页里的机器人 ID",
+      "aibot_secret": "机器人 Secret",
+      "aibot_chatid": "会话 id",
+      "aibot_chatid_ph": "单聊填对方的 userid，群聊填群的 chatid",
+      "aibot_ws": "WebSocket 地址（一般留空）",
+      "aibot_note": "<b>只能发文字。</b>智能机器人走 WebSocket，协议只支持 Markdown 与模板卡片，<b>带不了附件</b> —— 所以推送内容是「要点摘要 + 本机文档路径」，带截图的 Word 仍然留在本机。需要连文件一起发，请改用上面的「企业微信机器人（Webhook）」或 OneBot。"
     },
     "st": {
       "title": "作息时间表",
@@ -587,7 +594,7 @@
     },
     "sc": {
       "title": "课程表",
-      "hint": "决定「哪节课要录」。单双周可以排在同一时段，程序不会当成冲突。导入后记得检查一下时间是否落在上面的上课时段内。",
+      "hint": "决定「哪节课要录」。两种选法：按科目（一科一行，适合只录自己的课）或逐条编辑（精细到每一节）。单双周可以排在同一时段，程序不会当成冲突。",
       "add": "+ 加一条",
       "export": "导出 CSV",
       "count": "共",
@@ -611,7 +618,22 @@
       "exported_d": "可以用 Excel 打开编辑",
       "record": "录制",
       "record_hint": "这一节要不要录。取消勾选就跳过它，什么都不会产生。",
-      "recording": "其中要录"
+      "recording": "其中要录",
+      "mode_subject": "按科目选",
+      "mode_table": "逐条编辑",
+      "all_on": "全选",
+      "all_off": "全不选",
+      "by_subject_hint": "一个科目一行：勾上就录这个科目的全部课，取消就一节都不录。两种模式改的是同一份数据，来回切换不会丢改动。",
+      "lessons": "节",
+      "teacher_unset": "未指定（导入时科目里没写老师名）",
+      "empty": "还没有课。点「加一条」手工添加，或在「时间表」页导入 ClassIsland 的文件。",
+      "col_day": "星期",
+      "col_start": "开始",
+      "col_end": "结束",
+      "col_course": "科目",
+      "col_teacher": "教师",
+      "col_cycle": "周次",
+      "col_record": "录制"
     },
     "rc": {
       "title": "录制参数",
@@ -677,7 +699,9 @@
       "manual": "自动下载失败时（校园网访问 GitHub 常常不通），可以手动下载 NapCat 的 Shell 包，解压到这个目录里，程序会自动认出来。",
       "download_page": "打开下载页",
       "qq_required": "Shell 包需要本机已装 QQ。若机器上没有 QQ，请下载「便携包」版本（自带 QQ）放进来。",
-      "installed_at": "已识别到"
+      "installed_at": "已识别到",
+      "source": "下载源",
+      "source_auto": "自动（依次尝试，慢但省心）"
     }
   }
 }

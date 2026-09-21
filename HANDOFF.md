@@ -273,6 +273,8 @@ Edge 用完整 Chromium 排版引擎，中文零配置、体积小。
 | 20 | **改了课表时段，已录好的作业就再也匹配不上处理窗口**（本轮新增） | `job_id` 里嵌着**录制开始时刻**（`...T0113...`），而 `process_scope` 是用**当前课表**反算 `job_id` 的。时段一改（临时调课、改作息表、事后补课表），`targets` 非空却不含那个作业 → todo 为空 → **静默返回，无日志无报错**，看上去就像「处理窗口根本没用」。`targets.is_empty()` 的兜底只在当天完全没课表条目时才生效。**排查手段**：用 `window_at` 里的窗口名 + 作业 `job.json` 的 `start` 字段对一遍。改进方向见 §9.1 |
 
 | 21 | **`items_after_test_module` 只有 clippy 拦得住**（本轮新增） | `cargo check --all-targets` 全绿、`cargo test` 也全绿，唯独 `cargo clippy -- -D warnings` 报错：测试模块后面不能再有别的定义。**这就是「三关必须都跑」的实证** —— 少了 clippy 这一关，这个错会一路带进提交。已固化成 `scripts/gate.cmd` |
+| 24 | **本地 sparse 代理不转发 `/dl/`，cargo 会报 404 NoSuchKey**（本轮新增） | crate 元数据在 index.crates.io，**包体在 static.crates.io**。代理只转发 index 时，cargo 请求 `<代理>/dl/{name}/{version}/download` 会拿到 `NoSuchKey`，而报错里只出现代理地址，很容易误判成「代理没起来」。要把 `/dl/{crate}/{version}/download` 映射成 `static.crates.io/crates/{crate}/{crate}-{version}.crate`（见 `_tmp/regproxy.py`） |
+| 25 | **`cargo test -- --ignored` 这类参数会被 PowerShell 吃掉**（本轮新增） | `-File` 模式下 `--` 之后的参数绑定会失败（`A positional parameter cannot be found`）。给包装脚本加一个专门的 `.ps1` 再 `-File` 跑，别在命令行上拼 `--` |
 | 22 | **前端资源是 `include_str!` 打进 exe 的**（本轮新增） | 改完 `app.js` 打开界面没变化，人会先怀疑缓存、再怀疑后端。真相是 exe 里那份还是旧的：**改前端必须重新编译**。开发时想免编译，把文件放到 `<程序目录>/assets/web/` 下（`web::resolve` 优先外部） |
 | 23 | **登录二维码被丢进 `nul` 就永远扫不到**（本轮新增） | 按「静默启动」的惯例把 NapCat 子进程的 stdout 设成 null，用户看到的是「启动了但一直连不上」的黑箱。**该静默的是窗口，不是信息**：现在输出落到 `logs/vca-launcher.log`，界面直接把日志尾巴显示出来 |
 
@@ -425,7 +427,7 @@ for ($i=1; $i -le 5; $i++) {
 - 清理：登记 72 小时计划
 - 端到端：`vca debug e2e` 跑通，结束状态 `Pushed`
 - 插件：`vca plugin list` 列出 10 个；示例插件五个方法全部应答正确
-- **质量关（本轮）**：`scripts\gate.cmd` 三关全过 —— fmt 合规、clippy（`--workspace --all-targets -- -D warnings`）零告警、249 个单元测试全绿
+- **质量关（本轮）**：`scripts\gate.cmd` 三关全过 —— fmt 合规、clippy（`--workspace --all-targets -- -D warnings`）零告警、256 个单元测试全绿
 - **GUI 形态（本轮）**：`python scripts/smoke.py` 41 项全过 ——
   静态资源、令牌保护（错误 token 403）、配置写入与回读、真实发送测试消息
   （自带 mock OneBot 收报文并校验内容）、时间表推导处理窗口、
@@ -446,6 +448,7 @@ for ($i=1; $i -le 5; $i++) {
 | **QQ / 微信推送真实通道** | 没有真实的机器人凭据 | 需用户配置后试 |
 | **一体机上课时段长跑** | 无真实环境 | 建议先跑一周观察磁盘与日志 |
 | **托盘图标实际显示** | 代码与加载都验过（有测试），但"在任务栏里看得见"需要人眼确认 | 跑 `vca gui`，看右下角与任务栏 |
+| **企业微信智能机器人（aibot）的完整链路**（本轮新增） | 没有真实的企业微信机器人凭据。**但协议实现已经真连验证过**：用假凭据连 `wss://openws.work.weixin.qq.com`，拿到了 `errcode=853000 invalid bot_id or secret` —— 说明 TLS 握手、WebSocket 协议升级、认证帧构造、`req_id` 回执匹配全部正确，只差真凭据。发送帧（`aibot_send_msg`）之后的部分没验过 | 在企业微信后台建一个智能机器人，填上 ID / Secret / 会话 id 后点「发送测试消息」 |
 | **NapCat 的真实下载**（本轮新增） | 开发机**连不上 GitHub**（直连超时、本地代理没在跑），三个下载源一个都验不到。识别 / 解压 / 起停 / 日志这些**逻辑**用构造的假安装目录测过（含 17 个单元测试），但「真的能从 GitHub 下到 60 MB 的包」没验过 | 在能上网的机器上点一次「一键安装」，确认 `tools/napcat/` 里出现 `launcher.bat` 一类入口 |
 | **NapCat 真实启动与扫码登录**（本轮新增） | 没有真实 NapCat 包，也没有可登录的 QQ 小号 | 装好之后点「启动」，看日志里是否出现二维码、扫码后 OneBot 端口（默认 3000）是否开始监听 |
 

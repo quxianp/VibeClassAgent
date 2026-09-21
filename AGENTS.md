@@ -11,7 +11,7 @@
 
 - 技术栈：**纯 Rust**（无 Python 运行时）
 - 规模：约 1.2 万行源码，39 个 `.rs`
-- 状态：**四大核心功能已实测通过**，249 个单元测试全绿，clippy 零告警（`scripts\gate.cmd`）
+- 状态：**四大核心功能已实测通过**，256 个单元测试全绿，clippy 零告警（`scripts\gate.cmd`）
 
 ## 接续工作前必读
 
@@ -61,7 +61,9 @@ python scripts\smoke.py         # 图形界面的端到端冒烟（起服务打�
 3. **8 GB 内存限制**：`cargo test` 用 `-j 1`，否则可能 `Allocation failed`
 4. **新增依赖会去连本地 sparse 代理（`127.0.0.1:13579`，见 `.toolchain/cargo/config.toml`）** ——
    代理没在跑时 cargo 只会一遍遍刷 `spurious network error`，看起来像卡死（实测卡过一次 gate）。
-   两条路：把代理起起来；或者 `--offline` 配合**收窄依赖特性**。
+   两条路：**把代理起起来**（`python _tmp/regproxy.py`，它监听 13579；
+   注意它既要转发 index 也要转发 `/dl/` 的包体下载，少一段就会 404）；
+   或者 `--offline` 配合**收窄依赖特性**。
    收窄这条更常用：默认特性常常拖进一串本机缓存里没有的 crate
    （`zip` 就是这么处理的 —— 关掉 default，只留 `deflate-flate2`）。
 

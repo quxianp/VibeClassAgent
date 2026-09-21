@@ -15,6 +15,9 @@ use crate::http;
 pub enum Provider {
     /// 企业微信机器人（Webhook）：官方支持，可上传文件。
     WeCom,
+    /// 企业微信**智能机器人**（aibot）：WebSocket 长连接，官方支持，
+    /// 但**只能发 markdown / 模板卡片，带不了附件**。
+    WeComAibot,
     /// QQ 官方机器人（QQ 开放平台 API v2）：合规，需审核与 appid/secret。
     QqOfficial,
     /// OneBot 11 协议（NapCat / Lagrange / go-cqhttp 等自建实现）。
@@ -34,6 +37,9 @@ impl Provider {
     pub fn parse(s: &str) -> Option<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
             "wecom" | "企业微信" => Some(Self::WeCom),
+            "wecom-aibot" | "wecom_aibot" | "aibot" | "企业微信智能机器人" | "智能机器人" => {
+                Some(Self::WeComAibot)
+            }
             "qq" | "qq-official" | "qq_official" | "官方qq" | "qq官方" => {
                 Some(Self::QqOfficial)
             }
@@ -50,7 +56,10 @@ impl Provider {
 
     /// 是否官方渠道（不需要额外风险提示）。
     pub fn is_official(self) -> bool {
-        matches!(self, Self::WeCom | Self::QqOfficial | Self::ServerChan)
+        matches!(
+            self,
+            Self::WeCom | Self::WeComAibot | Self::QqOfficial | Self::ServerChan
+        )
     }
 
     /// 第三方渠道的风险提示。
@@ -71,6 +80,7 @@ impl Provider {
     pub fn display(self) -> &'static str {
         match self {
             Self::WeCom => "企业微信机器人",
+            Self::WeComAibot => "企业微信智能机器人",
             Self::QqOfficial => "QQ 官方机器人",
             Self::OneBot => "OneBot（自建 QQ 机器人）",
             Self::Webhook => "通用 Webhook",
@@ -212,6 +222,7 @@ impl PushConfig {
 pub fn make_pusher(cfg: &PushConfig) -> Box<dyn Pusher + Send + Sync> {
     match cfg.provider {
         Provider::WeCom => Box::new(WeComPusher { cfg: cfg.clone() }),
+        Provider::WeComAibot => Box::new(WeComAibotPusher { cfg: cfg.clone() }),
         Provider::QqOfficial => Box::new(QqOfficialPusher {
             cfg: cfg.clone(),
             token_cache: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -903,6 +914,57 @@ impl Pusher for WeChatPersonalPusher {
 // Dry-run
 // ---------------------------------------------------------------------------
 
+/// 按渠道挑凭据环境变量。
+///
+/// 三个调用点（CLI、GUI 的「发送测试」、真推送流水线）**必须取同一份值**，
+/// 否则就会出现「测试通过、真推送失败」这种最难查的偏差 —— 历史上踩过。
+/// 所以取值逻辑只写在这里。
+pub fn credentials_for(provider: Provider) -> (String, String) {
+    match provider {
+        // 企业微信智能机器人：bot_id + secret（企业微信后台「智能机器人」页）
+        Provider::WeComAibot => (
+            vca_core::secrets::get("VCA_WECOM_BOT_ID"),
+            vca_core::secrets::get("VCA_WECOM_BOT_SECRET"),
+        ),
+        // QQ 官方机器人：AppID + AppSecret
+        _ => (
+            vca_core::secrets::get("VCA_QQ_APP_ID"),
+            vca_core::secrets::get("VCA_QQ_APP_SECRET"),
+        ),
+    }
+}
+
+/// 企业微信智能机器人：走 WebSocket，一次推送 = 连一次、认证、发一条、断开。
+///
+/// **它发不了附件**（协议只支持 markdown 与模板卡片），所以正文直接进消息体，
+/// 附件路径写在末尾。需要连 Word 一起发的时候请用群机器人 Webhook 或 OneBot。
+pub struct WeComAibotPusher {
+    cfg: PushConfig,
+}
+
+impl Pusher for WeComAibotPusher {
+    fn provider(&self) -> Provider {
+        Provider::WeComAibot
+    }
+
+    fn send(&self, doc: &PushDoc) -> Result<PushOutcome, PushError> {
+        let ac = crate::wecom_aibot::AibotConfig::new(
+            &self.cfg.app_id,
+            &self.cfg.app_secret,
+            &self.cfg.target,
+            &self.cfg.endpoint,
+        );
+        // 缺哪个字段由 AibotConfig::validate 说清楚，这里不重复
+        ac.validate()
+            .map_err(|e| PushError::Missing(e.to_string()))?;
+
+        let md = crate::wecom_aibot::compose_markdown(&doc.title, &doc.summary, doc.attachment());
+        let id = crate::wecom_aibot::send_markdown(&ac, &md)
+            .map_err(|e| PushError::Rejected(e.to_string()))?;
+        Ok(PushOutcome::ok(id))
+    }
+}
+
 /// 只记录不发送。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DryRunPusher;
@@ -931,6 +993,11 @@ mod tests {
     fn provider_parse_aliases() {
         assert_eq!(Provider::parse("wecom"), Some(Provider::WeCom));
         assert_eq!(Provider::parse("企业微信"), Some(Provider::WeCom));
+        assert_eq!(Provider::parse("aibot"), Some(Provider::WeComAibot));
+        assert_eq!(
+            Provider::parse("企业微信智能机器人"),
+            Some(Provider::WeComAibot)
+        );
         assert_eq!(Provider::parse("ServerChan"), Some(Provider::ServerChan));
         assert_eq!(Provider::parse(""), Some(Provider::DryRun));
         assert_eq!(Provider::parse("nope"), None);
@@ -938,7 +1005,12 @@ mod tests {
 
     #[test]
     fn official_providers_need_no_risk_note() {
-        for p in [Provider::WeCom, Provider::QqOfficial, Provider::ServerChan] {
+        for p in [
+            Provider::WeCom,
+            Provider::WeComAibot,
+            Provider::QqOfficial,
+            Provider::ServerChan,
+        ] {
             assert!(p.is_official(), "{p:?} 应视为官方渠道");
             assert!(p.risk_note().is_none(), "{p:?} 不该有风险提示");
         }

@@ -596,9 +596,10 @@ impl<'a> Pipeline<'a> {
             token: vca_core::secrets::get("VCA_PUSH_TOKEN"),
             target: p.target.clone().unwrap_or_default(),
             target_type: p.target_type.clone(),
-            // QQ 官方机器人凭据只走环境变量
-            app_id: vca_core::secrets::get("VCA_QQ_APP_ID"),
-            app_secret: vca_core::secrets::get("VCA_QQ_APP_SECRET"),
+            // 凭据只走环境变量；具体取哪两个由渠道决定
+            // （智能机器人用 VCA_WECOM_BOT_*，QQ 官方用 VCA_QQ_APP_*）
+            app_id: push_mod::credentials_for(provider).0,
+            app_secret: push_mod::credentials_for(provider).1,
             max_retries: p.max_retries,
             timeout_ms: 60_000,
         };

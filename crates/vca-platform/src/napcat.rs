@@ -71,6 +71,18 @@ pub const SOURCES: &[&str] = &[
     "https://gh-proxy.com/https://github.com/NapNeko/NapCatQQ/releases/latest/download/NapCat.Shell.zip",
 ];
 
+/// 下载源清单：(给人看的标签, 地址)。
+///
+/// 给界面做下拉用。标签写清「官方 / 镜像」，因为校园网多半通不了官方 ——
+/// 让用户自己挑比让程序逐个超时试要快得多。
+pub fn sources() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("官方 GitHub", SOURCES[0]),
+        ("镜像 ghfast.top", SOURCES[1]),
+        ("镜像 gh-proxy.com", SOURCES[2]),
+    ]
+}
+
 /// 下载页（自动下载全失败时给用户手动走）。
 pub const DOWNLOAD_PAGE: &str = "https://github.com/NapNeko/NapCatQQ/releases";
 
@@ -383,14 +395,23 @@ pub fn extract_zip(zip: &Path, dest: &Path) -> Result<usize> {
 /// 从候选源里挑一个能用的，下载到 `dest_zip`。
 ///
 /// 返回实际使用的地址，方便把「用了镜像」这件事如实告诉用户。
-pub fn download_shell_zip(dest_zip: &Path, timeout_ms: i32) -> Result<String> {
+pub fn download_shell_zip(dest_zip: &Path, timeout_ms: i32, only: Option<usize>) -> Result<String> {
     if let Some(d) = dest_zip.parent() {
         std::fs::create_dir_all(d)?;
     }
+    // `only = Some(i)` 表示用户指定了某一个源；None 就是依次试。
+    let picked: Vec<&str> = match only {
+        Some(i) => SOURCES.get(i).copied().into_iter().collect(),
+        None => SOURCES.to_vec(),
+    };
+    if picked.is_empty() {
+        return Err(anyhow!("没有第 {only:?} 个下载源"));
+    }
+
     let mut errs = Vec::new();
-    for url in SOURCES {
+    for url in picked {
         match crate::http::download(url, dest_zip, timeout_ms) {
-            Ok(n) if n > 64 * 1024 => return Ok((*url).to_string()),
+            Ok(n) if n > 64 * 1024 => return Ok(url.to_string()),
             Ok(n) => errs.push(format!("{url} → 只下到 {n} 字节，不像安装包")),
             Err(e) => errs.push(format!("{url} → {e}")),
         }

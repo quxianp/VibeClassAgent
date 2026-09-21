@@ -16,6 +16,7 @@
 //! - [`crash`]    崩溃静默退出
 //! - [`shutdown`] 优雅退出（Ctrl+C 时先停 ffmpeg 再退）
 //! - [`tray`]     系统托盘图标（一个小图标 + 右键菜单，无气泡）
+//! - [`wecom_aibot`] 企业微信「智能机器人」（WebSocket，只发 markdown）
 //! - [`clock`]    本机时钟
 //! - [`screenshot`] 屏幕截图（GDI，写 BMP）
 //!
@@ -46,3 +47,4 @@ pub mod shots;
 pub mod shutdown;
 pub mod stt;
 pub mod tray;
+pub mod wecom_aibot;

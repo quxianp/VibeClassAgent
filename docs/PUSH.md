@@ -53,6 +53,34 @@ vca.exe debug push-test
 
 ---
 
+## 一之二、企业微信智能机器人（新版）
+
+企业微信后台「创建智能机器人」给的是 **机器人 ID + Secret**，走 WebSocket 长连接，
+和上面那条 Webhook 完全不是一回事。本程序两种都支持：
+
+> ⚠️ **智能机器人发不了附件。** 协议只支持 Markdown 与模板卡片，
+> 所以走这条通道时推送的是「要点摘要 + 本机文档路径」，
+> 带截图的 Word 留在本机。要发文件请用 Webhook 或 OneBot。
+
+配置（「推送」页选「企业微信智能机器人（新版）」）：
+
+| 字段 | 说明 |
+|---|---|
+| 机器人 ID / Secret | 企业微信后台「智能机器人」页 |
+| 会话 id | 单聊填 userid，群聊填 chatid（配 `push.target`） |
+| WebSocket 地址 | 留空即用官方地址 `wss://openws.work.weixin.qq.com` |
+
+凭据放在 `secrets.env`，变量名是 `VCA_WECOM_BOT_ID` / `VCA_WECOM_BOT_SECRET`
+（与 QQ 官方机器人的 `VCA_QQ_APP_*` 分开，互不干扰）。
+
+**协议实现的验证程度**（诚实说明）：认证帧、发送帧、`req_id` 回执匹配都按官方
+`@wecom/aibot-node-sdk` 的实现写，并且**真连过一次企业微信的服务器**——
+用假凭据拿到了 `errcode=853000 invalid bot_id or secret`，
+说明 TLS 握手、协议升级、认证帧解析、回执匹配这几步全部正常，
+只差一套真实凭据。真实凭据下的完整链路尚未验证。
+
+---
+
 ## 二、AstrBot 放在哪
 
 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 是**对话机器人框架**，

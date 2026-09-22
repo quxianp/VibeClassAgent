@@ -690,6 +690,30 @@ def run_checks(api: Api, base: str, mock: MockOneBot, cfg: Path) -> None:
     else:
         bad("对端消失", json.dumps(r, ensure_ascii=False)[:160])
 
+    print("\n[6.96] QQ 官方机器人（凭据检查）", flush=True)
+
+    # 切到 QQ 官方机器人，但**故意不填** AppID/AppSecret
+    api.call("/api/config/push", {
+        "provider": "qq", "target": "123456789", "target_type": "group",
+    })
+    r = api.call("/api/push/test", {}, timeout=40)[1] or {}
+    err = str(r.get("error") or "")
+    if (not r.get("ok")) and ("AppID" in err or "app_id" in err or "缺" in err):
+        ok("缺凭据时点名说缺什么", err[:70])
+    else:
+        bad("缺凭据的报错", json.dumps(r, ensure_ascii=False)[:180])
+
+    # 恢复成 OneBot，别影响后面的用例
+    api.call("/api/config/push", {
+        "provider": "onebot", "endpoint": mock.url,
+        "target": "123456789", "target_type": "group", "token": "smoke-token",
+    })
+    g = api.call("/api/config/push")[1] or {}
+    if g.get("provider") == "onebot":
+        ok("已恢复 OneBot 配置", g.get("endpoint", ""))
+    else:
+        bad("恢复配置", str(g.get("provider")))
+
     print("\n[7] 守护进程控制", flush=True)
     d = api.call("/api/daemon/status")[1] or {}
     if d.get("running") is False:

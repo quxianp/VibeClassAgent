@@ -766,6 +766,14 @@ async function renderPush() {
 
 /* ---------------------------------------------------------------- 时间表 */
 
+/** `HH:mm` 加若干分钟；填不出合法时间就原样返回。 */
+function plusMin(hhmm, minutes) {
+  const m = /^(\d{1,2}):(\d{2})$/.exec(String(hhmm).trim());
+  if (!m) return hhmm;
+  const total = (Number(m[1]) * 60 + Number(m[2]) + minutes + 1440) % 1440;
+  return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+}
+
 async function renderTimetable() {
   const d = await api('/api/timetable');
   state.timetable = d;
@@ -798,9 +806,19 @@ async function renderTimetable() {
   </div>`;
 
   const host = document.getElementById('slots');
-  const addRow = (s) => {
-    const row = el(`<div class="slot-row">
-      <div style="color:var(--text-dim2);font-family:var(--mono);font-size:12px;padding-top:8px">${host.children.length + 1}</div>
+
+  // 序号跟着顺序走：挪动/插入/删除之后必须重编，否则编号会与实际次序对不上
+  const renumber = () => {
+    [...host.children].forEach((r, i) => {
+      r.firstElementChild.textContent = i + 1;
+      // 第一行不能再上移、最后一行不能再下移（按钮直接置灰，比点了没反应清楚）
+      r.querySelector('[data-op="up"]').disabled = i === 0;
+      r.querySelector('[data-op="down"]').disabled = i === host.children.length - 1;
+    });
+  };
+
+  const build = (s) => el(`<div class="slot-row">
+      <div style="color:var(--text-dim2);font-family:var(--mono);font-size:12px;padding-top:8px">0</div>
       <input type="text" value="${esc(s.start || '08:00')}" placeholder="08:00">
       <input type="text" value="${esc(s.end || '08:45')}" placeholder="08:45">
       <select>
@@ -808,16 +826,52 @@ async function renderTimetable() {
         <option value="break" ${s.kind === 'break' ? 'selected' : ''}>${esc(t('st.kind_break'))}</option>
       </select>
       <input type="text" value="${esc(s.name || '')}" placeholder="${esc(t('st.name_ph'))}">
-      <button class="btn sm danger">×</button>
+      <div class="row-ops">
+        <button class="btn sm" data-op="up" title="${esc(t('st.op_up'))}">↑</button>
+        <button class="btn sm" data-op="down" title="${esc(t('st.op_down'))}">↓</button>
+        <button class="btn sm" data-op="ins" title="${esc(t('st.op_insert'))}">+</button>
+        <button class="btn sm danger" data-op="del" title="${esc(t('st.op_del'))}">×</button>
+      </div>
     </div>`);
-    row.querySelector('button').addEventListener('click', () => {
-      row.remove();
-      [...host.children].forEach((r, i) => r.firstElementChild.textContent = i + 1);
-    });
-    host.appendChild(row);
+
+  /** 插到 after 之后；after 为空则追加到末尾。 */
+  const addRow = (s, after) => {
+    const row = build(s);
+    if (after) host.insertBefore(row, after.nextElementSibling);
+    else host.appendChild(row);
+    renumber();
+    return row;
   };
-  slots.forEach(addRow);
+
+  slots.forEach((s) => addRow(s));
   if (!slots.length) addRow({ start: '08:00', end: '08:45', kind: 'class', name: '' });
+
+  // 事件委托：行是动态增删的，逐个绑监听既啰嗦又容易漏
+  host.addEventListener('click', (e) => {
+    const btn = e.target.closest('button[data-op]');
+    if (!btn) return;
+    const row = btn.closest('.slot-row');
+    const op = btn.dataset.op;
+    if (op === 'del') {
+      row.remove();
+      renumber();
+    } else if (op === 'up') {
+      const prev = row.previousElementSibling;
+      if (prev) host.insertBefore(row, prev);
+      renumber();
+    } else if (op === 'down') {
+      const next = row.nextElementSibling;
+      if (next) host.insertBefore(next, row);
+      renumber();
+    } else if (op === 'ins') {
+      // 新段接在上一段之后：开始时间取上一段的结束时间，默认再排 45 分钟。
+      // 比给个固定的 08:00 更可能一次填对 —— 用户多半就是想在原基础上加一节。
+      const ins = row.querySelectorAll('input');
+      const sel = row.querySelector('select');
+      const start = ins[1].value.trim() || '09:00';
+      addRow({ start, end: plusMin(start, 45), kind: sel.value, name: '' }, row);
+    }
+  });
 
   document.getElementById('btn-add').addEventListener('click', () => addRow({}));
 
@@ -991,7 +1045,7 @@ async function renderSchedule() {
   };
 
   /* ---- 模式二：逐条编辑。列与时间表页对齐，多了「录制」与「科目」 ---- */
-  const COLS = '96px 78px 78px 1fr 130px 74px 66px 32px';
+  const COLS = '92px 74px 74px 1fr 120px 68px 58px 136px';
   const paintTable = () => {
     body.innerHTML = `
       <div class="slot-row slot-head" style="grid-template-columns:${COLS}">
@@ -1017,7 +1071,14 @@ async function renderSchedule() {
         <label class="check" title="${esc(t('sc.record_hint'))}">
           <input type="checkbox" data-k="record" ${m.record ? 'checked' : ''}>
         </label>
-        <button class="btn sm danger" data-del="${i}">×</button>
+        <div class="row-ops">
+          <button class="btn sm" data-op="up" ${i === 0 ? 'disabled' : ''}
+                  title="${esc(t('st.op_up'))}">↑</button>
+          <button class="btn sm" data-op="down" ${i === model.length - 1 ? 'disabled' : ''}
+                  title="${esc(t('st.op_down'))}">↓</button>
+          <button class="btn sm" data-op="ins" title="${esc(t('st.op_insert'))}">+</button>
+          <button class="btn sm danger" data-op="del" title="${esc(t('st.op_del'))}">×</button>
+        </div>
       </div>`).join('');
 
     body.querySelectorAll('.slot-row[data-i]').forEach(row => {
@@ -1032,10 +1093,32 @@ async function renderSchedule() {
           node.addEventListener('change', () => { model[i][k] = node.value; });
         }
       });
-      row.querySelector('[data-del]').addEventListener('click', () => {
-        model.splice(i, 1);
-        paint();
-      });
+      // 顺序调整：直接改 model 数组再重绘。
+      // 之所以敢重绘，是因为 model 已经提出来了（不是在 DOM 里就地改）——
+      // 重绘后绑定的监听、输入框内容全都跟着重建，不会出现半新半旧的状态。
+      row.querySelectorAll('button[data-op]').forEach(b =>
+        b.addEventListener('click', () => {
+          const op = b.dataset.op;
+          if (op === 'del') {
+            model.splice(i, 1);
+          } else if (op === 'up' && i > 0) {
+            [model[i - 1], model[i]] = [model[i], model[i - 1]];
+          } else if (op === 'down' && i < model.length - 1) {
+            [model[i + 1], model[i]] = [model[i], model[i + 1]];
+          } else if (op === 'ins') {
+            // 插一条与当前行同科目的空条目：接着上一节往下排最省事
+            model.splice(i + 1, 0, {
+              ...model[i],
+              start: model[i].end || '09:00',
+              end: plusMin(model[i].end || '09:00', 45),
+              teacher: model[i].teacher,
+              record: model[i].record,
+            });
+          } else {
+            return;
+          }
+          paint();
+        }));
     });
   };
 

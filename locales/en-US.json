@@ -617,7 +617,12 @@
       "no_windows": "No processing window derived",
       "no_windows_why": ": the timetable has no break named lunch/dinner/after-school.",
       "imported": "Imported from ClassIsland",
-      "import_hint": "Every imported lesson is marked for recording. Untick the ones you don't want on the timetable page below."
+      "import_hint": "Every imported lesson is marked for recording. Untick the ones you don't want on the timetable page below.",
+      "op_up": "Move up",
+      "op_down": "Move down",
+      "op_insert": "Insert a slot after this one",
+      "op_del": "Delete this slot",
+      "op_hint": "Use the arrows to reorder, + inserts a new slot after this one."
     },
     "sc": {
       "title": "Class plan",

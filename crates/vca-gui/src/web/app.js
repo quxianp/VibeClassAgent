@@ -365,23 +365,31 @@ async function renderModel() {
 
 /* ------------------------------------------------------------------ 推送 */
 
+// 渠道清单。
+//
+// 本阶段（QQ 侧优先）只保障前两个：个人账号机器人（OneBot）与 QQ 官方机器人。
+// 其余渠道**代码完整保留**（点开能填、能保存），但在界面上标为「暂不可用」——
+// 用户明确要求「暂时搁置微信端与外网端，但不删代码，要备注」。
+// off: true 就是那条备注，不是禁用。
 const CHANNELS = [
   { id: 'onebot', name: 'OneBot 11（NapCat / Lagrange）', needs: ['endpoint', 'target', 'token'] },
-  { id: 'wecom', name: '企业微信机器人（Webhook）', needs: ['endpoint'] },
-  { id: 'wecom-aibot', name: '企业微信智能机器人（新版）',
-    needs: ['endpoint', 'target', 'wecom_bot_id', 'wecom_bot_secret'] },
-  { id: 'telegram', name: 'Telegram Bot', needs: ['tg_token', 'tg_chat'] },
-  { id: 'dingtalk', name: '钉钉机器人', needs: ['endpoint', 'sign_secret', 'mobiles'] },
-  { id: 'feishu', name: '飞书机器人', needs: ['endpoint', 'sign_secret'] },
-  { id: 'discord', name: 'Discord Webhook', needs: ['endpoint'] },
-  { id: 'slack', name: 'Slack Webhook', needs: ['endpoint'] },
-  { id: 'bark', name: 'Bark（iOS 推送）', needs: ['server', 'bark_key'] },
-  { id: 'ntfy', name: 'ntfy（可自建）', needs: ['server', 'topic', 'ntfy_token'] },
-  { id: 'pushplus', name: 'PushPlus（推微信）', needs: ['pp_token'] },
   { id: 'qq', name: 'QQ 官方机器人', needs: ['target', 'qq_app_id', 'qq_app_secret'] },
-  { id: 'serverchan', name: 'Server 酱', needs: ['token'] },
-  { id: 'webhook', name: '通用 Webhook', needs: ['endpoint', 'token'] },
-  { id: 'wechat-personal', name: '个人微信（第三方协议）', needs: ['endpoint', 'target', 'token'] },
+
+  { id: 'wecom', name: '企业微信机器人（Webhook）', needs: ['endpoint'], off: true },
+  { id: 'wecom-aibot', name: '企业微信智能机器人（新版）',
+    needs: ['endpoint', 'target', 'wecom_bot_id', 'wecom_bot_secret'], off: true },
+  { id: 'telegram', name: 'Telegram Bot', needs: ['tg_token', 'tg_chat'], off: true },
+  { id: 'dingtalk', name: '钉钉机器人', needs: ['endpoint', 'sign_secret', 'mobiles'], off: true },
+  { id: 'feishu', name: '飞书机器人', needs: ['endpoint', 'sign_secret'], off: true },
+  { id: 'discord', name: 'Discord Webhook', needs: ['endpoint'], off: true },
+  { id: 'slack', name: 'Slack Webhook', needs: ['endpoint'], off: true },
+  { id: 'bark', name: 'Bark（iOS 推送）', needs: ['server', 'bark_key'], off: true },
+  { id: 'ntfy', name: 'ntfy（可自建）', needs: ['server', 'topic', 'ntfy_token'], off: true },
+  { id: 'pushplus', name: 'PushPlus（推微信）', needs: ['pp_token'], off: true },
+  { id: 'serverchan', name: 'Server 酱', needs: ['token'], off: true },
+  { id: 'webhook', name: '通用 Webhook', needs: ['endpoint', 'token'], off: true },
+  { id: 'wechat-personal', name: '个人微信（第三方协议）',
+    needs: ['endpoint', 'target', 'token'], off: true },
 ];
 
 async function renderPush() {
@@ -390,7 +398,8 @@ async function renderPush() {
   if (!cfg.ok) { view.innerHTML = `<div class="empty">${esc(cfg.error)}</div>`; return; }
 
   const opts = CHANNELS.map(c =>
-    `<option value="${c.id}" ${c.id === cfg.provider ? 'selected' : ''}>${esc(c.name)}</option>`).join('');
+    `<option value="${c.id}" ${c.id === cfg.provider ? 'selected' : ''}>${esc(c.name)}${
+      c.off ? '（' + esc(t('push.unavailable')) + '）' : ''}</option>`).join('');
 
   view.innerHTML = `
   <div class="card">
@@ -488,6 +497,13 @@ async function renderPush() {
     // `?:` 的优先级比 `+` 低，那样写会被解析成 a ? b : ('' + c ? d : …)，
     // 逻辑全串，而且错得很安静。
     const parts = [];
+    // 选到暂不可用的渠道时，先把话说清楚 —— 否则用户填了半天才发现用不了
+    const chOff = CHANNELS.find(c => c.id === id);
+    if (chOff && chOff.off) {
+      parts.push(`<div class="note" style="display:block">
+        <b style="color:#d9a343">${esc(t('push.unavailable'))}</b> —— ${esc(t('push.scope_note'))}
+        <br><br>${esc(t('push.scope_now'))}</div>`);
+    }
     if (has('wecom_bot_id')) {
       parts.push(`<label class="field"><span>${esc(t('push.aibot_id'))} ${
         cfg.wecom_bot_set ? `<span class="tag ok">${esc(t('model.key_set'))}</span>` : ''}</span>
@@ -676,11 +692,16 @@ async function renderPush() {
       : (b.running
         ? `<span class="tag ok">${esc(t('bot.running'))}${b.pid ? ' · pid ' + b.pid : ''}</span>`
         : `<span class="tag">${esc(t('bot.stopped'))}</span>`);
-    // 进程活着不等于服务起好了：NapCat 要登录成功之后才会开 OneBot 的 HTTP 端口，
-    // 所以「端口在听没有」才是真正能判断推送能不能用的信号。
-    const svc = b.port_open
-      ? `<span class="tag ok">${esc(t('bot.service_up'))} :${b.port}</span>`
-      : `<span class="tag">${esc(t('bot.service_down'))}</span>`;
+
+    // 两个独立的判据，别混在一起：
+    //   进程活着 = 机器人起来了；
+    //   HTTP 端口在听 = OneBot 的 HTTP 服务真的开了（这才决定推送能不能用）。
+    // 用户踩过的 404 就是「进程在跑、但 HTTP 服务端没开」。
+    const svc = b.onebot_http_port
+      ? `<span class="tag ok">${esc(t('bot.http_on'))} :${b.onebot_http_port}</span>`
+      : (b.installed
+        ? `<span class="tag" style="color:#d9a343">${esc(t('bot.http_off'))}</span>`
+        : `<span class="tag">${esc(t('bot.service_down'))}</span>`);
 
     const buttons = [];
     if (!b.installed) {
@@ -698,6 +719,28 @@ async function renderPush() {
       buttons.push(`<a class="btn ghost sm" href="${esc(dlPage)}" target="_blank">`
         + `${esc(t('bot.download_page'))}</a>`);
     }
+
+    // 一键配置：只有当装好了、而且 HTTP 服务端确实没开时才显眼地摆出来 ——
+    // 已经配好的用户不该被这一块占走注意力
+    const needCfg = b.installed && !b.onebot_http_port;
+    const cfgBox = !b.installed ? '' : `
+      <div class="note" style="display:block;${needCfg ? '' : 'opacity:.7'}">
+        <b>${esc(t('bot.cfg_title'))}</b><br>
+        ${b.onebot_config
+          ? `${esc(t('bot.cfg_file'))}<code>${esc(b.onebot_config)}</code>${
+              b.onebot_qq ? ` · QQ ${esc(b.onebot_qq)}` : ''}<br>`
+          : `<span style="color:#d9a343">${esc(t('bot.cfg_notfound'))}</span><br>`}
+        <span style="display:inline-block;margin-top:8px">
+          ${esc(t('bot.cfg_port'))}
+          <input type="text" id="cfg-port" value="${b.onebot_http_port || 3000}"
+                 style="width:80px;display:inline-block">
+          ${esc(t('bot.cfg_token'))}
+          <input type="text" id="cfg-token" value="" placeholder="${esc(t('bot.cfg_token_ph'))}"
+                 style="width:200px;display:inline-block">
+          <button class="btn sm ${needCfg ? 'primary' : ''}" id="btn-cfg">${esc(t('bot.cfg_apply'))}</button>
+        </span>
+        <br><span style="font-size:12px;color:var(--text-dim2)">${esc(t('bot.cfg_hint'))}</span>
+      </div>`;
 
     const log = String(b.log || '').trim();
     return `
@@ -722,32 +765,92 @@ async function renderPush() {
         esc(t('common.save_failed'))}</b><br><code style="white-space:pre-wrap">${
         esc(b.install_error)}</code></div>` : ''}
       <div class="note" id="bot-note" style="display:none"></div>
-      <p class="hint" style="margin:12px 0 6px">${esc(t('bot.log'))}</p>
-      <pre class="logbox">${esc(log || t('bot.log_empty'))}</pre>
+      ${cfgBox}
+      <div class="row" style="margin:14px 0 6px">
+        <b style="font-size:12.5px">${esc(t('bot.log'))}</b>
+        <span class="spacer"></span>
+        <label class="check" style="padding-top:0">
+          <input type="checkbox" id="log-follow" checked> ${esc(t('bot.log_follow'))}
+        </label>
+        <button class="btn ghost sm" id="btn-log-refresh">${esc(t('bot.log_refresh'))}</button>
+        <button class="btn ghost sm" id="btn-log-clear">${esc(t('bot.log_clear'))}</button>
+      </div>
+      <pre class="logbox" id="bot-log">${esc(log || t('bot.log_empty'))}</pre>
       <p class="hint" style="margin-top:10px">${esc(t('bot.scan_hint'))}</p>
-      <p class="hint">${esc(t('bot.manual'))}</p>
     </div>`;
   };
+
+  // 日志本地缓存一份：点「清空」只清屏幕、不动磁盘上的日志文件 ——
+  // 用户想清的是刷屏的噪音，不是证据。
+  let logHidden = false;
 
   const paintBot = async () => {
     const b = await api('/api/bot/napcat');
     if (!b.ok) { botHost.innerHTML = ''; return; }
+    const follow = document.getElementById('log-follow');
+    const keepFollow = follow ? follow.checked : true;
+    const scrollTop = (() => {
+      const el = document.getElementById('bot-log');
+      return el ? el.scrollTop : null;
+    })();
+
     botHost.innerHTML = botHtml(b);
-    // 安装是后端的**后台任务**（下载几十 MB，界面不能卡住等），
-    // 所以没结束之前每 2 秒回来看一眼：装完自动变成「启动」按钮，
-    // 用户不需要自己按刷新。
+
+    // 装完/配完之后把日志区恢复成「跟着看」的状态
     if (b.installing) setTimeout(paintBot, 2000);
+    // 启动之后自动刷几次日志，让用户马上看到扫码信息
+    if (b.running && follow) scheduleLogPoll();
+
+    const logEl = document.getElementById('bot-log');
+    if (logEl) {
+      if (logHidden) logEl.textContent = t('bot.log_cleared');
+      if (keepFollow && !logHidden) logEl.scrollTop = logEl.scrollHeight;
+      else if (scrollTop !== null) logEl.scrollTop = scrollTop;
+    }
+
+    const cfgBtn = document.getElementById('btn-cfg');
+    if (cfgBtn) {
+      cfgBtn.addEventListener('click', async () => {
+        const note = document.getElementById('bot-note');
+        note.style.display = 'block';
+        note.textContent = t('bot.cfg_applying');
+        cfgBtn.disabled = true;
+        const port = Number(document.getElementById('cfg-port').value) || 3000;
+        const token = document.getElementById('cfg-token').value.trim();
+        const r = await api('/api/bot/napcat/configure', { port, token });
+        cfgBtn.disabled = false;
+        if (!r.ok) {
+          note.innerHTML = `<b style="color:#e05c5c">${esc(t('common.save_failed'))}</b><br>`
+            + `<code style="white-space:pre-wrap">${esc(r.error || '')}</code>`;
+          return;
+        }
+        note.innerHTML = `<b style="color:#7fd3ba">${esc(r.message || '')}</b><br>`
+          + `<code>${esc(r.path || '')}</code>`;
+        toast(t('bot.cfg_title'), r.message || '');
+        await paintBot();
+      });
+    }
+
+    const refresh = document.getElementById('btn-log-refresh');
+    if (refresh) refresh.addEventListener('click', () => { logHidden = false; paintBot(); });
+
+    const clear = document.getElementById('btn-log-clear');
+    if (clear) {
+      clear.addEventListener('click', () => {
+        logHidden = true;
+        const el = document.getElementById('bot-log');
+        if (el) el.textContent = t('bot.log_cleared');
+      });
+    }
+
     botHost.querySelectorAll('button[data-bot]').forEach(btn =>
       btn.addEventListener('click', async () => {
         const act = btn.dataset.bot;
         if (act === 'opendir') { await api('/api/bot/napcat/open', {}); return; }
         const n = document.getElementById('bot-note');
         n.style.display = 'block';
-        // 下载几十 MB 要等一会儿，先把「正在干活」摆出来，别让人以为按钮没反应
         n.textContent = act === 'install' ? t('bot.installing') : '…';
         btn.disabled = true;
-        // 安装时把选中的下载源带上：校园网下「自动」要等前一个源超时才轮到镜像，
-        // 而用户往往一开始就知道该走哪个。
         const src = document.getElementById('bot-src');
         const body = (act === 'install' && src) ? { source: src.value } : {};
         const r = await api(`/api/bot/napcat/${act}`, body);
@@ -761,6 +864,16 @@ async function renderPush() {
         await paintBot();
       }));
   };
+
+  // 启动后一段时间内勤刷日志（扫码、报错都在这几秒里出来），
+  // 之后停下来 —— 常驻轮询只会白烧 CPU，这台机器还要录课。
+  let logPolls = 0;
+  const scheduleLogPoll = () => {
+    if (logPolls >= 10) return;
+    logPolls += 1;
+    setTimeout(() => { if (current === 'push') paintBot(); }, 2500);
+  };
+
   await paintBot();
 }
 

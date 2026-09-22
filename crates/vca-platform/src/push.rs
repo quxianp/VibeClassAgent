@@ -404,6 +404,22 @@ impl OneBotPusher {
             self.cfg.timeout_ms,
         )?;
         if !resp.is_success() {
+            // 404/405 值得单独说：这说明**连上了 HTTP 服务，但那个服务不认 OneBot 的动作**。
+            // 报错原文是一张网页（`Cannot POST /send_private_msg`），照抄给用户毫无帮助 ——
+            // 他只会以为程序坏了。这里把最可能的两种成因直接写出来。
+            if resp.status == 404 || resp.status == 405 {
+                return Err(PushError::Rejected(format!(
+                    "{base} 上有个 HTTP 服务，但它不认 OneBot 的 /{action}（HTTP {}）。\n\
+                     也就是说：地址填对了、服务也在跑，但那不是 OneBot 的 HTTP 接口。\n\
+                     常见两种原因：\n\
+                     1) 端口填错了 —— NapCat 的 WebUI 默认在 6099，OneBot 的 HTTP 服务默认在 3000；\n\
+                     2) NapCat 里没开「HTTP 服务端」：打开它的 WebUI（默认 http://127.0.0.1:6099）\n\
+                        → 网络配置 → 添加或启用 HTTP 服务器，端口填 3000 并保存，然后回来重试。\n\
+                     原样返回：{}",
+                    resp.status,
+                    resp.body.chars().take(160).collect::<String>()
+                )));
+            }
             return Err(PushError::Rejected(format!(
                 "HTTP {}: {}",
                 resp.status,

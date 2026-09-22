@@ -595,7 +595,10 @@
       "f_pp_token_ph": "found under one-to-one push after signing in to pushplus.plus",
       "f_tg_timeout": "Timed out without a result. Try again.",
       "f_unknown_frames": "Some frames had no recognisable chat id (send the line below to the developer and it can be pinpointed):",
-      "f_aibot_listen": "WeCom needs a short listening window"
+      "f_aibot_listen": "WeCom needs a short listening window",
+      "unavailable": "unavailable",
+      "scope_note": "This stage only guarantees the QQ side (personal-account bot / QQ official bot). The channels below keep their code but are not maintained or tested for now:",
+      "scope_now": "What works now: OneBot 11 (personal-account bot, via NapCat) and the QQ official bot."
     },
     "st": {
       "title": "Timetable",
@@ -746,7 +749,22 @@
       "qq_required": "The Shell package needs QQ installed on this machine. Without it, grab the portable build (bundles QQ) instead.",
       "installed_at": "Detected",
       "source": "Download source",
-      "source_auto": "Automatic (tries each in turn)"
+      "source_auto": "Automatic (tries each in turn)",
+      "http_on": "OneBot HTTP is on",
+      "http_off": "HTTP server is off - pushes will 404",
+      "cfg_title": "One-click setup (open NapCat's OneBot HTTP server)",
+      "cfg_file": "Config file: ",
+      "cfg_notfound": "Config file not found yet. Start it and log in to QQ once so NapCat creates it.",
+      "cfg_port": "Port",
+      "cfg_token": "Access token",
+      "cfg_token_ph": "optional; also saved into the push config",
+      "cfg_apply": "Write config",
+      "cfg_applying": "Writing config...",
+      "cfg_hint": "NapCat does not enable the HTTP server by default, so filling in the address alone is not enough. This adds an enabled HTTP server to its config (existing entries are left alone, and the file is backed up to .bak first). Restart NapCat to apply.",
+      "log_follow": "Auto-scroll",
+      "log_refresh": "Refresh",
+      "log_clear": "Clear view",
+      "log_cleared": "(view cleared; the log file is still on disk)"
     }
   }
 }

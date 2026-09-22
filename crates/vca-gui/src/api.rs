@@ -36,6 +36,7 @@ pub fn dispatch(
         ("POST", "/api/config/push") => post_push(&settings_path, &body),
         ("POST", "/api/push/test") => push_test(&settings_path, &body),
         ("POST", "/api/push/discover") => push_discover(&body),
+        ("POST", "/api/push/discover/stop") => push_discover_stop(),
         ("GET", "/api/push/discover") => Ok(discover_json()),
         ("GET", "/api/config/general") => get_general(&settings_path),
         ("POST", "/api/config/general") => post_general(&settings_path, &body),
@@ -59,6 +60,7 @@ pub fn dispatch(
         ("POST", "/api/bot/napcat/start") => bot_start(),
         ("POST", "/api/bot/napcat/stop") => bot_stop(),
         ("POST", "/api/bot/napcat/open") => bot_open_dir(),
+        ("POST", "/api/bot/napcat/configure") => bot_configure(opts, &body),
         ("POST", "/api/import/classisland") => import_classisland(opts, &body),
         ("POST", "/api/quit") => quit(),
         _ => Ok(json!({"ok": false, "error": format!("没有这个接口：{method} {path}")})),
@@ -379,6 +381,8 @@ fn post_push(path: &Path, body: &str) -> Result<Value> {
 /// 所以挪到后台线程，前端轮询这个状态。
 struct DiscoverState {
     running: bool,
+    /// 用户点了「停止」——监听线程下一轮就收工。
+    stop: bool,
     chats: Vec<(String, String)>,
     /// 认不出的帧样例（官方改字段名时用来定位）。
     unknown: Vec<String>,
@@ -388,6 +392,7 @@ struct DiscoverState {
 
 static DISCOVER: std::sync::Mutex<DiscoverState> = std::sync::Mutex::new(DiscoverState {
     running: false,
+    stop: false,
     chats: Vec::new(),
     unknown: Vec::new(),
     error: None,
@@ -446,34 +451,58 @@ fn push_discover(body: &str) -> Result<Value> {
     {
         let mut st = discover_state();
         st.running = true;
+        st.stop = false;
         st.chats.clear();
         st.unknown.clear();
         st.error = None;
         st.note = String::new();
     }
 
-    let listen = v.get("seconds").and_then(|x| x.as_u64()).unwrap_or(15);
+    // 默认监听 5 分钟。原来的 15 秒是设计失误：企业微信的回调是**实时**推送、
+    // 不补发历史，用户得恰好在那 15 秒内对机器人说话才拿得到 —— 实际几乎不可能。
+    let listen = v.get("seconds").and_then(|x| x.as_u64()).unwrap_or(300);
 
     if provider == "wecom-aibot" {
         let bot_id = pick(&v, "wecom_bot_id", "VCA_WECOM_BOT_ID");
         let secret = pick(&v, "wecom_bot_secret", "VCA_WECOM_BOT_SECRET");
         std::thread::spawn(move || {
             let cfg = vca_platform::wecom_aibot::AibotConfig::new(&bot_id, &secret, "", "");
+            // 边听边把新会话写进共享状态：前端轮询就能看到实时进展，
+            // 不用等监听结束才知道有没有收获。
+            let found = vca_platform::wecom_aibot::listen_chats(
+                &cfg,
+                listen,
+                || {
+                    let st = discover_state();
+                    st.stop
+                },
+                |chats| {
+                    let mut st = discover_state();
+                    st.chats = chats.to_vec();
+                },
+            );
             let mut st = discover_state();
-            match vca_platform::wecom_aibot::list_chats(&cfg, listen) {
-                Ok(found) => {
-                    st.chats = found.chats;
-                    st.unknown = found.unknown_frames;
-                    st.note = "企业微信没有「列出全部会话」的接口（这是它的隐私设计），\
-                               所以这里列的是**最近和机器人有过互动的会话**。\
-                               想把某个群加进来，先把机器人拉进群、在群里 @ 它一次，再来点一次。"
-                        .to_string();
+            match found {
+                Ok(list) => {
+                    st.chats = list.chats;
+                    st.unknown = list.unknown_frames;
+                    st.note = if st.chats.is_empty() {
+                        "这段时间里没有收到任何会话消息。企业微信只在**有人对机器人说话的那一刻**\
+                         把会话 id 推过来，不补发历史 —— 所以请在监听期间去群里 @ 一次机器人\
+                         （或给它发一条私聊），再回来看这里。"
+                            .to_string()
+                    } else {
+                        "这些就是机器人最近互动过的会话。点「填入」即可。".to_string()
+                    };
                 }
                 Err(e) => st.error = Some(e.to_string()),
             }
             st.running = false;
         });
-        return Ok(json!({"ok": true, "message": format!("正在监听 {listen} 秒…")}));
+        return Ok(json!({
+            "ok": true,
+            "message": format!("正在监听（最多 {} 秒）——现在去群里 @ 一下机器人", listen),
+        }));
     }
 
     // Telegram
@@ -487,6 +516,16 @@ fn push_discover(body: &str) -> Result<Value> {
         st.running = false;
     });
     Ok(json!({"ok": true, "message": "正在问 Telegram 要会话列表…"}))
+}
+
+/// 让正在跑的会话监听提前收工（用户已经拿到想要的会话了）。
+fn push_discover_stop() -> Result<Value> {
+    let mut st = discover_state();
+    if !st.running {
+        return Ok(json!({"ok": true, "message": "本来就没在监听"}));
+    }
+    st.stop = true;
+    Ok(json!({"ok": true, "message": "已请求停止"}))
 }
 
 /// 发一条测试消息（可选带一个本地文件的绝对路径，用来验证附件通道）。
@@ -1081,22 +1120,59 @@ fn i18n() -> Result<Value> {
 /// 只做 TCP 连接测试、不调 API —— 用户还没填 token 时，
 /// 「这个端口上有没有东西在听」本身就是最有用的信息。
 fn detect_bot() -> Result<Value> {
-    const PORTS: &[u16] = &[3000, 3001, 6099, 5700, 8080, 12345];
+    const PORTS: &[u16] = &[3000, 3001, 5700, 6099, 8080, 12345];
     let mut found = Vec::new();
+    let mut onebot = Vec::new();
+
     for p in PORTS {
         let addr = std::net::SocketAddr::from(([127, 0, 0, 1], *p));
         if std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(300))
             .is_ok()
         {
             found.push(*p);
+            // 「端口上有人听」和「这是个 OneBot HTTP 服务」是两回事。
+            // 只报前者会害人：NapCat 的 WebUI、随便一个本地服务都会让端口亮起来，
+            // 用户照着填进去，发消息时得到一句 404 —— 就是本次踩的坑。
+            // 所以这里真去问一句 OneBot 的标准动作 get_login_info。
+            if let Some(info) = probe_onebot(*p) {
+                onebot.push(json!({"port": p, "info": info}));
+            }
         }
     }
+
     Ok(json!({
         "ok": true,
         "found": found,
+        "onebot": onebot,
         "candidates": PORTS,
         "napcat_url": vca_platform::napcat::DOWNLOAD_PAGE,
     }))
+}
+
+/// 问一句 `get_login_info`，判断这个端口上是不是 OneBot HTTP 服务。
+///
+/// 返回 `Some("昵称(QQ号)")` 表示确认是；`None` 表示不是（或没开 HTTP 服务）。
+fn probe_onebot(port: u16) -> Option<String> {
+    let url = format!("http://127.0.0.1:{port}/get_login_info");
+    let resp = vca_platform::http::post_json(&url, "{}", 1500).ok()?;
+    if !resp.is_success() {
+        return None;
+    }
+    let v: Value = serde_json::from_str(&resp.body).ok()?;
+    // OneBot 一定回 retcode；只认这个，避免把别家 JSON 接口误判成 OneBot
+    v.get("retcode")?;
+    let data = v.get("data").cloned().unwrap_or(Value::Null);
+    let nick = data.get("nickname").and_then(|x| x.as_str()).unwrap_or("");
+    let uid = data
+        .get("user_id")
+        .map(|x| x.to_string())
+        .unwrap_or_default();
+    let uid = uid.trim_matches('"').to_string();
+    Some(if nick.is_empty() && uid.is_empty() {
+        "已登录".to_string()
+    } else {
+        format!("{nick}({uid})")
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1153,18 +1229,6 @@ fn parse_port(endpoint: &str) -> Option<u16> {
     host.rsplit(':').next()?.parse::<u16>().ok()
 }
 
-/// 读文件尾部若干字符（日志可能很长，界面只要最后一段）。
-fn read_tail(path: &Path, max_chars: usize) -> String {
-    let Ok(text) = std::fs::read_to_string(path) else {
-        return String::new();
-    };
-    let n = text.chars().count();
-    if n <= max_chars {
-        return text;
-    }
-    text.chars().skip(n - max_chars).collect()
-}
-
 /// 机器人当前状态：装没装、跑没跑、服务通没通、日志尾巴。
 fn bot_status(settings: &Path) -> Result<Value> {
     let root = vca_platform::napcat::root();
@@ -1178,6 +1242,16 @@ fn bot_status(settings: &Path) -> Result<Value> {
         .push
         .endpoint;
     let port = parse_port(&ep).unwrap_or(3000);
+
+    // NapCat 的 OneBot 配置：HTTP 服务端开没开，就在这个文件里。
+    // 用户踩过的 404（Cannot POST /send_private_msg）根因就是它是空的。
+    let cfg_path = vca_platform::napcat::find_onebot_config(&root);
+    let cfg_val = cfg_path
+        .as_ref()
+        .and_then(|p| vca_platform::napcat::read_json(p));
+    let listening = cfg_val
+        .as_ref()
+        .and_then(vca_platform::napcat::http_server_port);
 
     let st = install_state();
     // 进程不在了就别把 pid 报出去：界面上显示一个已经死掉的 pid 只会让人困惑
@@ -1193,7 +1267,12 @@ fn bot_status(settings: &Path) -> Result<Value> {
         "running": running,
         "port": port,
         "port_open": vca_platform::napcat::port_open(port),
-        "log": read_tail(&vca_platform::napcat::launcher_log_at(&root), 4000),
+        // 汇总所有日志来源（我们的 launcher log + NapCat 自己的）
+        "log": vca_platform::napcat::tail_logs(&root, 6000),
+        "onebot_config": cfg_path.as_ref().map(|p| p.display().to_string()),
+        "onebot_qq": cfg_path.as_deref().and_then(vca_platform::napcat::qq_from_config_path),
+        // 配置里正在听的 HTTP 端口；None = 没开 HTTP 服务端（这正是发消息 404 的原因）
+        "onebot_http_port": listening,
         "installing": st.running,
         "install_message": st.message,
         "install_error": st.error,
@@ -1285,6 +1364,51 @@ fn bot_stop() -> Result<Value> {
     vca_platform::napcat::stop(p)?;
     *NAPCAT_PID.lock().unwrap_or_else(|e| e.into_inner()) = None;
     Ok(json!({"ok": true, "message": "已停止"}))
+}
+
+/// 一键配置：替用户往 NapCat 的 OneBot 配置里写一个开着的 HTTP 服务端。
+///
+/// 这是「点一下就能用」的关键一步：NapCat 默认**不开** HTTP 服务端，
+/// 而界面上填的那个「服务地址」只有在它开了之后才有效。
+/// 光让用户去 WebUI 里找，正是我们想省掉的事。
+fn bot_configure(opts: &ServeOptions, body: &str) -> Result<Value> {
+    let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
+    let port = v
+        .get("port")
+        .and_then(|x| x.as_u64())
+        .filter(|p| *p > 0 && *p < 65536)
+        .unwrap_or(3000) as u16;
+    let token = v
+        .get("token")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+
+    let root = vca_platform::napcat::root();
+    match vca_platform::napcat::ensure_http_server(&root, port, &token) {
+        Ok((path, changed)) => {
+            // 令牌同时写进 secrets，供推送时使用（推送读的就是 VCA_PUSH_TOKEN）
+            if !token.is_empty() {
+                let sp = vca_core::secrets::default_path(&opts.config_root);
+                let _ = vca_core::secrets::upsert(&sp, "VCA_PUSH_TOKEN", &token);
+                vca_core::secrets::set_override("VCA_PUSH_TOKEN", &token);
+            }
+            Ok(json!({
+                "ok": true,
+                "path": path.display().to_string(),
+                "changed": changed,
+                "qq": vca_platform::napcat::qq_from_config_path(&path),
+                "port": port,
+                "message": if changed {
+                    format!("已写入配置（端口 {port}）。重启 NapCat 后生效。")
+                } else {
+                    format!("配置本来就是这样（端口 {port}），没动它。")
+                },
+            }))
+        }
+        Err(e) => Ok(json!({"ok": false, "error": e.to_string()})),
+    }
 }
 
 /// 打开安装目录（没装过也打开——用户手动下载之后正需要往里放）。
@@ -1397,20 +1521,6 @@ mod bot_tests {
         assert_eq!(parse_port("http://127.0.0.1"), None);
         assert_eq!(parse_port(""), None);
         assert_eq!(parse_port("http://[::1]:3000"), Some(3000));
-    }
-
-    #[test]
-    fn tail_returns_whole_text_when_short() {
-        let d = std::env::temp_dir().join(format!("vca-tail-{}", std::process::id()));
-        std::fs::create_dir_all(&d).unwrap();
-        let f = d.join("t.log");
-        std::fs::write(&f, "hello").unwrap();
-        assert_eq!(read_tail(&f, 100), "hello");
-        // 按**字符**截，不能按字节：日志里有中文，按字节切会切出半个字
-        std::fs::write(&f, "一二三四五").unwrap();
-        assert_eq!(read_tail(&f, 3), "三四五");
-        assert_eq!(read_tail(&d.join("nope.log"), 10), "");
-        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

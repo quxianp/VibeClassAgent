@@ -544,6 +544,84 @@ def run_checks(api: Api, base: str, mock: MockOneBot, cfg: Path) -> None:
     else:
         bad("停止机器人", json.dumps(r, ensure_ascii=False)[:200])
 
+    print("\n[6.9] NapCat 一键配置", flush=True)
+    # 造一份**真实形态**的 NapCat OneBot 配置：httpServers 空（默认就是空的），
+    # 但用户自己加过一条反向 WS —— 那条必须被原样保留，不能被我们抹掉。
+    napcat_dir = Path(WORK) / "napcat"
+    cfg_dir = napcat_dir / "versions" / "9.9.26-44498" / "resources" / "app" / "napcat" / "config"
+    cfg_dir.mkdir(parents=True, exist_ok=True)
+    onebot = cfg_dir / "onebot11_10001.json"
+    onebot.write_text(json.dumps({
+        "network": {
+            "httpServers": [],
+            "websocketClients": [{
+                "enable": True, "name": "别人的配置", "url": "ws://localhost:6199/ws",
+                "token": "keep-me", "messagePostFormat": "array",
+            }],
+        },
+        "musicSignUrl": "",
+        "timeout": {"baseTimeout": 10000},
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+    (napcat_dir / "launcher.bat").write_text("@echo off\r\nexit /b 0\r\n", encoding="utf-8")
+
+    r = api.call("/api/bot/napcat")[1] or {}
+    if r.get("onebot_config") and r.get("onebot_http_port") is None and r.get("onebot_qq") == "10001":
+        ok("识别出 onebot 配置且判为「HTTP 未开」", str(r.get("onebot_config", ""))[-40:])
+    else:
+        bad("onebot 配置探测", json.dumps({
+            "cfg": r.get("onebot_config"), "port": r.get("onebot_http_port"),
+            "qq": r.get("onebot_qq")}, ensure_ascii=False)[:200])
+
+    r = api.call("/api/bot/napcat/configure", {"port": 3123, "token": "smoke-token"})[1] or {}
+    if r.get("ok") and r.get("changed") is True and r.get("port") == 3123:
+        ok("一键配置写入成功", f"QQ {r.get('qq')} / 端口 {r.get('port')}")
+    else:
+        bad("一键配置", json.dumps(r, ensure_ascii=False)[:200])
+
+    # 直接读盘核对：写进去的字段、以及别人的条目有没有被保住
+    written = json.loads(onebot.read_text(encoding="utf-8"))
+    servers = written.get("network", {}).get("httpServers", [])
+    mine = [x for x in servers if x.get("name") == "vibeclassagent"]
+    others = written.get("network", {}).get("websocketClients", [])
+    if (len(mine) == 1 and mine[0].get("enable") is True
+            and mine[0].get("port") == 3123 and mine[0].get("token") == "smoke-token"):
+        ok("配置内容正确", f"enable/port/token 都对，条目数 {len(servers)}")
+    else:
+        bad("配置内容", json.dumps(servers, ensure_ascii=False)[:200])
+
+    if len(others) == 1 and others[0].get("name") == "别人的配置" and others[0].get("token") == "keep-me":
+        ok("用户原有条目被保留", "websocketClients 原样不动")
+    else:
+        bad("原有条目被改动", json.dumps(others, ensure_ascii=False)[:200])
+
+    if onebot.with_suffix(".json.bak").is_file():
+        ok("写入前有备份", onebot.with_suffix(".json.bak").name)
+    else:
+        bad("没有备份", "改坏了就没法回滚")
+
+    # 幂等：再点一次不该重复追加
+    r = api.call("/api/bot/napcat/configure", {"port": 3123, "token": "smoke-token"})[1] or {}
+    again = json.loads(onebot.read_text(encoding="utf-8"))
+    n2 = len([x for x in again["network"]["httpServers"] if x.get("name") == "vibeclassagent"])
+    if r.get("ok") and n2 == 1:
+        ok("重复配置是幂等的", f"仍是 {n2} 条")
+    else:
+        bad("重复配置", f"条目数变成 {n2}")
+
+    # 配完之后状态应当变成「HTTP 已开」
+    r = api.call("/api/bot/napcat")[1] or {}
+    if r.get("onebot_http_port") == 3123:
+        ok("状态跟着变成「HTTP 已开」", f"端口 {r.get('onebot_http_port')}")
+    else:
+        bad("状态未更新", str(r.get("onebot_http_port")))
+
+    # 端口探测：假的 NapCat 起不来，所以这里只验证字段结构
+    r = api.call("/api/detect-bot", {})[1] or {}
+    if r.get("ok") and isinstance(r.get("onebot"), list):
+        ok("机器人探测带 OneBot 判定", f"端口命中 {r.get('found')}，确认为 OneBot 的 {len(r['onebot'])} 个")
+    else:
+        bad("机器人探测", str(r)[:160])
+
     print("\n[7] 守护进程控制", flush=True)
     d = api.call("/api/daemon/status")[1] or {}
     if d.get("running") is False:

@@ -331,20 +331,51 @@ pub struct ChatList {
 /// 一个必须说清的限制：**只能列出「最近和机器人有过互动的会话」**。
 /// 想让它认出某个群，先把机器人拉进群、在群里 @ 它一次。
 pub fn list_chats(cfg: &AibotConfig, listen_secs: u64) -> Result<ChatList> {
+    listen_chats(cfg, listen_secs, || false, |_| {})
+}
+
+/// 监听会话，每发现一个新的就回调一次。
+///
+/// # 为什么要「持续监听」而不是「听一小会儿」
+///
+/// 企业微信的回调是**实时推送**的，**不补发历史消息** —— 也就是说，
+/// 只有在连接已建立、并且有人对机器人说话的那一刻，会话 id 才会送过来。
+/// 所以「点一下、听 15 秒」这种设计在真实使用里几乎不可能成功：
+/// 用户得恰好在那 15 秒里发消息。
+///
+/// 正确的形态是：监听持续一段时间（默认几分钟），界面实时显示已经收集到什么，
+/// 用户看到提示后再去群里 @ 一次机器人。`should_stop` 让调用方可以随时取消。
+pub fn listen_chats(
+    cfg: &AibotConfig,
+    listen_secs: u64,
+    should_stop: impl Fn() -> bool,
+    mut on_update: impl FnMut(&[(String, String)]),
+) -> Result<ChatList> {
     cfg.validate_credentials()?;
-    let listen = listen_secs.clamp(3, 120);
+    let listen = listen_secs.clamp(3, 1800);
 
     // 认证本身可能要等几秒，读取超时给足
-    let mut ws = connect_and_auth(cfg, Duration::from_secs(listen + 10))?;
+    let mut ws = connect_and_auth(cfg, Duration::from_secs(20))?;
 
     let deadline = Instant::now() + Duration::from_secs(listen);
     let mut found: Vec<(String, String)> = Vec::new();
     let mut unknown: Vec<String> = Vec::new();
 
     while Instant::now() < deadline {
+        if should_stop() {
+            break;
+        }
         let msg = match ws.read() {
             Ok(m) => m,
-            // 超时或对端关闭都算「这段时间没有别的事了」，正常收工
+            // 读超时（socket 设的是 20 秒）**不等于断线** —— 只说明这段时间没人说话，
+            // 继续等满总时限。这在「监听几分钟等用户去发消息」的场景里是常态。
+            Err(tungstenite::Error::Io(e))
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            // 其它错误才是真断了，那就收工
             Err(_) => break,
         };
         let text = match msg {
@@ -365,6 +396,8 @@ pub fn list_chats(cfg: &AibotConfig, listen_secs: u64) -> Result<ChatList> {
             Some(item) => {
                 if !found.contains(&item) {
                     found.push(item);
+                    // 边收边报：用户不用等监听结束才知道有没有收获
+                    on_update(&found);
                 }
             }
             None => {

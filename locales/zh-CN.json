@@ -595,7 +595,10 @@
       "f_pp_token_ph": "pushplus.plus 登录后在「一对一推送」里能拿到",
       "f_tg_timeout": "等太久了，没拿到结果。可以再点一次。",
       "f_unknown_frames": "有几帧没认出会话 id（把下面这行发给开发者就能定位）：",
-      "f_aibot_listen": "企业微信要先监听一会儿"
+      "f_aibot_listen": "企业微信要先监听一会儿",
+      "unavailable": "暂不可用",
+      "scope_note": "本阶段只保障 QQ 侧（个人账号机器人 / QQ 官方机器人）可用。以下渠道代码保留，但暂不维护、不测试，标为「暂不可用」：",
+      "scope_now": "现在可用的是：OneBot 11（个人账号机器人，配 NapCat）与 QQ 官方机器人。"
     },
     "st": {
       "title": "作息时间表",
@@ -746,7 +749,22 @@
       "qq_required": "Shell 包需要本机已装 QQ。若机器上没有 QQ，请下载「便携包」版本（自带 QQ）放进来。",
       "installed_at": "已识别到",
       "source": "下载源",
-      "source_auto": "自动（依次尝试，慢但省心）"
+      "source_auto": "自动（依次尝试，慢但省心）",
+      "http_on": "OneBot HTTP 已开",
+      "http_off": "HTTP 服务端没开 —— 推送会 404",
+      "cfg_title": "一键配置（让 NapCat 开好 OneBot 的 HTTP 服务端）",
+      "cfg_file": "配置文件：",
+      "cfg_notfound": "还没找到配置文件。先启动一次并登录 QQ，NapCat 才会生成它。",
+      "cfg_port": "端口",
+      "cfg_token": "访问令牌",
+      "cfg_token_ph": "可留空；填了会同时写进推送配置",
+      "cfg_apply": "写入配置",
+      "cfg_applying": "正在写配置…",
+      "cfg_hint": "NapCat 默认不开 HTTP 服务端，所以光填「服务地址」是不够的。这里会往它的配置文件里加一个开着的 HTTP 服务端（原有条目不动，写前会备份成 .bak）。写完需要重启 NapCat 才生效。",
+      "log_follow": "自动滚动",
+      "log_refresh": "刷新",
+      "log_clear": "清空屏幕",
+      "log_cleared": "（已清空屏幕显示，日志文件仍在磁盘上）"
     }
   }
 }

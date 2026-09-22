@@ -457,6 +457,232 @@ pub fn cleanup_backup(root: &Path) {
     let _ = std::fs::remove_dir_all(bak);
 }
 
+// ---------------------------------------------------------------------------
+// 一键配置：替用户开好 OneBot 的 HTTP 服务端
+// ---------------------------------------------------------------------------
+
+/// 我们在 `httpServers` 里那条的名字。
+///
+/// 按名字认领自己那一条：用户可能已经在 WebUI 里配过别的 HTTP 服务，
+/// 那些必须原样保留 —— 覆盖掉别人的配置是很讨人厌的行为。
+pub const HTTP_SERVER_NAME: &str = "vibeclassagent";
+
+/// 读一个 JSON 文件，**容忍 UTF-8 BOM**。
+///
+/// 这不是防御性编程 —— 是实测踩到的：PowerShell 的 `Set-Content -Encoding utf8`
+/// 和 Windows 记事本都会写 BOM，而 `serde_json` 不认带 BOM 的输入，
+/// 于是报「不是合法 JSON」，可文件在编辑器里看着明明没问题。
+/// NapCat 的配置又恰恰是用户会用记事本改的东西。
+pub fn read_json(path: &Path) -> Option<serde_json::Value> {
+    let raw = std::fs::read(path).ok()?;
+    let text = String::from_utf8_lossy(&raw);
+    let text = text.trim_start_matches('\u{feff}');
+    serde_json::from_str(text).ok()
+}
+
+/// 找到 NapCat 的 OneBot 配置文件（`config/onebot11_<QQ>.json`）。
+///
+/// 路径随版本变过（`app/napcat/config/` 或 `config/`），所以做递归查找：
+/// 只认文件名，不认某条固定路径。找到多个时取**最后修改**的那个 ——
+/// 那是当前正在用的 QQ 号对应的配置。
+pub fn find_onebot_config(root: &Path) -> Option<PathBuf> {
+    if !root.is_dir() {
+        return None;
+    }
+    let mut hits: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
+    collect_onebot_configs(root, 0, &mut hits);
+    hits.sort_by_key(|(t, _)| *t);
+    hits.pop().map(|(_, p)| p)
+}
+
+fn collect_onebot_configs(
+    dir: &Path,
+    depth: usize,
+    out: &mut Vec<(std::time::SystemTime, PathBuf)>,
+) {
+    // 限深：NapCat 目录里还有 QQ 本体与一堆资源，无脑递归会很慢
+    if depth > 6 {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let path = e.path();
+        let Ok(ft) = e.file_type() else { continue };
+        if ft.is_dir() {
+            collect_onebot_configs(&path, depth + 1, out);
+            continue;
+        }
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.starts_with("onebot11_") && name.ends_with(".json") {
+            let t = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            out.push((t, path));
+        }
+    }
+}
+
+/// 读出配置里的 QQ 号（文件名里的那串数字）。
+pub fn qq_from_config_path(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy().to_string();
+    let digits: String = name
+        .trim_start_matches("onebot11_")
+        .trim_end_matches(".json")
+        .chars()
+        .filter(|c| c.is_ascii_digit())
+        .collect();
+    (!digits.is_empty()).then_some(digits)
+}
+
+/// 看这个配置里有没有在听的 HTTP 服务端。
+pub fn http_server_port(cfg: &serde_json::Value) -> Option<u16> {
+    cfg.pointer("/network/httpServers")
+        .and_then(|v| v.as_array())
+        .and_then(|arr| {
+            arr.iter().find_map(|e| {
+                let on = e.get("enable").and_then(|x| x.as_bool()).unwrap_or(false);
+                if !on {
+                    return None;
+                }
+                e.get("port").and_then(|x| x.as_u64()).map(|p| p as u16)
+            })
+        })
+}
+
+/// 在配置里确保有一个开着的 HTTP 服务端，返回（配置文件路径, 端口, 是否改动了）。
+///
+/// 只在 `network.httpServers` 里认领 `name == HTTP_SERVER_NAME` 的那一条：
+/// 已经有就改它，没有就追加。别的条目一律不动。
+pub fn ensure_http_server(
+    root: &Path,
+    port: u16,
+    token: &str,
+) -> Result<(PathBuf, bool), anyhow::Error> {
+    let path = find_onebot_config(root).ok_or_else(|| {
+        anyhow!(
+            "没找到 NapCat 的 OneBot 配置文件（应该在 {} 下的 config/onebot11_<QQ>.json）。\n\
+             先把机器人装好、至少启动登录过一次，NapCat 才会生成它。",
+            root.display()
+        )
+    })?;
+
+    // 用 read_json 而不是裸 from_str：得容忍 BOM（实测踩过）
+    let mut cfg: serde_json::Value = read_json(&path)
+        .with_context(|| format!("{} 不是合法 JSON（或读不出来）", path.display()))?;
+
+    // 改之前先备份：万一字段写错让 NapCat 起不来，用户还能翻回来
+    let bak = path.with_extension("json.bak");
+    let _ = std::fs::copy(&path, &bak);
+
+    let entry = serde_json::json!({
+        "enable": true,
+        "name": HTTP_SERVER_NAME,
+        "host": "0.0.0.0",
+        "port": port,
+        "enableCors": true,
+        // array 是 OneBot 11 的默认消息格式，绝大多数对接方都吃这个
+        "messagePostFormat": "array",
+        "token": token,
+        "debug": false,
+        "heartInterval": 30000,
+    });
+
+    let obj = cfg
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("配置根节点不是对象"))?;
+    let network = obj
+        .entry("network")
+        .or_insert_with(|| serde_json::json!({}));
+    let net = network
+        .as_object_mut()
+        .ok_or_else(|| anyhow!("network 节点不是对象"))?;
+    let servers = net
+        .entry("httpServers")
+        .or_insert_with(|| serde_json::json!([]));
+    let arr = servers
+        .as_array_mut()
+        .ok_or_else(|| anyhow!("httpServers 不是数组"))?;
+
+    let mut changed = false;
+    match arr
+        .iter_mut()
+        .find(|e| e.get("name").and_then(|x| x.as_str()) == Some(HTTP_SERVER_NAME))
+    {
+        Some(existing) => {
+            if existing != &entry {
+                *existing = entry;
+                changed = true;
+            }
+        }
+        None => {
+            arr.push(entry);
+            changed = true;
+        }
+    }
+
+    if changed {
+        let out = serde_json::to_string_pretty(&cfg)?;
+        std::fs::write(&path, out)?;
+        tracing::info!("已写入 NapCat 的 HTTP 服务端配置：{}", path.display());
+    }
+    Ok((path, changed))
+}
+
+/// NapCat 自己的日志目录（可能有多个，合并取尾部）。
+pub fn log_files(root: &Path) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    // 我们拉子进程时重定向的那一份（含扫码二维码）
+    let ours = launcher_log_at(root);
+    if ours.is_file() {
+        out.push(ours.clone());
+    }
+    if let Ok(rd) = std::fs::read_dir(root.join("logs")) {
+        for e in rd.flatten() {
+            let p = e.path();
+            // 别把自己重定向的那份重复算一次
+            if p.extension().map(|x| x == "log").unwrap_or(false) && p != ours {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
+/// 汇总最近的日志（每个来源取尾部若干字符，按文件拼起来）。
+pub fn tail_logs(root: &Path, max_chars: usize) -> String {
+    let files = log_files(root);
+    if files.is_empty() {
+        return String::new();
+    }
+    let mut out = String::new();
+    for f in files {
+        let Ok(text) = std::fs::read_to_string(&f) else {
+            continue;
+        };
+        let name = f
+            .file_name()
+            .map(|x| x.to_string_lossy().to_string())
+            .unwrap_or_default();
+        let n = text.chars().count();
+        let tail: String = if n > max_chars / 2 {
+            text.chars().skip(n - max_chars / 2).collect()
+        } else {
+            text
+        };
+        out.push_str(&format!("===== {name} =====\n{tail}\n"));
+    }
+    // 只保留最后 max_chars 个字符
+    let n = out.chars().count();
+    if n > max_chars {
+        out.chars().skip(n - max_chars).collect()
+    } else {
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

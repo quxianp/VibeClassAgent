@@ -28,6 +28,7 @@ pub mod job;
 pub mod model;
 pub mod paths;
 pub mod peak;
+pub mod push_profiles;
 pub mod schedule;
 pub mod secrets;
 pub mod setup;

@@ -44,6 +44,8 @@ pub fn dispatch(
         ("GET", "/api/timetable") => get_timetable(opts),
         ("POST", "/api/timetable") => post_timetable(opts, &body),
         ("GET", "/api/jobs") => get_jobs(opts),
+        ("POST", "/api/jobs/run") => job_run(opts, &body),
+        ("GET", "/api/jobs/run") => Ok(job_run_json()),
         ("POST", "/api/models") => list_models(&settings_path, &body),
         ("POST", "/api/clean/preview") => clean_preview(opts),
         ("GET", "/api/daemon/status") => Ok(crate::daemon::status()),
@@ -245,6 +247,10 @@ fn post_llm(path: &Path, body: &str) -> Result<Value> {
 
 fn get_push(path: &Path) -> Result<Value> {
     let s = vca_core::config::load_settings(path).unwrap_or_default();
+    // 各渠道各记一份「地址 + 目标」：settings.yaml 里那对字段是所有渠道共用的，
+    // 切渠道时会看到别人的值（用户就是这么以为「配置没保存」的）。
+    let store = vca_core::push_profiles::PushProfiles::load(&profiles_path(path));
+    let entry = store.get(&s.push.provider);
     Ok(json!({
         "ok": true,
         "provider": s.push.provider,
@@ -252,6 +258,10 @@ fn get_push(path: &Path) -> Result<Value> {
         "target": s.push.target.clone().unwrap_or_default(),
         "target_type": s.push.target_type,
         "max_retries": s.push.max_retries,
+        // 当前渠道记住的那份（界面切回这个渠道时用它预填）
+        "current": entry,
+        // 全部渠道的记忆，供前端切换时取用
+        "profiles": store.profiles,
         // 同样只回"设没设"，不回内容
         "token_set": vca_core::secrets::is_set("VCA_PUSH_TOKEN"),
         "qq_appid_set": vca_core::secrets::is_set("VCA_QQ_APP_ID"),
@@ -262,9 +272,25 @@ fn get_push(path: &Path) -> Result<Value> {
     }))
 }
 
+/// 渠道记忆文件的位置：配置根目录（`<config>/push-profiles.yaml`）。
+fn profiles_path(settings_path: &Path) -> PathBuf {
+    settings_path
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .map(vca_core::push_profiles::default_path)
+        .unwrap_or_else(|| PathBuf::from("push-profiles.yaml"))
+}
+
 fn post_push(path: &Path, body: &str) -> Result<Value> {
     let v: Value = serde_json::from_str(body)?;
     let mut wrote = Vec::new();
+
+    let provider = v
+        .get("provider")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .to_string();
 
     if let Some(p) = v.get("provider").and_then(|x| x.as_str()) {
         if set(path, "push.provider", &yaml_str(p)) {
@@ -284,6 +310,28 @@ fn post_push(path: &Path, body: &str) -> Result<Value> {
     if let Some(tt) = v.get("target_type").and_then(|x| x.as_str()) {
         if set(path, "push.target_type", &yaml_str(tt)) {
             wrote.push("target_type");
+        }
+    }
+
+    // 顺手把这一次的地址与目标记到该渠道名下。
+    // 只记请求里**确实带了**的字段，没带的沿用上次记住的值 ——
+    // 否则「只改目标类型」的一次保存会把地址抹掉。
+    if !provider.trim().is_empty() {
+        let f = profiles_path(path);
+        let mut store = vca_core::push_profiles::PushProfiles::load(&f);
+        let mut entry = store.get(&provider);
+        if let Some(e) = v.get("endpoint").and_then(|x| x.as_str()) {
+            entry.endpoint = e.to_string();
+        }
+        if let Some(t) = v.get("target").and_then(|x| x.as_str()) {
+            entry.target = t.to_string();
+        }
+        if let Some(tt) = v.get("target_type").and_then(|x| x.as_str()) {
+            entry.target_type = tt.to_string();
+        }
+        store.remember(&provider, entry);
+        if let Err(e) = store.save(&f) {
+            tracing::warn!("渠道记忆写不进去（不影响本次保存）：{e}");
         }
     }
 
@@ -502,6 +550,32 @@ fn push_test(path: &Path, body: &str) -> Result<Value> {
 
 // ---------------------------------------------------------------- 通用配置
 
+/// 确保有一个预览令牌。
+///
+/// 预览链接要发给群里的人，所以它得**长期有效** —— 不能用界面那种
+/// 每次启动都变的令牌（daemon 根本拿不到它，链接就拼不出来）。
+/// 生成一次就写进配置，之后一直用它。
+fn ensure_preview_token(settings_path: &Path) {
+    let s = vca_core::config::load_settings(settings_path).unwrap_or_default();
+    if !s.ui.preview_token.trim().is_empty() {
+        return;
+    }
+    // 与界面令牌同样的位混合：够随机，且不引 rand 依赖
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let pid = std::process::id() as u128;
+    let mut x = nanos ^ (pid << 64);
+    x ^= x >> 33;
+    x = x.wrapping_mul(0xff51afd7ed558ccd);
+    x ^= x >> 33;
+    let token = format!("{x:032x}");
+    let _ = set(settings_path, "ui.preview_token", &yaml_str(&token));
+    tracing::info!("已生成预览令牌（内网预览链接会带它）");
+}
+
 fn get_general(path: &Path) -> Result<Value> {
     let s = vca_core::config::load_settings(path).unwrap_or_default();
     Ok(json!({
@@ -515,7 +589,16 @@ fn get_general(path: &Path) -> Result<Value> {
         },
         "cleanup": { "retention_hours": s.cleanup.retention_hours },
         "overlay": { "enabled": s.overlay.enabled, "text": s.overlay.text },
-        "ui": { "tray_icon": s.ui.tray_icon, "tray_badge": s.ui.tray_badge },
+        "ui": {
+            "tray_icon": s.ui.tray_icon,
+            "tray_badge": s.ui.tray_badge,
+            // 开了之后界面服务绑全网卡，并把 preview_base 写进配置 ——
+            // 同一个校园网里的手机就能打开预览页
+            "allow_lan": s.ui.allow_lan,
+            "preview_token": s.ui.preview_token,
+        },
+        // 企业微信：是否先推一张摘要卡片图
+        "push": { "image_card": s.push.image_card, "preview_base": s.push.preview_base },
         "doc": { "formats": s.doc.formats, "max_screenshots": s.doc.max_screenshots },
     }))
 }
@@ -559,6 +642,22 @@ fn post_general(path: &Path, body: &str) -> Result<Value> {
     if let Some(t) = v.get("tray_icon").and_then(|x| x.as_bool()) {
         if set(path, "ui.tray_icon", if t { "true" } else { "false" }) {
             wrote.push("tray_icon");
+        }
+    }
+    // 允许局域网访问：开了之后**必须重启界面服务**才会真的绑全网卡，
+    // 所以界面那边会提示一句 —— 只写配置不改绑定，用户会以为没生效。
+    if let Some(b) = v.get("allow_lan").and_then(|x| x.as_bool()) {
+        if set(path, "ui.allow_lan", if b { "true" } else { "false" }) {
+            wrote.push("allow_lan");
+        }
+        if b {
+            ensure_preview_token(path);
+        }
+    }
+    // 企业微信摘要卡片图
+    if let Some(b) = v.get("image_card").and_then(|x| x.as_bool()) {
+        if set(path, "push.image_card", if b { "true" } else { "false" }) {
+            wrote.push("image_card");
         }
     }
     Ok(json!({ "ok": !wrote.is_empty(), "wrote": wrote }))
@@ -686,6 +785,126 @@ fn post_timetable(opts: &ServeOptions, body: &str) -> Result<Value> {
 }
 
 // ---------------------------------------------------------------- 作业
+
+/// 手动触发一条作业的处理进度。
+struct JobRunState {
+    running: bool,
+    /// 正在跑哪一条。
+    id: String,
+    /// 最近一次的结果/进度。
+    message: String,
+    error: Option<String>,
+}
+
+static JOB_RUN: std::sync::Mutex<JobRunState> = std::sync::Mutex::new(JobRunState {
+    running: false,
+    id: String::new(),
+    message: String::new(),
+    error: None,
+});
+
+fn job_run_json() -> Value {
+    let st = JOB_RUN.lock().unwrap_or_else(|e| e.into_inner());
+    json!({
+        "ok": true,
+        "running": st.running,
+        "id": st.id,
+        "message": st.message,
+        "error": st.error,
+    })
+}
+
+/// 立即处理一条作业 —— 不等处理窗口、也不等错峰时段。
+///
+/// # 为什么要这个口子
+///
+/// 默认策略是**错峰**：DeepSeek 高峰时段全价、低峰半价，所以流水线会等。
+/// 这是省钱的合理默认值，但它不该是**唯一**的选择 —— 用户可能下一节课就要用，
+/// 或者刚配好推送想立刻看效果。「默认延迟」和「不许插队」是两回事。
+///
+/// 放后台线程：一条流水线要几十秒到几分钟，而本服务是单线程的，
+/// 在请求线程里跑会把界面卡死（连"跑到哪一步了"都问不出来）。
+fn job_run(opts: &ServeOptions, body: &str) -> Result<Value> {
+    let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
+    let id = v
+        .get("id")
+        .and_then(|x| x.as_str())
+        .unwrap_or("")
+        .trim()
+        .to_string();
+    if id.is_empty() {
+        return Ok(json!({"ok": false, "error": "没指定是哪一条作业"}));
+    }
+    {
+        let st = JOB_RUN.lock().unwrap_or_else(|e| e.into_inner());
+        if st.running {
+            return Ok(json!({
+                "ok": false,
+                "error": format!("正在处理 {}，等它跑完再试", st.id),
+            }));
+        }
+    }
+    {
+        let mut st = JOB_RUN.lock().unwrap_or_else(|e| e.into_inner());
+        st.running = true;
+        st.id = id.clone();
+        st.message = "已开始，正在处理…".into();
+        st.error = None;
+    }
+
+    let data_root = opts.data_root.clone();
+    let config_root = opts.config_root.clone();
+    let profile = opts.profile.clone();
+    std::thread::spawn(move || {
+        let done = |msg: String, err: Option<String>| {
+            let mut st = JOB_RUN.lock().unwrap_or_else(|e| e.into_inner());
+            st.running = false;
+            st.message = msg;
+            st.error = err;
+        };
+
+        let settings_path = config_root
+            .join("profiles")
+            .join(&profile)
+            .join("settings.yaml");
+        let settings = match vca_core::config::load_settings(&settings_path) {
+            Ok(s) => s,
+            Err(e) => return done(String::new(), Some(format!("读配置失败：{e}"))),
+        };
+
+        let layout = vca_core::paths::Layout::new(data_root, config_root);
+        let store = vca_core::store::JobStore::new(layout.profile_data_dir(&profile));
+        let mut job = match store.load(&id) {
+            Ok(j) => j,
+            Err(e) => return done(String::new(), Some(format!("找不到这条作业：{e}"))),
+        };
+
+        let python_dir = std::env::var("VCA_PYTHON_DIR")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|_| std::path::PathBuf::from("python"));
+
+        let pipe =
+            vca_engine::pipeline::Pipeline::new(&layout, &profile, &settings, &store, &python_dir);
+        let out = pipe.process(&mut job);
+
+        for s in &out.steps {
+            tracing::info!("[手动] [{id}] {s}");
+        }
+        if let Some(e) = &out.error {
+            tracing::warn!("[手动] [{id}] {e}");
+            return done(String::new(), Some(e.clone()));
+        }
+        done(
+            format!(
+                "处理完成：{}",
+                out.steps.last().cloned().unwrap_or_default()
+            ),
+            None,
+        );
+    });
+
+    Ok(json!({"ok": true, "message": "已开始处理，可能要几分钟"}))
+}
 
 fn get_jobs(opts: &ServeOptions) -> Result<Value> {
     let layout = vca_core::paths::Layout::new(opts.data_root.clone(), opts.config_root.clone());

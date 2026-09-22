@@ -422,16 +422,26 @@ async function renderPush() {
     const id = document.getElementById('prov').value;
     const ch = CHANNELS.find(c => c.id === id) || { needs: [] };
     const has = n => ch.needs.includes(n);
+    // 每个渠道各记一份「地址 + 目标」（后端存在 push-profiles.yaml）。
+    // 不能直接用 cfg.endpoint / cfg.target —— 那两个字段是所有渠道共用的，
+    // 切换渠道时会看到别人的值，用户会以为自己的配置被改了。
+    const saved = (cfg.profiles && cfg.profiles[id]) || {};
+    const ep = saved.endpoint !== undefined && saved.endpoint !== ''
+      ? saved.endpoint
+      : (id === cfg.provider ? cfg.endpoint : '');
+    const tg = saved.target !== undefined && saved.target !== ''
+      ? saved.target
+      : (id === cfg.provider ? cfg.target : '');
     // 字段名是复用的（endpoint / token / target 三个），但每个渠道叫法不同 ——
     // 所以按 needs 决定渲染哪个位置、写什么标签。
     const F = {
       endpoint: { id: 'endpoint', key: 'push.f_webhook', ph: 'https://…',
-                  val: cfg.endpoint, badge: '' },
+                  val: ep, badge: '' },
       // OneBot 的地址是「我们自己起个 HTTP 服务，把地址给它」，不是 Webhook
       onebot: { id: 'endpoint', key: 'push.onebot_url', ph: 'http://127.0.0.1:3000',
-                val: cfg.endpoint, badge: '' },
+                val: ep, badge: '' },
       server: { id: 'endpoint', key: 'push.f_server', ph: 'push.f_server_ph',
-                val: cfg.endpoint, badge: '' },
+                val: ep, badge: '' },
       token: { id: 'token', key: 'push.token', ph: 'push.token_ph',
                val: '', badge: cfg.token_set ? t('model.key_set') : t('push.token_unset'), pw: true },
       sign_secret: { id: 'token', key: 'push.f_sign_secret', ph: 'push.f_sign_secret_ph',
@@ -446,13 +456,13 @@ async function renderPush() {
                   val: '', badge: cfg.token_set ? t('model.key_set') : '', pw: true },
       // ttype: 只有「群号 / 用户号」这种目标才需要「群 / 私聊」下拉
       target: { id: 'target', key: 'push.target', ph: 'push.target_ph',
-                val: cfg.target, badge: '', ttype: true },
+                val: tg, badge: '', ttype: true },
       tg_chat: { id: 'target', key: 'push.f_tg_chat', ph: 'push.f_tg_chat_ph',
-                 val: cfg.target, badge: '' },
+                 val: tg, badge: '' },
       mobiles: { id: 'target', key: 'push.f_mobiles', ph: 'push.f_mobiles_ph',
-                 val: cfg.target, badge: '' },
+                 val: tg, badge: '' },
       topic: { id: 'target', key: 'push.f_topic', ph: 'push.f_topic_ph',
-               val: cfg.target, badge: '' },
+               val: tg, badge: '' },
     };
     const field = (f) => {
       const badge = f.badge ? ` <span class="tag ok">${esc(f.badge)}</span>` : '';
@@ -1178,6 +1188,23 @@ async function renderRecord() {
       </label>
     </label>
 
+    <label class="field"><span>${esc(t('rc.lan'))}</span>
+      <label class="check">
+        <input type="checkbox" id="lan" ${d.ui && d.ui.allow_lan ? 'checked' : ''}> ${esc(t('rc.lan_label'))}
+      </label>
+      <p class="hint" style="margin:6px 0 0">${esc(t('rc.lan_hint'))}</p>
+      ${d.ui && d.ui.allow_lan && d.push && d.push.preview_base
+        ? `<p class="hint" style="margin:6px 0 0">${esc(t('rc.lan_url'))}
+             <code>${esc(d.push.preview_base)}</code></p>` : ''}
+    </label>
+
+    <label class="field"><span>${esc(t('rc.image_card'))}</span>
+      <label class="check">
+        <input type="checkbox" id="imgcard" ${d.push && d.push.image_card ? 'checked' : ''}> ${esc(t('rc.image_card_label'))}
+      </label>
+      <p class="hint" style="margin:6px 0 0">${esc(t('rc.image_card_hint'))}</p>
+    </label>
+
     <div class="row">
       <button class="btn primary" id="btn-save">${esc(t('common.save'))}</button>
       <span class="spacer"></span>
@@ -1204,10 +1231,20 @@ async function renderRecord() {
       overlay_enabled: document.getElementById('ov').checked,
       overlay_text: document.getElementById('ovtext').value,
       tray_icon: document.getElementById('tray').checked,
+      allow_lan: document.getElementById('lan').checked,
+      image_card: document.getElementById('imgcard').checked,
     };
     const r = await api('/api/config/general', payload);
-    if (r.ok) toast(t('common.saved'), t('common.wrote_fields') + (r.wrote || []).join('、'));
-    else toast(t('common.save_failed'), r.error || '', 'err');
+    if (r.ok) {
+      toast(t('common.saved'), t('common.wrote_fields') + (r.wrote || []).join('、'));
+      // 局域网访问只写配置不会立刻生效 —— 绑定是在服务启动时做的，
+      // 不说一句用户会以为开关坏了
+      if ((r.wrote || []).includes('allow_lan')) {
+        toast(t('rc.lan'), t('rc.lan_restart'));
+      }
+    } else {
+      toast(t('common.save_failed'), r.error || '', 'err');
+    }
   });
 
   document.getElementById('btn-clean').addEventListener('click', async () => {
@@ -1226,6 +1263,7 @@ async function renderRecord() {
 async function renderJobs() {
   const d = await api('/api/jobs');
   if (!d.ok) { view.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
+  const run = await api('/api/jobs/run');
 
   const rows = (d.jobs || []).map(j => `<tr>
       <td>${esc(j.date)}</td>
@@ -1233,21 +1271,69 @@ async function renderJobs() {
       <td><span class="tag ${j.state === 'PUSHED' ? 'ok' : ''}">${esc(j.state)}</span></td>
       <td class="mono-dim" style="font-size:11.5px">${esc(j.docx ? j.docx.split('\\').pop() : '—')}</td>
       <td class="mono-dim">${esc(j.last_error || '')}</td>
+      <td style="text-align:right">${j.state === 'PUSHED'
+        ? '' : `<button class="btn sm" data-run="${esc(j.id)}">${esc(t('jb.run_now'))}</button>`}</td>
     </tr>`).join('');
 
   view.innerHTML = `
   <div class="card">
     <h2>${esc(t('jb.title'))}</h2>
     <p class="hint">${t('jb.hint')}</p>
+    <p class="hint">${esc(t('jb.run_hint'))}</p>
+    <div class="note" id="run-note" style="display:${run.running ? 'block' : 'none'}">${
+      run.running ? esc(t('jb.running')) : ''}</div>
     <table>
       <thead><tr>
         <th>${esc(t('jb.date'))}</th><th>${esc(t('jb.course'))}</th>
         <th>${esc(t('jb.state'))}</th><th>${esc(t('jb.doc'))}</th><th>${esc(t('jb.note'))}</th>
+        <th></th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>
     ${rows ? '' : `<div class="empty">${esc(t('jb.empty'))}</div>`}
   </div>`;
+
+  // 「立即处理」：跳过处理窗口与错峰等待，现在就跑。
+  // 后端在后台线程做，所以这里轮询状态 —— 一条流水线要跑几分钟。
+  const poll = async () => {
+    const st = await api('/api/jobs/run');
+    const note = document.getElementById('run-note');
+    if (!note) return;
+    if (st.running) {
+      note.style.display = 'block';
+      note.textContent = t('jb.running');
+      setTimeout(poll, 2000);
+      return;
+    }
+    if (st.error) {
+      note.style.display = 'block';
+      note.innerHTML = `<b style="color:#e05c5c">${esc(t('jb.run_failed'))}</b><br>` +
+        `<code style="white-space:pre-wrap">${esc(st.error)}</code>`;
+      return;
+    }
+    if (st.message) {
+      note.style.display = 'block';
+      note.innerHTML = `<b style="color:#7fd3ba">${esc(st.message)}</b>`;
+      // 跑完刷新一次列表，状态就变了
+      setTimeout(() => { if (current === 'jobs') renderJobs(); }, 800);
+    }
+  };
+  if (run.running) poll();
+
+  view.querySelectorAll('button[data-run]').forEach(b =>
+    b.addEventListener('click', async () => {
+      const note = document.getElementById('run-note');
+      note.style.display = 'block';
+      note.textContent = t('jb.starting');
+      b.disabled = true;
+      const r = await api('/api/jobs/run', { id: b.dataset.run });
+      if (!r.ok) {
+        note.innerHTML = `<b style="color:#e05c5c">${esc(r.error || t('common.unknown'))}</b>`;
+        b.disabled = false;
+        return;
+      }
+      poll();
+    }));
 }
 
 /* ---------------------------------------------------------------- 路由 */

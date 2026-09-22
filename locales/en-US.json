@@ -683,7 +683,15 @@
       "clean_preview": "Preview what can be cleaned",
       "scanning": "Scanning...",
       "clean_result": "Scanned {s}, deletable {d}, not due yet {k}.",
-      "clean_warn": "To actually delete, run vca clean --run from the command line."
+      "clean_warn": "To actually delete, run vca clean --run from the command line.",
+      "lan": "LAN access (intranet preview)",
+      "lan_label": "Let devices on the same LAN open the preview page",
+      "lan_hint": "When on, pushes include an \"open online\" link so a phone on the same campus network can read the summary and download the document. When off the port stays local-only. Changing this needs a restart to take effect.",
+      "lan_url": "Current preview address:",
+      "lan_restart": "Saved. Restart the program for it to take effect.",
+      "image_card": "WeCom summary card image",
+      "image_card_label": "Send a summary card image first",
+      "image_card_hint": "Renders the key points as an image and posts it to the group - readable on a phone at a glance. Only applies to the WeCom (webhook) channel; if rendering fails it is skipped quietly and the document is still pushed."
     },
     "jb": {
       "title": "Jobs",
@@ -693,7 +701,12 @@
       "state": "State",
       "doc": "Document",
       "note": "Note",
-      "empty": "No jobs yet. They appear after the first lesson."
+      "empty": "No jobs yet. They appear after the first lesson.",
+      "run_now": "Run now",
+      "run_hint": "By default processing waits for the after-class window (off-peak also halves the model cost). Use \"Run now\" to skip the wait and process this one immediately.",
+      "running": "Processing... this can take a few minutes.",
+      "starting": "Starting...",
+      "run_failed": "Processing failed"
     },
     "logo": [
       " ██╗   ██╗ ██████╗ █████╗ ",

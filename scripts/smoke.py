@@ -68,10 +68,16 @@ def free_port() -> int:
 
 
 class MockOneBot:
-    """假 OneBot 服务端，只记录收到的请求。"""
+    """假 OneBot 服务端：记录收到的请求，并可按脚本制造故障。
+
+    故障脚本用来覆盖「异常与重试」这条路径 —— 正常路径容易测，
+    真正容易出错的是「第一次失败、第二次成功」这种半路出状况的情形。
+    """
 
     def __init__(self) -> None:
         self.received: list[dict] = []
+        # 故障脚本：每次 POST 消费一条。元素是 ("http", 状态码) | ("retcode", 码) | ("ok",)
+        self.script: list[tuple] = []
         outer = self
 
         class H(BaseHTTPRequestHandler):
@@ -87,9 +93,24 @@ class MockOneBot:
                     "auth": self.headers.get("Authorization") or "",
                     "body": body,
                 })
-                resp = json.dumps(
-                    {"status": "ok", "retcode": 0, "data": {"message_id": 999}}
-                ).encode()
+
+                step = outer.script.pop(0) if outer.script else ("ok",)
+                if step[0] == "http":
+                    # 服务端错误：不是 OneBot 的业务错误，而是 HTTP 层就挂了
+                    text = b"<html><body><pre>Internal Server Error</pre></body></html>"
+                    self.send_response(step[1])
+                    self.send_header("Content-Type", "text/html")
+                    self.send_header("Content-Length", str(len(text)))
+                    self.end_headers()
+                    self.wfile.write(text)
+                    return
+                if step[0] == "retcode":
+                    payload = {"status": "failed", "retcode": step[1],
+                               "message": "注入的业务错误"}
+                else:
+                    payload = {"status": "ok", "retcode": 0,
+                               "data": {"message_id": 999}}
+                resp = json.dumps(payload).encode()
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(resp)))
@@ -103,12 +124,22 @@ class MockOneBot:
         self.httpd = HTTPServer(("127.0.0.1", self.port), H)
         threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
 
+    def inject(self, *steps) -> None:
+        """排好接下来几次请求的响应。"""
+        self.script.extend(steps)
+
+    def clear_script(self) -> None:
+        self.script.clear()
+
     @property
     def url(self) -> str:
         return f"http://127.0.0.1:{self.port}"
 
     def stop(self) -> None:
+        # server_close 是必须的：只 shutdown 的话 socket 还开着，
+        # 连接会被 accept 却不响应 —— 测试就变成「等两次超时」而不是「连接被拒」
         self.httpd.shutdown()
+        self.httpd.server_close()
 
 
 # --------------------------------------------------------------- HTTP 客户端
@@ -621,6 +652,43 @@ def run_checks(api: Api, base: str, mock: MockOneBot, cfg: Path) -> None:
         ok("机器人探测带 OneBot 判定", f"端口命中 {r.get('found')}，确认为 OneBot 的 {len(r['onebot'])} 个")
     else:
         bad("机器人探测", str(r)[:160])
+
+    print("\n[6.95] 异常与重试（OneBot）", flush=True)
+
+    # 1) 服务端先 500、再成功：重试必须真的重试，而且最终要成功
+    mock.clear_script()
+    mock.inject(("http", 500))
+    n_before = len(mock.received)
+    r = api.call("/api/push/test", {}, timeout=60)[1] or {}
+    tries = len(mock.received) - n_before
+    if r.get("ok") and tries >= 2:
+        ok("5xx 后自动重试并最终成功", f"共尝试 {tries} 次")
+    else:
+        bad("5xx 重试", f"ok={r.get('ok')} 尝试 {tries} 次：{str(r.get('error'))[:120]}")
+
+    # 2) 业务失败（retcode != 0）：必须如实报错，不能当成成功。
+    #    注入次数要**多于**重试次数 —— 只注入一次的话第二次就成功了，
+    #    那验的是重试、不是错误上报（第一版就是这么写错的）。
+    mock.clear_script()
+    mock.inject(("retcode", 1400), ("retcode", 1400), ("retcode", 1400), ("retcode", 1400))
+    n_before = len(mock.received)
+    r = api.call("/api/push/test", {}, timeout=60)[1] or {}
+    tries = len(mock.received) - n_before
+    if (not r.get("ok")) and "1400" in str(r.get("error") or ""):
+        ok("业务错误被如实报出", f"retcode 出现在错误里，重试 {tries} 次")
+    else:
+        bad("业务错误处理", json.dumps(r, ensure_ascii=False)[:160])
+
+    # 3) 服务端整个消失（模拟 NapCat 崩了/断线）：
+    #    必须给可读错误，而不是卡死或空错误
+    mock.stop()
+    # 超时给足：服务端会重试，每次 30 秒，60 秒正好卡在边界上
+    r = api.call("/api/push/test", {}, timeout=90)[1] or {}
+    err = str(r.get("error") or r.get("_err") or "").strip()
+    if (not r.get("ok")) and err:
+        ok("对端消失时给出可读错误", err[:70])
+    else:
+        bad("对端消失", json.dumps(r, ensure_ascii=False)[:160])
 
     print("\n[7] 守护进程控制", flush=True)
     d = api.call("/api/daemon/status")[1] or {}

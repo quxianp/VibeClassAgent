@@ -151,6 +151,11 @@ pub struct PushDoc {
     pub pdf: Option<String>,
     /// 目标会话（群 id / 用户 id，视渠道而定）。
     pub target: Option<String>,
+    /// 内网预览链接（可选）。收件人点开就能在线看摘要、下载文档。
+    ///
+    /// 只有当一体机开了「允许局域网访问」、且收件人与它同网时才有效；
+    /// 没有就为空，各渠道拼消息时会自动省略这一行。
+    pub preview_url: Option<String>,
 }
 
 impl PushDoc {
@@ -240,6 +245,12 @@ pub struct PushConfig {
     pub max_retries: u32,
     /// 超时（毫秒）。
     pub timeout_ms: i32,
+    /// 企业微信：是否先把摘要渲染成一张卡片图再发。
+    ///
+    /// 群机器人支持 image 消息（base64 直传，**不需要公网图床**），
+    /// 手机上扫一眼就能看完要点。生成失败时静默跳过、继续发后面的文档，
+    /// 不让一张图挡住正经内容。
+    pub image_card: bool,
 }
 
 impl Default for PushConfig {
@@ -254,6 +265,7 @@ impl Default for PushConfig {
             app_secret: String::new(),
             max_retries: 3,
             timeout_ms: 20_000,
+            image_card: true,
         }
     }
 }
@@ -728,6 +740,41 @@ pub struct WeComPusher {
 }
 
 impl WeComPusher {
+    /// 把摘要渲染成卡片图并发出去。
+    ///
+    /// 报文里的 `md5` 是**原始图片字节**的 MD5（不是 base64 之后的）——
+    /// 这一点很容易搞反，搞反了企业微信只会回一句参数错误。
+    fn send_image_card(&self, doc: &PushDoc) -> Result<PushOutcome, PushError> {
+        use base64::Engine;
+
+        let png = std::env::temp_dir().join(format!("vca-card-{}.png", std::process::id()));
+        let body = compose_card_text(doc);
+        crate::card::render_png(&doc.title, &body, &png)
+            .map_err(|e| PushError::Io(format!("渲染摘要卡片失败：{e}")))?;
+
+        let bytes = std::fs::read(&png).map_err(|e| PushError::Io(format!("{e}")))?;
+        let _ = std::fs::remove_file(&png);
+
+        // 官方限制：图片 ≤2MB。超了就直接放弃发图（不阻断后面的文档）
+        if bytes.len() > 2 * 1024 * 1024 {
+            return Err(PushError::Rejected(format!(
+                "卡片图 {} 字节，超过企业微信 2MB 限制",
+                bytes.len()
+            )));
+        }
+
+        let payload = serde_json::json!({
+            "msgtype": "image",
+            "image": {
+                "base64": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                "md5": crate::md5::hex(&bytes),
+            }
+        })
+        .to_string();
+        let resp = http::post_json(&self.cfg.endpoint, &payload, self.cfg.timeout_ms)?;
+        check_wecom(&resp)
+    }
+
     fn send_markdown(&self, doc: &PushDoc) -> Result<PushOutcome, PushError> {
         let content = escape_markdown(&format!("**{}**\n\n{}", doc.title, doc.summary));
         let payload = serde_json::json!({
@@ -748,6 +795,15 @@ impl Pusher for WeComPusher {
     fn send(&self, doc: &PushDoc) -> Result<PushOutcome, PushError> {
         if self.cfg.endpoint.trim().is_empty() {
             return Err(PushError::Missing("企业微信 Webhook 地址".into()));
+        }
+
+        // 先推一张摘要卡片图：手机上扫一眼就能看完要点。
+        // 失败只记日志，绝不阻断后面的文档 —— 图是锦上添花，文档才是正事。
+        if self.cfg.image_card && !doc.summary.trim().is_empty() {
+            match self.send_image_card(doc) {
+                Ok(_) => tracing::info!("摘要卡片图已推送"),
+                Err(e) => tracing::warn!("摘要卡片图发送失败（继续发文档）：{e}"),
+            }
         }
 
         let Some(path) = doc.attachment() else {
@@ -1041,6 +1097,10 @@ fn plain_body(doc: &PushDoc) -> String {
         s.push_str("\n\n");
     }
     s.push_str(doc.summary.trim());
+    // 在线预览链接：内网可访问时才有，收件人点开就能看完整版
+    if let Some(u) = doc.preview_url.as_deref().filter(|x| !x.trim().is_empty()) {
+        s.push_str(&format!("\n\n在线查看：{u}"));
+    }
     if let Some(p) = doc.attachment() {
         s.push_str(&format!("\n\n完整文档：{p}"));
     }
@@ -1220,6 +1280,21 @@ impl Pusher for PushPlusPusher {
     }
 }
 
+/// 卡片图里的正文：摘要 + 预览链接 + 附件路径。
+///
+/// 与聊天里那段 markdown 不同，这里是**给人扫一眼**的：
+/// 所以去掉 markdown 记号（`**`、`-` 之类），保留换行。
+fn compose_card_text(doc: &PushDoc) -> String {
+    let mut s = doc.summary.trim().to_string();
+    if let Some(u) = doc.preview_url.as_deref().filter(|x| !x.trim().is_empty()) {
+        s.push_str(&format!("\n\n在线查看：{u}"));
+    }
+    if let Some(p) = doc.attachment() {
+        s.push_str(&format!("\n\n完整文档：{p}"));
+    }
+    s
+}
+
 /// 只记录不发送。
 #[derive(Debug, Clone, Copy, Default)]
 pub struct DryRunPusher;
@@ -1325,6 +1400,7 @@ mod tests {
             docx: None,
             pdf: None,
             target: None,
+            preview_url: None,
         };
         // 没填服务地址时必须在发请求前就报错
         assert!(matches!(p.send(&d), Err(PushError::Missing(_))));
@@ -1347,6 +1423,7 @@ mod tests {
             docx: None,
             pdf: None,
             target: None,
+            preview_url: None,
         };
         // 目标为空 → 连换 token 都不该尝试
         assert!(matches!(p.send(&d), Err(PushError::Missing(_))));
@@ -1366,6 +1443,7 @@ mod tests {
             docx: None,
             pdf: None,
             target: None,
+            preview_url: None,
         };
         // 有目标但缺 app_id/app_secret —— 应在换 token 这一步就明确报缺配置
         match p.send(&d) {
@@ -1422,6 +1500,7 @@ mod tests {
             docx: None,
             pdf: None,
             target: None,
+            preview_url: None,
         };
         // max_retries = 0 → 只尝试一次且不 sleep，避免拖慢测试
         let out = send_with_retry(&AlwaysFail, &d, 0);
@@ -1439,6 +1518,7 @@ mod tests {
             docx: None,
             pdf: None,
             target: None,
+            preview_url: None,
         };
         let out = send_with_retry(&DryRunPusher, &d, 3);
         assert!(out.success);
@@ -1452,6 +1532,7 @@ mod tests {
             docx: Some("a.docx".into()),
             pdf: Some("a.pdf".into()),
             target: None,
+            preview_url: None,
         };
         assert_eq!(d.attachment(), Some("a.pdf"));
 
@@ -1472,6 +1553,7 @@ mod tests {
             docx: None,
             pdf: None,
             target: None,
+            preview_url: None,
         };
         let out = p.send(&d).unwrap();
         assert!(out.success);
@@ -1488,6 +1570,7 @@ mod tests {
             docx: None,
             pdf: None,
             target: None,
+            preview_url: None,
         };
         assert!(matches!(p.send(&d), Err(PushError::Missing(_))));
     }

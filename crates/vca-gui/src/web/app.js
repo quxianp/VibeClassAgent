@@ -458,7 +458,9 @@ async function renderPush() {
       const badge = f.badge ? ` <span class="tag ok">${esc(f.badge)}</span>` : '';
       const ph = f.ph.includes('.') ? t(f.ph) : f.ph;
       const type = f.pw ? 'password' : 'text';
-      const btn = f.id === 'target' && has('tg_chat')
+      // 两个渠道都需要「帮我把会话 id 找出来」：
+      // Telegram 是 getUpdates，企微智能机器人是连 WS 监听一阵
+      const btn = f.id === 'target' && (has('tg_chat') || id === 'wecom-aibot')
         ? `<button class="btn ghost sm" id="btn-chats">${esc(t('push.f_tg_discover'))}</button>` : '';
       const ttype = f.ttype
         ? `<select id="ttype" style="width:130px">
@@ -516,31 +518,73 @@ async function renderPush() {
     if (chatBtn) chatBtn.addEventListener('click', discoverChats);
   };
 
-  // 让程序去问 Telegram「有哪些会话」，省得用户对着 chat_id 发懵
-  const discoverChats = async () => {
-    const note = document.getElementById('test-note');
-    note.style.display = 'block';
-    note.textContent = t('push.f_tg_discovering');
-    const tok = document.getElementById('token');
-    const r = await api('/api/push/discover', { token: tok ? tok.value.trim() : '' });
-    if (!r.ok) {
+  // 让程序去找会话 id，省得用户对着那串数字发懵。
+  //
+  // Telegram 一次调用就回来；企业微信智能机器人得连上 WS 听十几秒
+  // （它是回调制，会话 id 只在别人说话时送过来）。后端把这两种都放到
+  // 后台线程，所以这里统一是「POST 启动 → 轮询 GET 拿结果」。
+  const renderChats = (r, note) => {
+    if (r.error) {
       note.innerHTML = `<b style="color:#e05c5c">${esc(t('common.unknown'))}</b><br>` +
-        `<code>${esc(r.error || '')}</code><br>${esc(t('push.f_tg_discover_hint'))}`;
+        `<code style="white-space:pre-wrap">${esc(r.error)}</code>`;
       return;
     }
     const chats = r.chats || [];
-    if (!chats.length) {
-      note.innerHTML = `${esc(t('push.f_tg_none'))}<br>${esc(t('push.f_tg_discover_hint'))}`;
-      return;
+    let html = chats.length
+      ? `<b style="color:#7fd3ba">${esc(t('push.f_tg_found'))}</b><br>` +
+        chats.map(c => `· <code>${esc(c.id)}</code> ${esc(c.name)} ` +
+          `<a href="#" data-chat="${esc(c.id)}" style="color:#7fd3ba">${esc(t('push.fill'))}</a>`
+        ).join('<br>')
+      : `${esc(t('push.f_tg_none'))}<br>${esc(t('push.f_tg_discover_hint'))}`;
+    if (r.note) html += `<br><br>${esc(r.note)}`;
+    // 认不出的帧原样贴出来：万一官方改了字段名，用户把这行发过来就能定位
+    if ((r.unknown_frames || []).length) {
+      html += `<br><br><b>${esc(t('push.f_unknown_frames'))}</b><br>` +
+        r.unknown_frames.map(f =>
+          `<code style="white-space:pre-wrap">${esc(f)}</code>`).join('<br>');
     }
-    note.innerHTML = `<b style="color:#7fd3ba">${esc(t('push.f_tg_found'))}</b><br>` +
-      chats.map(c => `· <code>${esc(c.id)}</code> ${esc(c.name)} ` +
-        `<a href="#" data-chat="${esc(c.id)}" style="color:#7fd3ba">${esc(t('push.fill'))}</a>`).join('<br>');
+    note.innerHTML = html;
     note.querySelectorAll('a[data-chat]').forEach(a => a.addEventListener('click', ev => {
       ev.preventDefault();
       const node = document.getElementById('target');
       if (node) node.value = a.dataset.chat;
     }));
+  };
+
+  const discoverChats = async () => {
+    const note = document.getElementById('test-note');
+    note.style.display = 'block';
+    // 两个渠道的等待时间差一个数量级，文案别串台：
+    // 企微要连上 WS 听十几秒，Telegram 一次调用就回来。
+    const prov = document.getElementById('prov').value;
+    note.textContent = prov === 'wecom-aibot'
+      ? t('push.f_aibot_listen')
+      : t('push.f_tg_discovering');
+    const val = (id) => {
+      const n = document.getElementById(id);
+      return n ? n.value.trim() : '';
+    };
+    const start = await api('/api/push/discover', {
+      provider: prov,
+      token: val('token'),
+      wecom_bot_id: val('wecom_bot_id'),
+      wecom_bot_secret: val('wecom_bot_secret'),
+    });
+    if (!start.ok) {
+      note.innerHTML = `<b style="color:#e05c5c">${esc(start.error || '')}</b>`;
+      return;
+    }
+    for (let i = 0; i < 40; i++) {
+      await new Promise(r => setTimeout(r, 1500));
+      const st = await api('/api/push/discover');
+      if (st.running) {
+        note.textContent = `${start.message || ''}（${i + 1}）`;
+        continue;
+      }
+      renderChats(st, note);
+      return;
+    }
+    note.textContent = t('push.f_tg_timeout');
   };
 
   drawFields();

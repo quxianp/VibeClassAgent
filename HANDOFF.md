@@ -185,7 +185,7 @@ C++ 只在"进程内自研音视频流水线"上更强，而本项目选择了�
 
 ### 4.2 去 Python 化
 
-上一任用 Python 做算法侧（转写/文档/去重），拖进 263 MB 的 vendor。
+上一任用 Python 做算法侧（转写/文档/去重），拖进 269 MB 的 vendor。
 **当前架构：纯 Rust**。
 
 - 转写 → whisper.cpp（子进程，官方预编译二进制）
@@ -410,7 +410,7 @@ for ($i=1; $i -le 5; $i++) {
 
 - `dist/`：发布包产物，用 `scripts/package.py` 生成，不要手工编辑
 - `.toolchain/`：本机 Rust 工具链（958 MB，不入库）
-- `python/`：**已被去 Python 化废弃**（vendor 263 MB 仍在磁盘上，不参与构建）。
+- `python/`：**已被去 Python 化废弃**（vendor 269 MB 仍在磁盘上，不参与构建）。
   如果确认没用了可以删，但**先确认 `dist/` 与 `scripts/` 没有引用它**
 
 ---
@@ -427,7 +427,7 @@ for ($i=1; $i -le 5; $i++) {
 - 清理：登记 72 小时计划
 - 端到端：`vca debug e2e` 跑通，结束状态 `Pushed`
 - 插件：`vca plugin list` 列出 10 个；示例插件五个方法全部应答正确
-- **质量关（本轮）**：`scripts\gate.cmd` 三关全过 —— fmt 合规、clippy（`--workspace --all-targets -- -D warnings`）零告警、263 个单元测试全绿
+- **质量关（本轮）**：`scripts\gate.cmd` 三关全过 —— fmt 合规、clippy（`--workspace --all-targets -- -D warnings`）零告警、269 个单元测试全绿
 - **GUI 形态（本轮）**：`python scripts/smoke.py` 41 项全过 ——
   静态资源、令牌保护（错误 token 403）、配置写入与回读、真实发送测试消息
   （自带 mock OneBot 收报文并校验内容）、时间表推导处理窗口、

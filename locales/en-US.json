@@ -592,7 +592,10 @@
       "f_bark_key_ph": "the key shown on the Bark app home screen",
       "f_ntfy_token": "Access token (optional)",
       "f_pp_token": "PushPlus token",
-      "f_pp_token_ph": "found under one-to-one push after signing in to pushplus.plus"
+      "f_pp_token_ph": "found under one-to-one push after signing in to pushplus.plus",
+      "f_tg_timeout": "Timed out without a result. Try again.",
+      "f_unknown_frames": "Some frames had no recognisable chat id (send the line below to the developer and it can be pinpointed):",
+      "f_aibot_listen": "WeCom needs a short listening window"
     },
     "st": {
       "title": "Timetable",

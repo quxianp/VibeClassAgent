@@ -570,6 +570,7 @@ impl<'a> Pipeline<'a> {
         let provider = push::Provider::parse(&self.settings.push.provider)
             .ok_or_else(|| format!("未知推送渠道: {}", self.settings.push.provider))?;
 
+        let preview = preview_link(self.settings, &job.id);
         if self.dry_run || provider == push::Provider::DryRun {
             let p = push_mod::DryRunPusher;
             let doc = PushDoc {
@@ -578,6 +579,7 @@ impl<'a> Pipeline<'a> {
                 docx: job.docx_path.clone(),
                 pdf: job.pdf_path.clone(),
                 target: self.settings.push.target.clone(),
+                preview_url: preview.clone(),
             };
             use vca_platform::push::Pusher;
             let out = p.send(&doc).map_err(|e| e.to_string())?;
@@ -602,6 +604,7 @@ impl<'a> Pipeline<'a> {
             app_secret: push_mod::credentials_for(provider).1,
             max_retries: p.max_retries,
             timeout_ms: 60_000,
+            image_card: p.image_card,
         };
         let pusher = push_mod::make_pusher(&cfg);
         let doc = PushDoc {
@@ -610,6 +613,7 @@ impl<'a> Pipeline<'a> {
             docx: job.docx_path.clone(),
             pdf: job.pdf_path.clone(),
             target: p.target.clone(),
+            preview_url: preview.clone(),
         };
 
         // 带重试；只有全部失败才返回失败 ——
@@ -650,6 +654,23 @@ pub fn is_expired(job: &Job, now: LocalDateTime) -> bool {
         Some(t) => job.state == JobState::Pushed && now >= t,
         None => false,
     }
+}
+
+/// 拼内网预览链接。
+///
+/// 没配 `push.preview_base` 就返回 `None` —— 那样推送里就不带这一行，
+/// 而不是给一个打不开的死链。
+fn preview_link(settings: &vca_core::config::Settings, job_id: &str) -> Option<String> {
+    let base = settings.push.preview_base.trim().trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+    let tok = settings.ui.preview_token.trim();
+    Some(if tok.is_empty() {
+        format!("{base}/{job_id}")
+    } else {
+        format!("{base}/{job_id}?t={tok}")
+    })
 }
 
 #[cfg(test)]

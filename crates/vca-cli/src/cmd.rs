@@ -1257,6 +1257,7 @@ pub fn push_test(layout: &Layout, profile: &str) -> Result<()> {
         app_secret: vca_platform::push::credentials_for(provider).1,
         max_retries: 1,
         timeout_ms: 30_000,
+        image_card: s.push.image_card,
     };
     let pusher = make_pusher(&cfg);
     let doc = PushDoc {
@@ -1265,6 +1266,7 @@ pub fn push_test(layout: &Layout, profile: &str) -> Result<()> {
         docx: None,
         pdf: None,
         target: s.push.target.clone(),
+        preview_url: None,
     };
 
     println!("{}", vca_core::i18n::t("push.test_sending"));

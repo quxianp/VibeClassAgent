@@ -235,6 +235,18 @@ pub struct PushSettings {
     /// 渠道地址（Webhook URL / OneBot 基址）。敏感时留空并走环境变量。
     #[serde(default)]
     pub endpoint: String,
+    /// 企业微信：是否先把摘要渲染成一张卡片图再发（默认开）。
+    ///
+    /// 群机器人的 image 消息是 base64 直传的，**不需要公网图床** ——
+    /// 手机上扫一眼就能看完要点，比一屏纯文字友好得多。
+    #[serde(default = "default_true")]
+    pub image_card: bool,
+    /// 内网预览地址前缀，例如 `http://192.168.1.23:8765/preview`。
+    ///
+    /// 留空 = 推送里不带链接。程序开启「允许局域网访问」时会自动写进来。
+    /// 只对**同一个局域网内**的收件人有效 —— 教室一体机没有公网 IP。
+    #[serde(default)]
+    pub preview_base: String,
 }
 
 fn default_target_type() -> String {
@@ -307,6 +319,20 @@ pub struct UiSettings {
     pub tray_icon: bool,
     /// 是否显示录制中角标（默认关）。
     pub tray_badge: bool,
+    /// 允许局域网内的其它设备打开预览页（默认关）。
+    ///
+    /// 开了之后界面服务会绑到所有网卡，并自动写入 `push.preview_base`。
+    /// 教室一体机与收件人通常在同一个校园网里，这是「发一个能在线看的链接」
+    /// 唯一不需要公网的做法。默认关是因为它把端口暴露给了整个局域网。
+    #[serde(default)]
+    pub allow_lan: bool,
+    /// 预览页的长期令牌（与每次启动都变的界面令牌分开）。
+    ///
+    /// 为什么不用界面那个令牌：它是**每次启动随机生成**的，而推送发生在
+    /// daemon 里 —— 那个进程根本拿不到它，链接就拼不出来。
+    /// 这个是生成一次就存下来的，daemon 与界面读同一份。
+    #[serde(default)]
+    pub preview_token: String,
 }
 
 impl Default for UiSettings {
@@ -314,6 +340,8 @@ impl Default for UiSettings {
         Self {
             tray_icon: true,
             tray_badge: false,
+            allow_lan: false,
+            preview_token: String::new(),
         }
     }
 }

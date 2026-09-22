@@ -30,7 +30,8 @@ hmac = "0.13"
 sha2 = "0.11"
 base64 = "0.22"
 docx-rs = "0.4.22"
-image = { version = "0.25.9", default-features = false, features = ["jpeg"] }
+# png：摘要卡片要存 PNG（企业微信群机器人的图片消息认 png/jpg）。
+image = { version = "0.25.9", default-features = false, features = ["jpeg", "png"] }
 
 [target.'cfg(windows)'.dependencies]
 # WASAPI 音频采集（系统回环 + 麦克风）等 Win32 调用。

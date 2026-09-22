@@ -36,6 +36,7 @@ pub fn dispatch(
         ("POST", "/api/config/push") => post_push(&settings_path, &body),
         ("POST", "/api/push/test") => push_test(&settings_path, &body),
         ("POST", "/api/push/discover") => push_discover(&body),
+        ("GET", "/api/push/discover") => Ok(discover_json()),
         ("GET", "/api/config/general") => get_general(&settings_path),
         ("POST", "/api/config/general") => post_general(&settings_path, &body),
         ("GET", "/api/schedule") => get_schedule(opts),
@@ -322,37 +323,122 @@ fn post_push(path: &Path, body: &str) -> Result<Value> {
     }))
 }
 
-/// 帮用户把 Telegram 的会话 id 找出来。
+/// 会话发现的进度。
 ///
-/// 自己机器人需要 chat_id，而那个东西是一串数字，用户在 Telegram 里根本看不到。
-/// 好在他只要先给机器人发一句话，`getUpdates` 就能把 chat_id 带回来 ——
-/// 这样「配置」这件事就只剩「填个 Token」一步，其余由程序做。
-///
-/// 允许临时传入 token：刚填完还没保存就想试一下，不该强迫他先存一次。
-fn push_discover(body: &str) -> Result<Value> {
-    let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
-    let token = v
-        .get("token")
+/// 为什么要有这么个状态：企业微信智能机器人拉会话要**连上 WS 监听十几秒**
+/// （它是回调制，会话 id 只会在别人说话时送过来）。而本服务是单线程的，
+/// 同步在那儿等十几秒会把整个界面卡死 —— 连「好了没」都问不出来。
+/// 所以挪到后台线程，前端轮询这个状态。
+struct DiscoverState {
+    running: bool,
+    chats: Vec<(String, String)>,
+    /// 认不出的帧样例（官方改字段名时用来定位）。
+    unknown: Vec<String>,
+    error: Option<String>,
+    note: String,
+}
+
+static DISCOVER: std::sync::Mutex<DiscoverState> = std::sync::Mutex::new(DiscoverState {
+    running: false,
+    chats: Vec::new(),
+    unknown: Vec::new(),
+    error: None,
+    note: String::new(),
+});
+
+fn discover_state() -> std::sync::MutexGuard<'static, DiscoverState> {
+    DISCOVER.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+fn discover_json() -> Value {
+    let st = discover_state();
+    json!({
+        "ok": true,
+        "running": st.running,
+        "chats": st.chats
+            .iter()
+            .map(|(id, name)| json!({"id": id, "name": name}))
+            .collect::<Vec<_>>(),
+        "unknown_frames": st.unknown,
+        "error": st.error,
+        "note": st.note,
+    })
+}
+
+/// 取一条凭据：请求体里的优先，其次 secrets.env。
+fn pick(v: &Value, key: &str, env: &str) -> String {
+    v.get(key)
         .and_then(|x| x.as_str())
         .map(str::trim)
         .filter(|x| !x.is_empty())
         .map(String::from)
-        .unwrap_or_else(|| vca_core::secrets::get("VCA_PUSH_TOKEN"));
+        .unwrap_or_else(|| vca_core::secrets::get(env))
+}
 
-    if token.is_empty() {
-        return Ok(json!({"ok": false, "error": "先填 Bot Token（找 @BotFather 要）"}));
+/// 开始找会话。
+///
+/// 两个渠道的取法完全不同：
+/// - **Telegram**：`getUpdates` 一次调用就列出来（用户得先给机器人发过话）。
+/// - **企业微信智能机器人**：企业微信**不提供**会话列表接口，只能连上 WS
+///   监听一段时间，把期间出现过的会话收集起来 —— 所以这里得等十几秒。
+///
+/// 两种都放到后台线程里跑，立刻返回；前端轮询 [`discover_json`]。
+fn push_discover(body: &str) -> Result<Value> {
+    if discover_state().running {
+        return Ok(json!({"ok": false, "error": "上一次还在找，等它跑完"}));
     }
 
-    match vca_platform::bots::telegram_chat_ids(&token, 20_000) {
-        Ok(list) => Ok(json!({
-            "ok": true,
-            "chats": list
-                .into_iter()
-                .map(|(id, name)| json!({"id": id, "name": name}))
-                .collect::<Vec<_>>(),
-        })),
-        Err(e) => Ok(json!({"ok": false, "error": e.to_string()})),
+    let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
+    let provider = v
+        .get("provider")
+        .and_then(|x| x.as_str())
+        .unwrap_or("telegram")
+        .to_string();
+
+    {
+        let mut st = discover_state();
+        st.running = true;
+        st.chats.clear();
+        st.unknown.clear();
+        st.error = None;
+        st.note = String::new();
     }
+
+    let listen = v.get("seconds").and_then(|x| x.as_u64()).unwrap_or(15);
+
+    if provider == "wecom-aibot" {
+        let bot_id = pick(&v, "wecom_bot_id", "VCA_WECOM_BOT_ID");
+        let secret = pick(&v, "wecom_bot_secret", "VCA_WECOM_BOT_SECRET");
+        std::thread::spawn(move || {
+            let cfg = vca_platform::wecom_aibot::AibotConfig::new(&bot_id, &secret, "", "");
+            let mut st = discover_state();
+            match vca_platform::wecom_aibot::list_chats(&cfg, listen) {
+                Ok(found) => {
+                    st.chats = found.chats;
+                    st.unknown = found.unknown_frames;
+                    st.note = "企业微信没有「列出全部会话」的接口（这是它的隐私设计），\
+                               所以这里列的是**最近和机器人有过互动的会话**。\
+                               想把某个群加进来，先把机器人拉进群、在群里 @ 它一次，再来点一次。"
+                        .to_string();
+                }
+                Err(e) => st.error = Some(e.to_string()),
+            }
+            st.running = false;
+        });
+        return Ok(json!({"ok": true, "message": format!("正在监听 {listen} 秒…")}));
+    }
+
+    // Telegram
+    let token = pick(&v, "token", "VCA_PUSH_TOKEN");
+    std::thread::spawn(move || {
+        let mut st = discover_state();
+        match vca_platform::bots::telegram_chat_ids(&token, 20_000) {
+            Ok(list) => st.chats = list,
+            Err(e) => st.error = Some(e.to_string()),
+        }
+        st.running = false;
+    });
+    Ok(json!({"ok": true, "message": "正在问 Telegram 要会话列表…"}))
 }
 
 /// 发一条测试消息（可选带一个本地文件的绝对路径，用来验证附件通道）。
@@ -385,6 +471,8 @@ fn push_test(path: &Path, body: &str) -> Result<Value> {
         app_secret: vca_platform::push::credentials_for(provider).1,
         max_retries: 1,
         timeout_ms: 30_000,
+        // 与真推送取同一个设置值，保证「测试通过 = 真推送也会这么做」
+        image_card: s.push.image_card,
     };
     let attachment = v
         .get("attachment")
@@ -396,6 +484,8 @@ fn push_test(path: &Path, body: &str) -> Result<Value> {
         docx: attachment.clone(),
         pdf: None,
         target: s.push.target.clone(),
+        // 测试消息不带预览链接：它不是某一条具体作业
+        preview_url: None,
     };
 
     let pusher = make_pusher(&cfg);

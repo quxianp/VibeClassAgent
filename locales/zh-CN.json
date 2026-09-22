@@ -592,7 +592,10 @@
       "f_bark_key_ph": "Bark App 首页那串 key",
       "f_ntfy_token": "访问令牌（可留空）",
       "f_pp_token": "PushPlus token",
-      "f_pp_token_ph": "pushplus.plus 登录后在「一对一推送」里能拿到"
+      "f_pp_token_ph": "pushplus.plus 登录后在「一对一推送」里能拿到",
+      "f_tg_timeout": "等太久了，没拿到结果。可以再点一次。",
+      "f_unknown_frames": "有几帧没认出会话 id（把下面这行发给开发者就能定位）：",
+      "f_aibot_listen": "企业微信要先监听一会儿"
     },
     "st": {
       "title": "作息时间表",

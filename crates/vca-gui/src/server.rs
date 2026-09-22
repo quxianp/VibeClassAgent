@@ -147,8 +147,127 @@ fn handle(req: tiny_http::Request, opts: &ServeOptions, token: &str) -> Result<(
             let body = web::resolve(opts.web_dir.as_deref(), "app.js", web::APP_JS);
             respond(req, 200, "application/javascript; charset=utf-8", body)
         }
+        // 内网预览页：推送给群里的链接就落在这里。
+        // 它用**独立的长期令牌**（ui.preview_token），不是界面那个一次性的 ——
+        // 推送由 daemon 发出，那个进程拿不到界面启动时随机生成的令牌。
+        p if p.starts_with("/preview/") => {
+            let want = query_param(query, "t").unwrap_or_default();
+            let have = preview_token(opts);
+            if !have.is_empty() && want != have {
+                return respond(
+                    req,
+                    403,
+                    "text/plain; charset=utf-8",
+                    "预览令牌不对（链接里的 t= 那一段）".into(),
+                );
+            }
+            let id = p.trim_start_matches("/preview/").trim_matches('/');
+            match render_preview(opts, id) {
+                Some(html) => respond(req, 200, "text/html; charset=utf-8", html),
+                None => respond(
+                    req,
+                    404,
+                    "text/html; charset=utf-8",
+                    "<meta charset=\"utf-8\"><p>没有这条作业，或者它已经被清理了。</p>".into(),
+                ),
+            }
+        }
         _ => respond(req, 404, "text/plain; charset=utf-8", "404".into()),
     }
+}
+
+/// 读配置里的预览令牌（读不到就返回空串 —— 那样等于不校验，
+/// 因为默认 `allow_lan` 是关的，端口本来也没暴露出去）。
+fn preview_token(opts: &ServeOptions) -> String {
+    let path = opts
+        .config_root
+        .join("profiles")
+        .join(&opts.profile)
+        .join("settings.yaml");
+    vca_core::config::load_settings(&path)
+        .map(|s| s.ui.preview_token.trim().to_string())
+        .unwrap_or_default()
+}
+
+/// 渲染一条作业的预览页。
+///
+/// 刻意做得很朴素：**只读、无脚本、内联样式**。它要在一个陌生设备
+/// （收件人的手机）上打开，任何外部依赖都可能加载不出来。
+fn render_preview(opts: &ServeOptions, job_id: &str) -> Option<String> {
+    // job_id 来自 URL，先挡掉路径穿越
+    if job_id.is_empty() || job_id.contains("..") || job_id.contains('/') || job_id.contains('\\') {
+        return None;
+    }
+    let dir = opts.data_root.join("jobs").join(job_id);
+    let text = std::fs::read_to_string(dir.join("job.json")).ok()?;
+    let job: vca_core::job::Job = serde_json::from_str(&text).ok()?;
+
+    let esc = |s: &str| {
+        s.replace('&', "&amp;")
+            .replace('<', "&lt;")
+            .replace('>', "&gt;")
+            .replace('"', "&quot;")
+    };
+
+    // 要点不在 job.json 里 —— 它在同目录的 summary.json（提取阶段的产物）。
+    // 读不到就当成"这节课没提取到要点"，而不是让整个页面 404。
+    let summary: Option<vca_platform::llm::LessonSummary> =
+        std::fs::read_to_string(dir.join("summary.json"))
+            .ok()
+            .and_then(|t| serde_json::from_str(&t).ok());
+    let mut points = summary
+        .as_ref()
+        .map(|s| s.points.clone())
+        .unwrap_or_default();
+    if let Some(s) = &summary {
+        points.extend(s.notices.iter().cloned());
+    }
+    let list = if points.is_empty() {
+        "<li>（这节课没有提取到要点）</li>".to_string()
+    } else {
+        points
+            .iter()
+            .map(|p| format!("<li>{}</li>", esc(p)))
+            .collect::<Vec<_>>()
+            .join("")
+    };
+
+    // 文档下载：走 /api 会要 token，所以这里只提示文件在这台机器上
+    let doc = job
+        .docx_path
+        .as_deref()
+        .map(|p| {
+            format!(
+                "<p class=\"dim\">完整文档（含截图）在本机：<code>{}</code></p>",
+                esc(p)
+            )
+        })
+        .unwrap_or_default();
+
+    Some(format!(
+        r#"<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title>
+<style>
+ body{{margin:0;padding:20px;background:#fafafa;color:#202020;
+      font:16px/1.7 "Microsoft YaHei",system-ui,sans-serif}}
+ .card{{max-width:760px;margin:0 auto;background:#fff;border-radius:12px;
+       padding:24px 26px;box-shadow:0 1px 4px rgba(0,0,0,.08)}}
+ h1{{font-size:20px;margin:0 0 4px}}
+ .sub{{color:#666;font-size:14px;margin:0 0 18px}}
+ ul{{padding-left:22px}} li{{margin:6px 0}}
+ .dim{{color:#888;font-size:13px;margin-top:20px;word-break:break-all}}
+ code{{background:#f2f2f2;padding:2px 6px;border-radius:4px}}
+</style></head><body><div class="card">
+<h1>{title}</h1>
+<p class="sub">{date} · {course}</p>
+<ul>{list}</ul>
+{doc}
+</div></body></html>"#,
+        title = esc(&format!("课堂纪要 {} {}", job.date, job.course)),
+        date = esc(&job.date),
+        course = esc(&job.course),
+    ))
 }
 
 /// 拆出路径与查询串。
@@ -171,10 +290,17 @@ pub(crate) fn query_param(query: &str, key: &str) -> Option<String> {
 pub(crate) fn respond(req: tiny_http::Request, code: u16, ctype: &str, body: String) -> Result<()> {
     let header = Header::from_bytes(&b"Content-Type"[..], ctype.as_bytes())
         .map_err(|_| anyhow::anyhow!("构造响应头失败"))?;
+    // 一律 no-store：这个服务的所有内容都是「随程序版本走的」。
+    // 尤其是 app.js / style.css —— 每次启动服务时 URL 只是多了个一次性 token，
+    // **静态资源的路径没变**，浏览器会心安理得地复用缓存，
+    // 结果就是「程序升级了、代码也改了，界面还是老样子」（实测踩过：
+    // 新加的按钮死活不出现，查了半天才发现是缓存）。
+    let cache = Header::from_bytes(&b"Cache-Control"[..], &b"no-store"[..])
+        .map_err(|_| anyhow::anyhow!("构造响应头失败"))?;
     let len = body.len();
     let resp = Response::new(
         StatusCode(code),
-        vec![header],
+        vec![header, cache],
         std::io::Cursor::new(body),
         Some(len),
         None,

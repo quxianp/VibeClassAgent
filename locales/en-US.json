@@ -384,8 +384,6 @@
     "ask_secret": "QQ open-platform AppSecret: ",
     "ask_endpoint": "service address (Enter for http://127.0.0.1:3000): ",
     "ask_token": "access token (Enter to skip): ",
-    "ask_sendkey": "ServerChan SendKey: ",
-    "ask_webhook": "webhook URL: ",
     "done": "channel configured: {name}",
     "write_failed": "Write failed — the config was NOT saved. Please send me the error above.",
     "secret_saved": "credentials written to {p} (never committed; delete it to reconfigure)",

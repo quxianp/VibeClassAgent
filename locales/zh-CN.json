@@ -384,8 +384,6 @@
     "ask_secret": "QQ 开放平台 AppSecret：",
     "ask_endpoint": "服务地址（直接回车用 http://127.0.0.1:3000）：",
     "ask_token": "访问令牌 / access_token（没有就回车跳过）：",
-    "ask_sendkey": "Server 酱 SendKey：",
-    "ask_webhook": "Webhook 地址：",
     "done": "已配置渠道：{name}",
     "write_failed": "写入失败 —— 配置没有真的保存。请把上面的报错发给我。",
     "secret_saved": "凭据已写入 {p}（该文件不入库，可随时删掉重配）",

@@ -480,8 +480,8 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
     let _ = std::io::stdout().flush();
     let provider = match read_line().trim() {
         "1" => Some("wecom"),
-        "2" => Some("webhook"),
-        "3" => Some("serverchan"),
+        "2" => Some("qq"),
+        "3" => Some("onebot"),
         _ => None,
     };
     if let Some(pv) = provider {
@@ -495,7 +495,7 @@ pub fn setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
             vca_core::i18n::tf("cmd.out.       已选：{pv}", &[("pv", (pv))])
         );
         println!("{}", vca_core::i18n::t("cmd.out.推送地址同样走环境变量"));
-        println!("        setx VCA_PUSH_ENDPOINT \"你的Webhook地址\"");
+        println!("        setx VCA_PUSH_ENDPOINT \"企业微信机器人的 Webhook 地址\"");
     } else {
         println!("{}", vca_core::i18n::t("cmd.out.已跳过之后在settings"));
     }
@@ -1224,7 +1224,7 @@ pub fn push_test(layout: &Layout, profile: &str) -> Result<()> {
     }
     let Some(provider) = PushProvider::parse(&id) else {
         println!("{}", vca_core::i18n::tf("push.test_unknown", &[("p", &id)]));
-        println!("   可用渠道：wecom / qq / onebot / serverchan / webhook / wechat-personal");
+        println!("   可用渠道：wecom / wecom-aibot / qq / onebot / wechat-personal");
         return Ok(());
     };
 
@@ -1936,8 +1936,6 @@ pub fn push_setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
         ),
         ("wecom", "企业微信机器人", "只要一个 Webhook 地址，最省事"),
         ("qq", "QQ 官方机器人", "需开放平台审核，凭据较多"),
-        ("serverchan", "Server 酱", "推到微信，只要一个 SendKey"),
-        ("webhook", "通用 Webhook", "发到你自己的服务"),
         (
             "wechat-personal",
             "个人微信（第三方协议）",
@@ -2009,26 +2007,6 @@ pub fn push_setup(layout: &Layout, profile: Option<&str>) -> Result<()> {
             set("push.endpoint", &format!("\"{ep}\""));
             set("push.target", &format!("\"{group}\""));
             set("push.target_type", "\"group\"");
-            save("VCA_PUSH_TOKEN", &token)?;
-        }
-        "serverchan" => {
-            let key = ask("push.ask_sendkey")?;
-            if key.is_empty() {
-                println!("{}", vca_core::i18n::t("push.skipped"));
-                return Ok(());
-            }
-            set("push.provider", "\"serverchan\"");
-            save("VCA_PUSH_TOKEN", &key)?;
-        }
-        "webhook" => {
-            let url = ask("push.ask_webhook")?;
-            if url.is_empty() {
-                println!("{}", vca_core::i18n::t("push.skipped"));
-                return Ok(());
-            }
-            let token = ask("push.ask_token")?;
-            set("push.provider", "\"webhook\"");
-            set("push.endpoint", &format!("\"{url}\""));
             save("VCA_PUSH_TOKEN", &token)?;
         }
         "wechat-personal" => {

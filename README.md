@@ -36,7 +36,7 @@
 | 要点提取（三模式） | ✅ | 付费 API / **免费额度模型** / 浏览器自动化网页版 |
 | 截图关联 | ✅ | dHash 去重 + 按时间戳把讲稿配成图注 |
 | 带图文档生成 | ✅ | Markdown（总生成）+ Word（docx-rs）+ PDF（Edge 无头打印） |
-| 微信 / QQ 推送 | ✅ | 企业微信、**QQ 官方机器人**、**OneBot（自建 QQ）**、通用 Webhook、Server 酱、个人微信中转 |
+| QQ 推送 | ✅ | **OneBot 11（个人账号，配 NapCat）**、**QQ 官方机器人**、第三方自建实现（Lagrange / go-cqhttp） |
 | 推送失败重试 | ✅ | 2/4/8s 递增退避；**全部失败则不删除本地录像** |
 | 72 小时到期清理 | ✅ | 从**推送成功时刻**起算 |
 | 处理时段自动推导 | ✅ | 从时间表挑「午休 / 晚餐」休息段；时间表没标名字时退回所有 ≥15 分钟的休息段 |
@@ -166,7 +166,7 @@ transcriber:
 
 ```yaml
 push:
-  provider: onebot      # wecom | qq(官方) | onebot(第三方) | webhook | serverchan | wechat-personal
+  provider: onebot      # onebot(个人账号/第三方协议) | qq(官方) | wecom | wecom-aibot | wechat-personal | dry-run
   target: "123456789"   # QQ 号 / 群号 / openid
   target_type: private  # private | group
   max_retries: 3

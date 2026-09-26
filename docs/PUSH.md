@@ -94,27 +94,6 @@ vca.exe debug push-test
 
 ---
 
-## 一之三、其它机器人（一行配置就够的）
-
-下面这些都不需要在本地跑任何东西，填一个地址或一个 token 就能用：
-
-| 渠道 | 填什么 | 备注 |
-|---|---|---|
-| Telegram Bot | Bot Token + chat_id | chat_id 可在界面点「获取会话」自动填 |
-| 钉钉机器人 | Webhook（+ 加签密钥） | 加签算法：`hmac(secret, "{ts}\n{secret}")` → base64 → urlencode |
-| 飞书机器人 | Webhook（+ 签名密钥） | 注意与钉钉**不同**：key 是 `"{ts}\n{secret}"`，对**空串**求 HMAC |
-| Discord / Slack | Webhook 地址 | — |
-| Bark | device key | 推到 iOS，可用自建服务器 |
-| ntfy | topic 名 | 开源，可用自建服务器 |
-| PushPlus | token | 推到微信 |
-
-它们的平台协议都不支持附件，所以推送内容是「摘要 + 本机文档路径」。
-要连 Word 一起发，用 OneBot 或企业微信群机器人 Webhook。
-
-凭据（token / 密钥）一律写进 `config/secrets.env`，不进版本库。
-
----
-
 ## 二、AstrBot 放在哪
 
 [AstrBot](https://github.com/AstrBotDevs/AstrBot) 是**对话机器人框架**，
@@ -134,20 +113,30 @@ AstrBot 走 WebSocket、VCA 走 HTTP，两者互不干扰 ——
 **VCA 不需要经过 AstrBot 中转**，直连同一个 NapCat 就行，链路更短、少一层故障点。
 
 什么时候才需要经过 AstrBot：想让课堂纪要触发 AstrBot 里的某个工作流。
-那就反过来 —— 在 AstrBot 侧挂一个 HTTP 接口，VCA 用 `webhook` 通道打过去。
+那就反过来 —— 在 AstrBot 侧挂一个 HTTP 接口，让 AstrBot 自己拉取 VCA 生成的文档。
 
 ---
 
-## 三、其它渠道
+## 三、渠道一览
+
+**现在只保障三类 QQ 侧渠道 + 两类企业微信渠道**（企业微信两项在界面上收进
+「微信机器人（暂不可用）」二级菜单，代码保留但不维护）：
 
 | provider | 需要什么 | 备注 |
 |---|---|---|
-| `wecom` | 群机器人 Webhook URL | **最省事**，不装任何东西 |
-| `onebot` | NapCat 地址 + token + 群号 | 功能最全，能发文件 |
-| `qq` | 开放平台 AppID / Secret + 群号 | 官方合规，但需审核 |
-| `serverchan` | SendKey | 推到微信，只要一个 key |
-| `webhook` | 一个 HTTP 地址 | 对接自己的服务 |
-| `wechat-personal` | 第三方协议服务地址 | **有账号风险**，自行评估 |
+| `onebot` | NapCat 地址 + token + 群号 | **个人账号机器人**，功能最全，能发文件 |
+| `qq` | 开放平台 AppID / Secret + 群号 | **QQ 官方机器人**，合规但需审核 |
+| `wecom` | 群机器人 Webhook URL | 企业微信，**最省事**，不装任何东西 |
+| `wecom-aibot` | 机器人 ID / Secret + chatid | 企业微信智能机器人，只能发文字（暂不可用） |
+| `wechat-personal` | 第三方协议服务地址 | **有账号风险**，自行评估（暂不可用） |
+| `dry-run` | 无 | 只记录不发送，用来验证链路 |
+
+第三方协议实现（Lagrange / go-cqhttp 等）同样走 `onebot` 这一行 ——
+它们都讲 OneBot 11 协议，配置方式与 NapCat 一样。
+
+被砍掉的渠道（钉钉 / 飞书 / Telegram / Discord / Slack / Bark / ntfy /
+PushPlus / Server 酱 / 通用 Webhook / 邮件）的**实现、配置项、环境变量、
+界面入口、文档与测试已全部清理**；推送抽象接口本身没有改动。
 
 ---
 

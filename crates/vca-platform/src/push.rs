@@ -173,11 +173,11 @@ pub struct PushConfig {
     pub provider: Provider,
     /// 地址。
     ///
-    /// - 企业微信 / Server 酱 / 通用 Webhook：完整 URL；
+    /// - 企业微信：机器人 Webhook 的完整 URL；
     /// - OneBot：基址，如 `http://127.0.0.1:3000`；
     /// - QQ 官方机器人：API 基址，留空用生产地址（沙箱为 `https://sandbox.api.sgroup.qq.com`）。
     pub endpoint: String,
-    /// 令牌：企业微信为 Webhook key，Server 酱为 SendKey，OneBot 为 access_token。
+    /// 令牌：企业微信为 Webhook key，OneBot 为 access_token。
     pub token: String,
     /// 目标：QQ 号 / 群号 / 用户 openid。
     pub target: String,

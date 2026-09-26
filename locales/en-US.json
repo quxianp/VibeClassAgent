@@ -108,7 +108,7 @@
       "正在拉取模型列表…": "      Fetching model list …",
       "已跳过之后可用model配置": "      Skipped — configure later with /model.",
       "55推送渠道把文档发到微信Q": "[5/5] Push channel (sends documents to WeChat / QQ)",
-      "1企业微信机器人2通用Web": "      1) WeCom bot   2) Generic webhook   3) ServerChan   0) Skip for now",
+      "1企业微信机器人2通用Web": "      1) WeCom bot   2) QQ official bot   3) OneBot (personal account)   0) Skip for now",
       "请选择0-3回车0": "      Pick [0-3, enter=0]: ",
       "推送地址同样走环境变量": "      The push URL also comes from an environment variable:",
       "已跳过之后在settings": "      Skipped (set push.provider in settings.yaml later)",

@@ -191,6 +191,8 @@ pub fn import_classisland(
                 end: end_hhmm,
                 kind: SlotKind::Class,
                 name: None,
+                default_subject: None,
+                is_hidden: false,
             });
         } else {
             slots.push(TimetableSlot {
@@ -203,6 +205,8 @@ pub fn import_classisland(
                 } else {
                     Some(brk.to_string())
                 },
+                default_subject: None,
+                is_hidden: false,
             });
         }
     }
@@ -381,6 +385,7 @@ pub fn import_classisland(
         is_active: true,
         source: "classisland".to_string(),
         slots,
+        ..Timetable::default()
     };
 
     let weekend: Vec<ClassEntry> = all_entries
@@ -399,6 +404,7 @@ pub fn import_classisland(
         week_template: ClassPlan {
             cycle: "every".to_string(),
             entries: weekday,
+            ..ClassPlan::default()
         },
         weekend_template: Some(WeekendTemplate {
             source: "new".to_string(),
@@ -634,6 +640,7 @@ pub fn csv_to_schedule(rows: &[CsvRow], source: &str) -> CsvImport {
             week_template: ClassPlan {
                 cycle: "every".to_string(),
                 entries: weekday,
+                ..ClassPlan::default()
             },
             weekend_template: if weekend.is_empty() {
                 None
@@ -798,9 +805,17 @@ pub fn write_current(
     }
 
     let tt_path = tt_dir.join("current.yaml");
-    let tf = TimetableFile {
-        timetables: vec![timetable.clone()],
-    };
+    // 导入是**新增**一份时间表，不是把已有的顶掉 —— ClassIsland 也是这样往档案里加。
+    // 旧版本这里直接覆盖成单份，用户已经排好的作息会连招呼都不打地消失。
+    let mut list = crate::config::load_timetables(&tt_path);
+    list.retain(|t| t.id != timetable.id);
+    for t in list.iter_mut() {
+        t.is_active = false;
+    }
+    let mut added = timetable.clone();
+    added.is_active = true;
+    list.push(added);
+    let tf = TimetableFile { timetables: list };
     std::fs::write(
         &tt_path,
         crate::config::to_yaml(&tf).map_err(|e| ImportError::Invalid(e.to_string()))?,
@@ -821,4 +836,142 @@ pub fn write_current(
     })?;
 
     Ok((tt_path, sc_path))
+}
+
+/// 课表是不是「新格式」：只写了第几节、或 `start`/`end` 还没被时间表补全。
+///
+/// 判据故意选得保守 —— 只要有一条能靠时间表补出信息，就值得升一次级；
+/// 全都补不出东西的旧课表（时间表也没配好）就原样放着，不去动用户的文件。
+fn needs_upgrade(f: &ScheduleFile, tt: &[Timetable]) -> bool {
+    let mut probe = f.clone();
+    probe.normalize(tt);
+    let changed = |a: &[ClassEntry], b: &[ClassEntry]| {
+        a.iter().zip(b).any(|(x, y)| {
+            (x.start.trim().is_empty() && !y.start.trim().is_empty())
+                || (x.period.is_none() && y.period.is_some())
+        })
+    };
+    changed(&f.week_template.entries, &probe.week_template.entries)
+        || f.weekend_template
+            .as_ref()
+            .zip(probe.weekend_template.as_ref())
+            .map(|(a, b)| changed(&a.entries, &b.entries))
+            .unwrap_or(false)
+}
+
+/// 把旧格式的课表就地升级成新格式，升级前把原文件另存为 `.bak`。
+///
+/// 只在确实需要升级时才落盘：格式已经对了的配置一个字节都不动，
+/// 免得每次启动都重写一遍用户的文件。
+///
+/// 返回 `Some(备份路径)` 表示做了升级。
+pub fn upgrade_schedule_file(schedule_path: &Path, timetables: &[Timetable]) -> Option<PathBuf> {
+    let text = std::fs::read_to_string(schedule_path).ok()?;
+    let mut f: ScheduleFile = serde_yaml::from_str(&text).ok()?;
+    if !needs_upgrade(&f, timetables) {
+        return None;
+    }
+    f.normalize(timetables);
+    let bak = schedule_path.with_extension("yaml.bak");
+    let _ = std::fs::write(&bak, &text);
+    let out = crate::config::to_yaml(&f).ok()?;
+    std::fs::write(schedule_path, out).ok()?;
+    Some(bak)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{SlotKind, TimetableSlot};
+
+    fn tmp(name: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("vca-import-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    fn tt() -> Timetable {
+        Timetable {
+            id: "default".into(),
+            name: "作息".into(),
+            is_active: true,
+            slots: vec![TimetableSlot {
+                period: Some(1),
+                start: "08:00".into(),
+                end: "08:40".into(),
+                kind: SlotKind::Class,
+                ..TimetableSlot::default()
+            }],
+            ..Timetable::default()
+        }
+    }
+
+    fn empty_schedule() -> ScheduleFile {
+        serde_yaml::from_str("week_template:\n  entries: []\n").unwrap()
+    }
+
+    #[test]
+    fn upgrade_backs_up_and_fills_times() {
+        let d = tmp("upgrade");
+        let p = d.join("current.yaml");
+        // 旧格式：只有节次，没有起止时间
+        std::fs::write(
+            &p,
+            "teachers: []\nweek_template:\n  entries:\n    - { day: Mon, period: 1, course: 语文, teacherId: t1 }\n",
+        )
+        .unwrap();
+
+        let bak = upgrade_schedule_file(&p, &[tt()]).expect("旧格式应触发升级");
+        assert!(bak.is_file(), "原文件要留一份备份");
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(
+            text.contains("08:00"),
+            "升级后应写入算出来的开始时间：{text}"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn upgrade_leaves_good_file_untouched() {
+        let d = tmp("noop");
+        let p = d.join("current.yaml");
+        let good = "teachers: []\nweek_template:\n  entries:\n    - { day: Mon, period: 1, start: \"08:00\", end: \"08:40\", course: 语文, teacherId: t1 }\n";
+        std::fs::write(&p, good).unwrap();
+        assert!(
+            upgrade_schedule_file(&p, &[tt()]).is_none(),
+            "格式已对就不该动它"
+        );
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), good);
+        assert!(
+            !p.with_extension("yaml.bak").exists(),
+            "没升级就不该产生备份"
+        );
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn write_current_appends_instead_of_replacing() {
+        let d = tmp("append");
+        let old = Timetable {
+            id: "old".into(),
+            name: "旧作息".into(),
+            is_active: true,
+            ..Timetable::default()
+        };
+        write_current(&d, &old, &empty_schedule()).unwrap();
+
+        let new = Timetable {
+            id: "imported".into(),
+            name: "导入的".into(),
+            ..Timetable::default()
+        };
+        write_current(&d, &new, &empty_schedule()).unwrap();
+
+        let list = crate::config::load_timetables(&d.join("timetable").join("current.yaml"));
+        assert_eq!(list.len(), 2, "导入应新增一份而不是顶掉已有的");
+        assert_eq!(list.iter().filter(|t| t.is_active).count(), 1);
+        assert_eq!(list.iter().find(|t| t.is_active).unwrap().id, "imported");
+        let _ = std::fs::remove_dir_all(&d);
+    }
 }

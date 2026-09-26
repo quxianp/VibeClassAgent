@@ -371,23 +371,25 @@ async function renderModel() {
 // 其余渠道**代码完整保留**（点开能填、能保存），但在界面上标为「暂不可用」——
 // 用户明确要求「暂时搁置微信端与外网端，但不删代码，要备注」。
 // off: true 就是那条备注，不是禁用。
+// 推送渠道。
+//
+// 只保留三类（用户 2026-09 的定向改造要求）：
+//   1) QQ 个人账号机器人  ← OneBot 11，也就是 NapCat / Lagrange / go-cqhttp 那些「第三方协议实现」
+//   2) QQ 官方机器人
+//   3) 微信侧             ← 折叠进二级菜单，标「暂不可用」，但代码完整保留
+//
+// 前两类第一项**同时**覆盖了「个人账号机器人」与「第三方协议实现」——
+// 在代码里它们本来就是同一个 Provider（见 push.rs 的 Provider::OneBot 注释），
+// 所以这里不需要再拆成两个。
+// off: true 表示「折叠 + 暂不可用」，不是禁用。
 const CHANNELS = [
-  { id: 'onebot', name: 'OneBot 11（NapCat / Lagrange）', needs: ['endpoint', 'target', 'token'] },
+  { id: 'onebot', name: 'QQ 个人账号机器人（OneBot 11 / NapCat）',
+    needs: ['endpoint', 'target', 'token'] },
   { id: 'qq', name: 'QQ 官方机器人', needs: ['target', 'qq_app_id', 'qq_app_secret'] },
 
   { id: 'wecom', name: '企业微信机器人（Webhook）', needs: ['endpoint'], off: true },
   { id: 'wecom-aibot', name: '企业微信智能机器人（新版）',
     needs: ['endpoint', 'target', 'wecom_bot_id', 'wecom_bot_secret'], off: true },
-  { id: 'telegram', name: 'Telegram Bot', needs: ['tg_token', 'tg_chat'], off: true },
-  { id: 'dingtalk', name: '钉钉机器人', needs: ['endpoint', 'sign_secret', 'mobiles'], off: true },
-  { id: 'feishu', name: '飞书机器人', needs: ['endpoint', 'sign_secret'], off: true },
-  { id: 'discord', name: 'Discord Webhook', needs: ['endpoint'], off: true },
-  { id: 'slack', name: 'Slack Webhook', needs: ['endpoint'], off: true },
-  { id: 'bark', name: 'Bark（iOS 推送）', needs: ['server', 'bark_key'], off: true },
-  { id: 'ntfy', name: 'ntfy（可自建）', needs: ['server', 'topic', 'ntfy_token'], off: true },
-  { id: 'pushplus', name: 'PushPlus（推微信）', needs: ['pp_token'], off: true },
-  { id: 'serverchan', name: 'Server 酱', needs: ['token'], off: true },
-  { id: 'webhook', name: '通用 Webhook', needs: ['endpoint', 'token'], off: true },
   { id: 'wechat-personal', name: '个人微信（第三方协议）',
     needs: ['endpoint', 'target', 'token'], off: true },
 ];
@@ -397,9 +399,15 @@ async function renderPush() {
   state.push = cfg;
   if (!cfg.ok) { view.innerHTML = `<div class="empty">${esc(cfg.error)}</div>`; return; }
 
-  const opts = CHANNELS.map(c =>
-    `<option value="${c.id}" ${c.id === cfg.provider ? 'selected' : ''}>${esc(c.name)}${
-      c.off ? '（' + esc(t('push.unavailable')) + '）' : ''}</option>`).join('');
+  // 二级菜单：QQ 侧可用、微信侧折叠并标「暂不可用」。
+  // 用原生 optgroup —— 它本来就是分组控件，不必自己写一套折叠。
+  const opts = [
+    { label: t('push.group_qq'), items: CHANNELS.filter(c => !c.off) },
+    { label: t('push.group_wechat') + '（' + t('push.unavailable') + '）',
+      items: CHANNELS.filter(c => c.off) },
+  ].map(g => `<optgroup label="${esc(g.label)}">` + g.items.map(c =>
+      `<option value="${c.id}" ${c.id === cfg.provider ? 'selected' : ''}>${
+        esc(c.name)}</option>`).join('') + '</optgroup>').join('');
 
   view.innerHTML = `
   <div class="card">
@@ -449,25 +457,11 @@ async function renderPush() {
       // OneBot 的地址是「我们自己起个 HTTP 服务，把地址给它」，不是 Webhook
       onebot: { id: 'endpoint', key: 'push.onebot_url', ph: 'http://127.0.0.1:3000',
                 val: ep, badge: '' },
-      server: { id: 'endpoint', key: 'push.f_server', ph: 'push.f_server_ph',
-                val: ep, badge: '' },
       token: { id: 'token', key: 'push.token', ph: 'push.token_ph',
                val: '', badge: cfg.token_set ? t('model.key_set') : t('push.token_unset'), pw: true },
-      sign_secret: { id: 'token', key: 'push.f_sign_secret', ph: 'push.f_sign_secret_ph',
-                     val: '', badge: cfg.token_set ? t('model.key_set') : t('push.f_optional'), pw: true },
-      tg_token: { id: 'token', key: 'push.f_tg_token', ph: 'push.f_tg_token_ph',
-                  val: '', badge: cfg.token_set ? t('model.key_set') : '', pw: true },
-      bark_key: { id: 'token', key: 'push.f_bark_key', ph: 'push.f_bark_key_ph',
-                  val: '', badge: cfg.token_set ? t('model.key_set') : '', pw: true },
-      ntfy_token: { id: 'token', key: 'push.f_ntfy_token', ph: 'push.f_optional',
-                    val: '', badge: cfg.token_set ? t('model.key_set') : t('push.f_optional'), pw: true },
-      pp_token: { id: 'token', key: 'push.f_pp_token', ph: 'push.f_pp_token_ph',
-                  val: '', badge: cfg.token_set ? t('model.key_set') : '', pw: true },
       // ttype: 只有「群号 / 用户号」这种目标才需要「群 / 私聊」下拉
       target: { id: 'target', key: 'push.target', ph: 'push.target_ph',
                 val: tg, badge: '', ttype: true },
-      tg_chat: { id: 'target', key: 'push.f_tg_chat', ph: 'push.f_tg_chat_ph',
-                 val: tg, badge: '' },
       mobiles: { id: 'target', key: 'push.f_mobiles', ph: 'push.f_mobiles_ph',
                  val: tg, badge: '' },
       topic: { id: 'target', key: 'push.f_topic', ph: 'push.f_topic_ph',
@@ -477,10 +471,9 @@ async function renderPush() {
       const badge = f.badge ? ` <span class="tag ok">${esc(f.badge)}</span>` : '';
       const ph = f.ph.includes('.') ? t(f.ph) : f.ph;
       const type = f.pw ? 'password' : 'text';
-      // 两个渠道都需要「帮我把会话 id 找出来」：
-      // Telegram 是 getUpdates，企微智能机器人是连 WS 监听一阵
-      const btn = f.id === 'target' && (has('tg_chat') || id === 'wecom-aibot')
-        ? `<button class="btn ghost sm" id="btn-chats">${esc(t('push.f_tg_discover'))}</button>` : '';
+      // 企微智能机器人需要「帮我把会话 id 找出来」：
+      const btn = f.id === 'target' && id === 'wecom-aibot'
+        ? `<button class="btn ghost sm" id="btn-chats">${esc(t('push.f_discover'))}</button>` : '';
       const ttype = f.ttype
         ? `<select id="ttype" style="width:130px">
              <option value="group" ${cfg.target_type === 'group' ? 'selected' : ''}>${esc(t('push.group'))}</option>
@@ -525,16 +518,9 @@ async function renderPush() {
         <input type="password" id="qq_app_secret" placeholder="${esc(t('push.secret'))}"></label>`);
     }
     // 顺序按「最该先填的排前面」：地址 → 凭据 → 目标
-    if (has('server')) parts.push(field(F.server));
-    else if (has('endpoint')) parts.push(field(id === 'onebot' ? F.onebot : F.endpoint));
+    if (has('endpoint')) parts.push(field(id === 'onebot' ? F.onebot : F.endpoint));
     if (has('token')) parts.push(field(F.token));
-    if (has('sign_secret')) parts.push(field(F.sign_secret));
-    if (has('tg_token')) parts.push(field(F.tg_token));
-    if (has('bark_key')) parts.push(field(F.bark_key));
-    if (has('ntfy_token')) parts.push(field(F.ntfy_token));
-    if (has('pp_token')) parts.push(field(F.pp_token));
-    if (has('tg_chat')) parts.push(field(F.tg_chat));
-    else if (has('target')) parts.push(field(F.target));
+    if (has('target')) parts.push(field(F.target));
     if (has('mobiles')) parts.push(field(F.mobiles));
     if (has('topic')) parts.push(field(F.topic));
     if (id === 'wecom-aibot') parts.push(`<div class="note">${t('push.aibot_note')}</div>`);
@@ -546,7 +532,6 @@ async function renderPush() {
 
   // 让程序去找会话 id，省得用户对着那串数字发懵。
   //
-  // Telegram 一次调用就回来；企业微信智能机器人得连上 WS 听十几秒
   // （它是回调制，会话 id 只在别人说话时送过来）。后端把这两种都放到
   // 后台线程，所以这里统一是「POST 启动 → 轮询 GET 拿结果」。
   const renderChats = (r, note) => {
@@ -557,11 +542,11 @@ async function renderPush() {
     }
     const chats = r.chats || [];
     let html = chats.length
-      ? `<b style="color:#7fd3ba">${esc(t('push.f_tg_found'))}</b><br>` +
+      ? `<b style="color:#7fd3ba">${esc(t('push.f_discover_found'))}</b><br>` +
         chats.map(c => `· <code>${esc(c.id)}</code> ${esc(c.name)} ` +
           `<a href="#" data-chat="${esc(c.id)}" style="color:#7fd3ba">${esc(t('push.fill'))}</a>`
         ).join('<br>')
-      : `${esc(t('push.f_tg_none'))}<br>${esc(t('push.f_tg_discover_hint'))}`;
+      : `${esc(t('push.f_discover_none'))}<br>${esc(t('push.f_discover_hint'))}`;
     if (r.note) html += `<br><br>${esc(r.note)}`;
     // 认不出的帧原样贴出来：万一官方改了字段名，用户把这行发过来就能定位
     if ((r.unknown_frames || []).length) {
@@ -580,12 +565,10 @@ async function renderPush() {
   const discoverChats = async () => {
     const note = document.getElementById('test-note');
     note.style.display = 'block';
-    // 两个渠道的等待时间差一个数量级，文案别串台：
-    // 企微要连上 WS 听十几秒，Telegram 一次调用就回来。
-    const prov = document.getElementById('prov').value;
+      const prov = document.getElementById('prov').value;
     note.textContent = prov === 'wecom-aibot'
       ? t('push.f_aibot_listen')
-      : t('push.f_tg_discovering');
+      : t('push.f_discover_ing');
     const val = (id) => {
       const n = document.getElementById(id);
       return n ? n.value.trim() : '';
@@ -610,7 +593,7 @@ async function renderPush() {
       renderChats(st, note);
       return;
     }
-    note.textContent = t('push.f_tg_timeout');
+    note.textContent = t('push.f_discover_timeout');
   };
 
   drawFields();
@@ -892,53 +875,88 @@ async function renderTimetable() {
   state.timetable = d;
   if (!d.ok) { view.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
 
-  const slots = d.slots || [];
+  // 当前编辑的时间表。ClassIsland 的编辑窗口是「左侧选、中间编、右侧看详情」，
+  // 这里保持同样的心智：选中的那一份才是下面所有操作的作用对象。
+  let list = (d.all || []).map(t => ({ id: t.id || 'default', name: t.name || t.id || 'default', slots: (t.slots || []).slice() }));
+  if (!list.length) list = [{ id: 'default', name: '', slots: [] }];
+  let cur = Math.max(0, list.findIndex(t => t.id === d.id));
+  let sel = 0; // 选中的时间点（表格行的下标）
+
   view.innerHTML = `
   <div class="card">
     <h2>${esc(t('st.title'))}</h2>
     <p class="hint">${t('st.hint')}</p>
-
-    <div class="row wrap" style="margin-bottom:12px">
-      <button class="btn sm" id="btn-ci">${esc(t('st.import_ci'))}</button>
-      <input type="file" id="ci-file" accept=".json,application/json" style="display:none">
-      <span class="spacer"></span>
+    <div class="tt-wrap">
+      <div class="tt-side">
+        <div class="tt-side-hd">${esc(t('st.pick_timetable'))}</div>
+        <div id="tt-list"></div>
+        <button class="btn sm" id="btn-tt-new" style="margin-top:8px">${esc(t('st.self.new'))}</button>
+        <div class="row" style="margin-top:6px">
+          <button class="btn sm" id="btn-tt-copy">${esc(t('st.self.copy'))}</button>
+          <button class="btn sm danger" id="btn-tt-del">${esc(t('st.self.del'))}</button>
+        </div>
+        <button class="btn sm" id="btn-ci" style="margin-top:10px">${esc(t('st.import_ci'))}</button>
+        <input type="file" id="ci-file" accept=".json,application/json" style="display:none">
+      </div>
+      <div class="tt-main">
+        <input type="text" id="tt-name" style="margin-bottom:10px;font-weight:600">
+        <div class="slot-row slot-head">
+          <div>${esc(t('st.col_period'))}</div><div>${esc(t('st.col_start'))}</div>
+          <div>${esc(t('st.col_end'))}</div><div>${esc(t('st.col_dur'))}</div>
+          <div>${esc(t('st.col_kind'))}</div><div>${esc(t('st.col_name'))}</div>
+          <div>${esc(t('st.col_no'))}</div>
+        </div>
+        <div id="slots"></div>
+        <div class="row" style="margin-top:10px">
+          <button class="btn sm" data-add="class">+ ${esc(t('st.kind_class'))}</button>
+          <button class="btn sm" data-add="break">+ ${esc(t('st.kind_break_ci'))}</button>
+          <span class="spacer"></span>
+          <span style="font-size:12px;color:var(--text-dim2)">${esc(t('st.auto'))}</span>
+          <button class="btn primary" id="btn-save">${esc(t('common.save'))}</button>
+        </div>
+        <p class="hint" style="margin-top:8px">${esc(t('st.default_40'))}</p>
+        <div class="tl" id="tl"></div>
+        <div class="note" id="win-note" style="display:none"></div>
+        <div class="note" id="detail" style="display:block;margin-top:10px"></div>
+      </div>
     </div>
-
-    <div class="slot-row slot-head">
-      <div>${esc(t('st.col_no'))}</div><div>${esc(t('st.col_start'))}</div>
-      <div>${esc(t('st.col_end'))}</div><div>${esc(t('st.col_kind'))}</div>
-      <div>${esc(t('st.col_name'))}</div><div></div>
-    </div>
-    <div id="slots"></div>
-    <div class="row" style="margin-top:12px">
-      <button class="btn sm" id="btn-add">${esc(t('st.add'))}</button>
-      <span class="spacer"></span>
-      <button class="btn primary" id="btn-save">${esc(t('common.save'))}</button>
-    </div>
-    <div class="note" id="win-note" style="display:none"></div>
   </div>`;
 
   const host = document.getElementById('slots');
+  const nameEl = document.getElementById('tt-name');
+  const COLS = '52px 82px 82px 74px 96px 1fr 138px';
 
-  // 序号跟着顺序走：挪动/插入/删除之后必须重编，否则编号会与实际次序对不上
-  const renumber = () => {
-    [...host.children].forEach((r, i) => {
-      r.firstElementChild.textContent = i + 1;
-      // 第一行不能再上移、最后一行不能再下移（按钮直接置灰，比点了没反应清楚）
-      r.querySelector('[data-op="up"]').disabled = i === 0;
-      r.querySelector('[data-op="down"]').disabled = i === host.children.length - 1;
-    });
+  /* ---- 左侧：时间表列表（对应 ClassIsland 左侧那一栏）---- */
+  const paintList = () => {
+    document.getElementById('tt-list').innerHTML = list.map((x, i) =>
+      `<div class="tt-item ${i === cur ? 'active' : ''}" data-i="${i}">${esc(x.name || x.id)}</div>`).join('');
+    document.querySelectorAll('#tt-list .tt-item').forEach(el =>
+      el.addEventListener('click', () => {
+        cur = Number(el.dataset.i);
+        sel = 0;
+        paintAll();
+      }));
+    nameEl.value = list[cur].name;
   };
 
-  const build = (s) => el(`<div class="slot-row">
+  /* ---- 数字列与时长：时长由起止时间算出来，改一个另一个跟着动 ---- */
+  const durOf = (s, e) => {
+    const a = /^(\d{1,2}):(\d{2})$/.exec(String(s).trim());
+    const b = /^(\d{1,2}):(\d{2})$/.exec(String(e).trim());
+    if (!a || !b) return '';
+    return String(Number(b[1]) * 60 + Number(b[2]) - (Number(a[1]) * 60 + Number(a[2])));
+  };
+
+  const build = (s, i) => el(`<div class="slot-row" data-i="${i}" style="grid-template-columns:${COLS}">
       <div style="color:var(--text-dim2);font-family:var(--mono);font-size:12px;padding-top:8px">0</div>
-      <input type="text" value="${esc(s.start || '08:00')}" placeholder="08:00">
-      <input type="text" value="${esc(s.end || '08:45')}" placeholder="08:45">
-      <select>
-        <option value="class" ${s.kind === 'class' ? 'selected' : ''}>${esc(t('st.kind_class'))}</option>
-        <option value="break" ${s.kind === 'break' ? 'selected' : ''}>${esc(t('st.kind_break'))}</option>
+      <input type="text" data-k="start" value="${esc(s.start || '08:00')}" placeholder="08:00">
+      <input type="text" data-k="end" value="${esc(s.end || '08:45')}" placeholder="08:45">
+      <input type="text" data-k="duration" value="${esc(durOf(s.start || '08:00', s.end || '08:45'))}">
+      <select data-k="kind">
+        <option value="class" ${s.kind !== 'break' ? 'selected' : ''}>${esc(t('st.kind_class'))}</option>
+        <option value="break" ${s.kind === 'break' ? 'selected' : ''}>${esc(t('st.kind_break_ci'))}</option>
       </select>
-      <input type="text" value="${esc(s.name || '')}" placeholder="${esc(t('st.name_ph'))}">
+      <input type="text" data-k="name" value="${esc(s.name || '')}" placeholder="${esc(t('st.name_ph'))}">
       <div class="row-ops">
         <button class="btn sm" data-op="up" title="${esc(t('st.op_up'))}">↑</button>
         <button class="btn sm" data-op="down" title="${esc(t('st.op_down'))}">↓</button>
@@ -947,125 +965,255 @@ async function renderTimetable() {
       </div>
     </div>`);
 
-  /** 插到 after 之后；after 为空则追加到末尾。 */
-  const addRow = (s, after) => {
-    const row = build(s);
-    if (after) host.insertBefore(row, after.nextElementSibling);
-    else host.appendChild(row);
+  const paint = () => {
+    const slots = list[cur].slots;
+    host.innerHTML = '';
+    if (!slots.length) {
+      // 空表给一个能直接改的起点，而不是空白 —— 打开就能排
+      slots.push({ start: '08:00', end: '08:40', kind: 'class', name: null });
+    }
+    slots.forEach((s, i) => host.appendChild(build(s, i)));
     renumber();
-    return row;
+    paintTimeline();
+    paintDetail();
   };
 
-  slots.forEach((s) => addRow(s));
-  if (!slots.length) addRow({ start: '08:00', end: '08:45', kind: 'class', name: '' });
+  const renumber = () => {
+    const rows = [...host.children];
+    let p = 0;
+    rows.forEach((r, i) => {
+      const kind = r.querySelector('[data-k="kind"]').value;
+      p = kind === 'class' ? p + 1 : p;
+      r.firstElementChild.textContent = kind === 'class' ? p : '—';
+      r.style.opacity = i === sel ? '1' : '1';
+      r.classList.toggle('sel', i === sel);
+    });
+  };
 
-  // 事件委托：行是动态增删的，逐个绑监听既啰嗦又容易漏
+  /* ---- 时间轴预览：每一段按分钟数占宽度，一眼看出一天的松紧 ---- */
+  const paintTimeline = () => {
+    const slots = list[cur].slots;
+    const total = slots.reduce((a, s) => a + Math.max(0, Number(durOf(s.start, s.end)) || 0), 0) || 1;
+    document.getElementById('tl').innerHTML =
+      `<div class="tl-hd">${esc(t('st.timeline'))}</div><div class="tl-bar">` +
+      slots.map((s, i) => {
+        const m = Math.max(0, Number(durOf(s.start, s.end)) || 0);
+        const cls = s.kind === 'break' ? 'brk' : 'cls';
+        return `<div class="tl-seg ${cls} ${i === sel ? 'sel' : ''}" data-i="${i}"
+          style="flex:${m}" title="${esc(s.start)}–${esc(s.end)} ${esc(t('st.dur_min').replace('{n}', m))}">${m >= 20 ? m : ''}</div>`;
+      }).join('') + '</div>';
+    document.querySelectorAll('#tl .tl-seg').forEach(el =>
+      el.addEventListener('click', () => { sel = Number(el.dataset.i); renumber(); paintDetail(); paintTimeline(); }));
+  };
+
+  /* ---- 右侧详情：选中时间点的详细属性（对应 ClassIsland 视图右侧）---- */
+  const paintDetail = () => {
+    const box = document.getElementById('detail');
+    const s = list[cur].slots[sel];
+    if (!s) { box.innerHTML = esc(t('st.detail_none')); return; }
+    box.innerHTML = `<b>${esc(t('st.detail'))}</b>` +
+      `<div class="row wrap" style="margin-top:8px;align-items:center;gap:10px">
+        <label style="font-size:13px">${esc(t('st.period_default'))}
+          <input type="text" id="dt-default" value="${esc(s.default_subject || '')}"
+                 placeholder="${esc(t('st.period_default_ph'))}" style="width:190px;margin-left:6px"></label>
+        <label class="check" title="${esc(t('st.hidden_hint'))}">
+          <input type="checkbox" id="dt-hidden" ${s.is_hidden ? 'checked' : ''}> ${esc(t('st.hidden'))}</label>
+      </div>`;
+    document.getElementById('dt-default').addEventListener('input', e => {
+      list[cur].slots[sel].default_subject = e.target.value.trim() || null;
+    });
+    document.getElementById('dt-hidden').addEventListener('change', e => {
+      list[cur].slots[sel].is_hidden = e.target.checked;
+    });
+  };
+
+  /* ---- 表格编辑：开始 / 结束 / 时长三者联动 ---- */
+  const rowOf = (node) => node.closest('.slot-row');
+  const vOf = (row, k) => row.querySelector(`[data-k="${k}"]`);
+
+  host.addEventListener('input', (e) => {
+    const row = rowOf(e.target);
+    if (!row) return;
+    const i = [...host.children].indexOf(row);
+    const k = e.target.dataset.k;
+    if (!k) return;
+    const s = list[cur].slots[i];
+    s[k] = e.target.value.trim() || (k === 'kind' ? 'class' : null);
+    if (k === 'start') {
+      // 开始时间一改，结束时间顺延（时长保持不变）—— 与 ClassIsland 拖把柄的手感一致
+      const d = Number(vOf(row, 'duration').value) || 0;
+      const end = plusMin(e.target.value, d);
+      s.end = end;
+      vOf(row, 'end').value = end;
+    } else if (k === 'end') {
+      vOf(row, 'duration').value = durOf(s.start, e.target.value);
+    } else if (k === 'duration') {
+      const end = plusMin(s.start, Number(e.target.value) || 0);
+      s.end = end;
+      vOf(row, 'end').value = end;
+    }
+    renumber();
+    paintTimeline();
+  });
+
+  host.addEventListener('change', (e) => {
+    const row = rowOf(e.target);
+    if (!row || !e.target.dataset.k) return;
+    const i = [...host.children].indexOf(row);
+    list[cur].slots[i][e.target.dataset.k] = e.target.value;
+    renumber();
+  });
+
   host.addEventListener('click', (e) => {
+    const row = rowOf(e.target);
+    if (!row) return;
+    const i = [...host.children].indexOf(row);
     const btn = e.target.closest('button[data-op]');
-    if (!btn) return;
-    const row = btn.closest('.slot-row');
+    if (!btn) { sel = i; renumber(); paintDetail(); paintTimeline(); return; }
+    const slots = list[cur].slots;
     const op = btn.dataset.op;
     if (op === 'del') {
-      row.remove();
-      renumber();
-    } else if (op === 'up') {
-      const prev = row.previousElementSibling;
-      if (prev) host.insertBefore(row, prev);
-      renumber();
-    } else if (op === 'down') {
-      const next = row.nextElementSibling;
-      if (next) host.insertBefore(next, row);
-      renumber();
+      slots.splice(i, 1);
+    } else if (op === 'up' && i > 0) {
+      [slots[i - 1], slots[i]] = [slots[i], slots[i - 1]];
+      sel = i - 1;
+    } else if (op === 'down' && i < slots.length - 1) {
+      [slots[i + 1], slots[i]] = [slots[i], slots[i + 1]];
+      sel = i + 1;
     } else if (op === 'ins') {
-      // 新段接在上一段之后：开始时间取上一段的结束时间，默认再排 45 分钟。
-      // 比给个固定的 08:00 更可能一次填对 —— 用户多半就是想在原基础上加一节。
-      const ins = row.querySelectorAll('input');
-      const sel = row.querySelector('select');
-      const start = ins[1].value.trim() || '09:00';
-      addRow({ start, end: plusMin(start, 45), kind: sel.value, name: '' }, row);
+      // 新段接上一段的结束时间；上课 40 分钟、课间 10 分钟 —— 与 ClassIsland 的默认值一致
+      const kind = slots[i].kind;
+      const len = kind === 'break' ? 10 : 40;
+      slots.splice(i + 1, 0, {
+        start: slots[i].end, end: plusMin(slots[i].end, len),
+        kind, name: null, default_subject: null, is_hidden: false,
+      });
+      sel = i + 1;
+    } else {
+      return;
     }
+    paint();
   });
 
-  document.getElementById('btn-add').addEventListener('click', () => addRow({}));
+  document.querySelectorAll('[data-add]').forEach(b => b.addEventListener('click', () => {
+    const kind = b.dataset.add;
+    const slots = list[cur].slots;
+    const last = slots[slots.length - 1];
+    const start = last ? last.end : '08:00';
+    slots.push({
+      start, end: plusMin(start, kind === 'break' ? 10 : 40),
+      kind, name: null, default_subject: null, is_hidden: false,
+    });
+    sel = slots.length - 1;
+    paint();
+  }));
 
-  const collect = () => [...host.children].map((r, i) => {
-    const ins = r.querySelectorAll('input');
-    const sel = r.querySelector('select');
-    return {
-      period: i + 1,
-      start: ins[0].value.trim(),
-      end: ins[1].value.trim(),
-      kind: sel.value,
-      name: ins[2].value.trim() || null,
-    };
+  nameEl.addEventListener('input', () => { list[cur].name = nameEl.value; paintList(); });
+
+  const paintAll = () => { paintList(); paint(); };
+
+  /* ---- 新建 / 复制 / 删除 ---- */
+  document.getElementById('btn-tt-new').addEventListener('click', () => {
+    list.push({ id: 'tl' + (list.length + 1) + '_' + Math.random().toString(36).slice(2, 6),
+      name: t('st.self.default_name'), slots: [] });
+    cur = list.length - 1;
+    sel = 0;
+    paintAll();
   });
 
-  const showWindows = (w) => {
-    const note = document.getElementById('win-note');
-    note.style.display = 'block';
-    note.innerHTML = (w && w.length)
-      ? `<b>${esc(t('st.windows'))}</b><br>` + w.map(x =>
-          `· ${esc(x.name)}（${esc(x.start)}–${esc(x.end)}，scope=${esc(x.scope)}）`).join('<br>')
-      : `<b style="color:#d9a343">${esc(t('st.no_windows'))}</b>${esc(t('st.no_windows_why'))}`;
-  };
+  document.getElementById('btn-tt-copy').addEventListener('click', () => {
+    const src = list[cur];
+    list.push({ id: 'tl' + (list.length + 1) + '_' + Math.random().toString(36).slice(2, 6),
+      name: src.name + t('st.self.copy_suffix'), slots: src.slots.map(s => ({ ...s })) });
+    cur = list.length - 1;
+    sel = 0;
+    paintAll();
+  });
 
+  document.getElementById('btn-tt-del').addEventListener('click', async () => {
+    // 删除保护：有课表引用它就不许删 —— 否则那份课表会变成一堆没有时间的空条目。
+    // ClassIsland 的规则也是「时间表必须没有被任何课表使用」。
+    const sc = await api('/api/schedule');
+    const inUse = sc.ok && sc.time_layout_id === list[cur].id;
+    if (inUse) { toast(t('st.self.del'), t('st.self.in_use'), 'err'); return; }
+    if (!confirm(t('st.self.delete_confirm').replace('{name}', list[cur].name))) return;
+    list.splice(cur, 1);
+    if (!list.length) list = [{ id: 'default', name: '', slots: [] }];
+    cur = 0;
+    sel = 0;
+    paintAll();
+  });
+
+  /* ---- 保存：整份时间表列表一起提交 ---- */
   document.getElementById('btn-save').addEventListener('click', async () => {
     const payload = {
-      timetables: [{
-        id: 'default', name: d.name || 'default', is_active: true, source: 'manual',
-        slots: collect(),
-      }],
+      timetables: list.map((x, i) => ({
+        id: x.id, name: x.name || x.id, is_active: i === cur,
+        source: 'manual', group: 'global',
+        slots: (() => {
+          // 节次只在「上课」段之间连续编号：课间不算一节，
+          // 否则第 1 节后面直接跳到第 3 节，看着像缺了一节。
+          let p = 0;
+          return x.slots.map(s => {
+            const isClass = s.kind !== 'break';
+            if (isClass) p++;
+            return {
+              period: isClass ? p : null,
+              start: String(s.start || '').trim(),
+              end: String(s.end || '').trim(),
+              kind: isClass ? 'class' : 'break',
+              name: s.name || null,
+              default_subject: s.default_subject || null,
+              is_hidden: !!s.is_hidden,
+            };
+          });
+        })(),
+      })),
     };
     const r = await api('/api/timetable', payload);
+    const note = document.getElementById('win-note');
+    note.style.display = 'block';
     if (r.ok) {
       toast(t('common.saved'), String(r.slots));
-      showWindows(r.windows);
+      note.innerHTML = (r.issues && r.issues.length)
+        ? `<b style="color:#d9a343">${esc(t('sc.issues'))}</b><br>· ` + r.issues.map(esc).join('<br>· ')
+        : `<b style="color:#7fd3ba">${esc(t('st.windows'))}</b>` +
+          (r.windows || []).map(x => `<br>· ${esc(x.name)}（${esc(x.start)}–${esc(x.end)}，scope=${esc(x.scope)}）`).join('');
     } else {
       toast(t('common.save_failed'), r.error || '', 'err');
+      note.innerHTML = `<b style="color:#e05c5c">${esc(t('common.save_failed'))}</b><br><code>${esc(r.error || '')}</code>`;
     }
   });
 
-  // --- ClassIsland 导入 ---
+  /* ---- ClassIsland 导入 ---- */
   // 浏览器拿不到文件真实路径（安全限制），只能读内容，所以整份 JSON 传给后端解析。
   // 后端那边是只读的，不会改 ClassIsland 的任何文件。
-  document.getElementById('btn-ci').addEventListener('click', () => {
-    document.getElementById('ci-file').click();
-  });
+  document.getElementById('btn-ci').addEventListener('click', () => document.getElementById('ci-file').click());
   document.getElementById('ci-file').addEventListener('change', async (e) => {
     const f = e.target.files && e.target.files[0];
     if (!f) return;
-    const note = document.getElementById('win-note');
-    note.style.display = 'block';
-    note.textContent = t('st.imported') + '…';
     const text = await f.text();
     const r = await api('/api/import/classisland', { json: text });
     e.target.value = '';
-    if (!r.ok) {
-      note.innerHTML = `<b style="color:#e05c5c">${esc(t('common.save_failed'))}</b><br><code>${esc(r.error || '')}</code>`;
-      return;
-    }
+    if (!r.ok) { toast(t('common.save_failed'), r.error || '', 'err'); return; }
     toast(t('st.imported'), `${r.timetable_name || ''} · ${r.slots} / ${r.entries}`);
     await renderTimetable();
-    showWindows(null);
-    // renderTimetable() 重建了 DOM，note 得重新取一次。
-    // 导入进来的课默认全部勾上「录制」，用户接下来要做的事正是「挑掉不想录的」，
-    // 所以把提示摆好、再把人送过去，省得他自己在页面之间找。
     const n2 = document.getElementById('win-note');
     if (n2) {
       n2.style.display = 'block';
-      n2.innerHTML =
-        `<b>${esc(t('st.imported'))}</b> · ${esc(r.timetable_name || '')} ` +
-        `<span style="color:var(--text-dim2)">${r.slots} / ${r.entries}</span><br>` +
-        `${esc(t('st.import_hint'))}`;
+      n2.innerHTML = `<b>${esc(t('st.imported'))}</b> · ${esc(r.timetable_name || '')} ` +
+        `<span style="color:var(--text-dim2)">${r.slots} / ${r.entries}</span><br>${esc(t('st.import_hint'))}`;
     }
     setTimeout(() => go('schedule'), 1200);
   });
+
+  paintAll();
 }
 
 /* ---------------------------------------------------------------- 课表 */
 
 const DAYS = [['Mon', 'day_mon'], ['Tue', 'day_tue'], ['Wed', 'day_wed'],
-              ['Thu', 'day_thu'], ['Fri', 'day_fri'], ['Sat', 'day_sat'], ['Sun', 'day_sun']];
+  ['Thu', 'day_thu'], ['Fri', 'day_fri'], ['Sat', 'day_sat'], ['Sun', 'day_sun']];
 const CYCLES = [['every', 'cycle_every'], ['odd', 'cycle_odd'], ['even', 'cycle_even']];
 
 async function renderSchedule() {
@@ -1082,33 +1230,76 @@ async function renderSchedule() {
     return hit ? hit.name : id;
   };
 
-  // 唯一的真数据源。两种模式都只改这个数组，所以切换视图天然互通，
-  // 也不需要「切模式时重新读盘」这种补丁。
-  let model = (d.entries || []).map(e => ({
-    day: e.day || 'Mon',
-    start: e.start || '08:00',
-    end: e.end || '08:45',
-    course: e.course || '',
-    teacher: nameOf(e.teacherId),
-    cycle: e.cycle || 'every',
-    record: e.record !== false,
-  }));
-  let mode = 'subject';
+  // 上课时间点清单：课表的列头就是它 —— 这正是 ClassIsland 的做法
+  // （课程格按时间点索引对齐，而不是各自记一份起止时间）。
+  const slots = d.class_slots || [];
+  const layouts = d.time_layouts || [];
+
+  // 唯一的真数据源。按「星期 + 第几个时间点」索引，网格视图与列表视图
+  // 都只改它，所以切视图天然互通，也不需要「切模式时重新读盘」这种补丁。
+  let model = {};
+  const cell = (day, i) => (model[day] = model[day] || {})[i] ||
+    ((model[day][i] = { subject: '', teacher: '', record: true, cycle: 'every' }));
+
+  (d.entries || []).forEach(e => {
+    if (!e.day) return;
+    // 旧数据可能没有节次，只能按开始时间找它落在哪个时间点上
+    let i = (e.period || 0) - 1;
+    if (i < 0 || i >= slots.length || slots[i].start !== e.start) {
+      const hit = slots.findIndex(s => s.start === e.start);
+      if (hit >= 0) i = hit;
+    }
+    if (i < 0) i = 0;
+    const c = cell(e.day, i);
+    c.subject = e.course || '';
+    c.teacher = nameOf(e.teacherId);
+    c.record = e.record !== false;
+    c.cycle = e.cycle || 'every';
+  });
+
+  let mode = 'grid';
+  const rule = d.time_rule || {};
+  let ruleWeekday = rule.weekday || 0;
+  let ruleDiv = (rule.week_count && rule.week_count.week) || 0;
+  let layoutId = d.time_layout_id || (layouts[0] && layouts[0].id) || '';
+  let enabled = d.is_enabled !== false;
+
+  const secOpts = (v) => [
+    [0, t('sc.rule_daily')], [1, t('sc.day_mon')], [2, t('sc.day_tue')], [3, t('sc.day_wed')],
+    [4, t('sc.day_thu')], [5, t('sc.day_fri')], [6, t('sc.day_sat')], [7, t('sc.day_sun')],
+  ].map(([k, s]) => `<option value="${k}" ${Number(v) === k ? 'selected' : ''}>${esc(s)}</option>`).join('');
 
   view.innerHTML = `
   <div class="card">
     <h2>${esc(t('sc.title'))}</h2>
     <p class="hint">${t('sc.hint')}</p>
+
+    <div class="row wrap" style="margin-bottom:12px;align-items:center;gap:10px">
+      <label style="font-size:13px">${esc(t('sc.bind_layout'))}
+        <select id="bind" style="margin-left:6px">
+          ${layouts.map(t2 => `<option value="${esc(t2.id)}" ${t2.id === layoutId ? 'selected' : ''}>${esc(t2.name || t2.id)}</option>`).join('') ||
+            `<option value="">${esc(t('sc.no_layout'))}</option>`}
+        </select></label>
+      <label style="font-size:13px">${esc(t('sc.rule_weekday'))}
+        <select id="rule-day" style="margin-left:6px">${secOpts(ruleWeekday)}</select></label>
+      <label style="font-size:13px">${esc(t('sc.rule_cycle'))}
+        <select id="rule-div" style="margin-left:6px">
+          <option value="0" ${ruleDiv === 0 ? 'selected' : ''}>${esc(t('sc.rule_none'))}</option>
+          <option value="1" ${ruleDiv === 1 ? 'selected' : ''}>${esc(t('sc.rule_odd'))}</option>
+          <option value="2" ${ruleDiv === 2 ? 'selected' : ''}>${esc(t('sc.rule_even'))}</option>
+        </select></label>
+      <label class="check"><input type="checkbox" id="rule-on" ${enabled ? 'checked' : ''}> ${esc(t('sc.rule_enabled'))}</label>
+    </div>
+
     <div class="row wrap" style="margin-bottom:12px">
       <div class="seg" id="mode">
-        <button class="seg-btn" data-mode="subject">${esc(t('sc.mode_subject'))}</button>
+        <button class="seg-btn active" data-mode="grid">${esc(t('sc.mode_grid'))}</button>
         <button class="seg-btn" data-mode="table">${esc(t('sc.mode_table'))}</button>
       </div>
       <button class="btn sm" id="btn-on">${esc(t('sc.all_on'))}</button>
       <button class="btn sm" id="btn-off">${esc(t('sc.all_off'))}</button>
       <span class="spacer"></span>
       <span style="font-size:12px;color:var(--text-dim2)" id="cnt"></span>
-      <button class="btn sm" id="btn-add">${esc(t('sc.add'))}</button>
       <button class="btn sm" id="btn-csv">${esc(t('sc.export'))}</button>
       <button class="btn primary" id="btn-save">${esc(t('common.save'))}</button>
     </div>
@@ -1118,155 +1309,165 @@ async function renderSchedule() {
 
   const body = document.getElementById('body');
   const upd = () => {
-    const n = model.filter(m => m.record).length;
+    let n = 0, r = 0;
+    Object.keys(model).forEach(day => Object.keys(model[day]).forEach(i => {
+      const c = model[day][i];
+      if (c.subject.trim()) { n++; if (c.record) r++; }
+    }));
     document.getElementById('cnt').textContent =
-      `${t('sc.count')} ${model.length} ${t('sc.entries')} · ${t('sc.recording')} ${n}`;
+      `${t('sc.count')} ${n} ${t('sc.entries')} · ${t('sc.recording')} ${r}`;
     document.querySelectorAll('#mode .seg-btn').forEach(b =>
       b.classList.toggle('active', b.dataset.mode === mode));
   };
 
-  /* ---- 模式一：按科目选。一个科目一行，适合「只录我自己的课」 ---- */
-  const paintSubjects = () => {
-    const names = [...new Set(model.map(m => m.course))];
-    if (!names.length) {
-      body.innerHTML = `<div class="empty">${esc(t('sc.empty'))}</div>`;
+  /* ---- 科目 / 教师候选：与 ClassIsland 的「科目」库对应 ---- */
+  const subjects = () => {
+    const s = new Set();
+    Object.keys(model).forEach(day => Object.keys(model[day]).forEach(i => {
+      const v = (model[day][i].subject || '').trim();
+      if (v) s.add(v);
+    }));
+    return [...s].sort();
+  };
+  const teachers = () => {
+    const s = new Set();
+    Object.keys(model).forEach(day => Object.keys(model[day]).forEach(i => {
+      const v = (model[day][i].teacher || '').trim();
+      if (v) s.add(v);
+    }));
+    return [...s].sort();
+  };
+  const dl = () => `<datalist id="dl-course">${subjects().map(s => `<option value="${esc(s)}">`).join('')}</datalist>
+    <datalist id="dl-teacher">${teachers().map(s => `<option value="${esc(s)}">`).join('')}</datalist>`;
+
+  /* ---- 模式一：课程格。列 = 时间点，行 = 星期（对齐 ClassIsland 的课表编辑）---- */
+  const paintGrid = () => {
+    if (!slots.length) {
+      body.innerHTML = `<div class="empty">${esc(t('sc.no_layout_why'))}</div>`;
       return;
     }
-    body.innerHTML = `<p class="hint" style="margin-bottom:10px">${esc(t('sc.by_subject_hint'))}</p>` +
-      names.map(name => {
-        const list = model.filter(m => m.course === name);
-        return `
-        <div class="slot-row" style="grid-template-columns:1fr 110px 130px">
-          <div>${esc(name)}</div>
-          <div style="color:var(--text-dim2);font-size:12px">${list.length} ${esc(t('sc.lessons'))}</div>
-          <label class="check"><input type="checkbox" data-course="${esc(name)}"> ${esc(t('sc.record'))}</label>
-        </div>`;
-      }).join('');
+    body.innerHTML = dl() + `<div class="sc-scroll"><table class="sc-grid"><thead><tr>
+      <th class="sc-day"></th>
+      ${slots.map(s => `<th><div class="sc-th-t">${esc(s.start)}</div>
+        <div class="sc-th-s">${esc(t('sc.period_n').replace('{n}', String((s.period || 0))))}${s.duration ? ` · ${esc(t('st.dur_min').replace('{n}', String(s.duration)))}` : ''}</div></th>`).join('')}
+      </tr></thead><tbody>
+      ${DAYS.map(([day, key]) => `<tr>
+        <td class="sc-day">${esc(t('sc.' + key))}</td>
+        ${slots.map((s, i) => {
+          const c = cell(day, i);
+          const ph = esc(s.default_subject || t('sc.cell_ph'));
+          return `<td><div class="sc-cell">
+            <input type="text" data-day="${day}" data-i="${i}" data-k="subject"
+                   list="dl-course" value="${esc(c.subject)}" placeholder="${ph}">
+            <div class="sc-sub">
+              <input type="text" data-day="${day}" data-i="${i}" data-k="teacher"
+                     list="dl-teacher" value="${esc(c.teacher)}" placeholder="${esc(t('sc.col_teacher'))}">
+              <label class="check" title="${esc(t('sc.record_hint'))}">
+                <input type="checkbox" data-day="${day}" data-i="${i}" data-k="record" ${c.record ? 'checked' : ''}></label>
+            </div>
+          </div></td>`;
+        }).join('')}
+      </tr>`).join('')}
+      </tbody></table></div>`;
+    body.querySelectorAll('input[data-k]').forEach(node => {
+      const c = () => cell(node.dataset.day, Number(node.dataset.i));
+      if (node.dataset.k === 'record') {
+        node.addEventListener('change', () => { c().record = node.checked; upd(); });
+      } else {
+        node.addEventListener('input', () => { c()[node.dataset.k] = node.value; });
+        node.addEventListener('change', () => { c()[node.dataset.k] = node.value; upd(); });
+      }
+    });
+  };
 
-    // 三态：全录 / 全不录 / 只录了一部分（indeterminate，一眼能看出不齐）
-    body.querySelectorAll('input[data-course]').forEach(cb => {
-      const list = model.filter(m => m.course === cb.dataset.course);
-      const on = list.filter(m => m.record).length;
-      cb.checked = on > 0;
-      cb.indeterminate = on > 0 && on < list.length;
-      cb.addEventListener('change', () => {
-        const v = cb.checked;
-        model.forEach(m => { if (m.course === cb.dataset.course) m.record = v; });
+  /* ---- 模式二：逐条编辑。同一条数据换个角度看，方便批量核对 ---- */
+  const COLS = '92px 74px 74px 1fr 120px 68px 58px 136px';
+  const flat = () => {
+    const rows = [];
+    Object.keys(model).forEach(day => Object.keys(model[day]).forEach(i => {
+      const c = model[day][i];
+      if (c.subject.trim() || c.teacher.trim()) rows.push({ day, i: Number(i), c });
+    }));
+    rows.sort((a, b) => DAYS.findIndex(x => x[0] === a.day) - DAYS.findIndex(x => x[0] === b.day) || a.i - b.i);
+    return rows;
+  };
+  const paintTable = () => {
+    const rows = flat();
+    body.innerHTML = dl() + `
+      <div class="slot-row slot-head" style="grid-template-columns:${COLS}">
+        <div>${esc(t('sc.col_day'))}</div><div>${esc(t('sc.col_start'))}</div>
+        <div>${esc(t('sc.col_end'))}</div><div>${esc(t('sc.col_course'))}</div>
+        <div>${esc(t('sc.col_teacher'))}</div><div>${esc(t('sc.col_cycle'))}</div>
+        <div>${esc(t('sc.col_record'))}</div><div></div>
+      </div>` +
+      rows.map((r, n) => {
+        const s = slots[r.i] || {};
+        return `<div class="slot-row" data-n="${n}" style="grid-template-columns:${COLS}">
+          <select data-k="day">${DAYS.map(([v, k]) =>
+            `<option value="${v}" ${r.day === v ? 'selected' : ''}>${esc(t('sc.' + k))}</option>`).join('')}</select>
+          <input type="text" value="${esc(s.start || '')}" disabled>
+          <input type="text" value="${esc(s.end || '')}" disabled>
+          <input type="text" data-k="subject" list="dl-course" value="${esc(r.c.subject)}" placeholder="${esc(t('sc.course_ph'))}">
+          <input type="text" data-k="teacher" list="dl-teacher" value="${esc(r.c.teacher)}" placeholder="${esc(t('sc.teacher_unset'))}">
+          <select data-k="cycle" style="width:74px">${CYCLES.map(([v, k]) =>
+            `<option value="${v}" ${(r.c.cycle || 'every') === v ? 'selected' : ''}>${esc(t('sc.' + k))}</option>`).join('')}</select>
+          <label class="check" title="${esc(t('sc.record_hint'))}">
+            <input type="checkbox" data-k="record" ${r.c.record ? 'checked' : ''}></label>
+          <div class="row-ops"><button class="btn sm danger" data-op="del" title="${esc(t('st.op_del'))}">×</button></div>
+        </div>`;
+      }).join('') + `<p class="hint" style="margin-top:10px">${esc(t('sc.table_hint'))}</p>`;
+
+    body.querySelectorAll('.slot-row[data-n]').forEach(row => {
+      const r = rows[Number(row.dataset.n)];
+      row.querySelectorAll('[data-k]').forEach(node => {
+        const k = node.dataset.k;
+        if (k === 'day') {
+          node.addEventListener('change', () => {
+            // 换星期 = 把这一格挪到另一行，原来那格清空
+            model[r.day][r.i] = { subject: '', teacher: '', record: true, cycle: 'every' };
+            Object.assign(cell(node.value, r.i), r.c);
+            paint();
+          });
+          return;
+        }
+        if (k === 'record') {
+          node.addEventListener('change', () => { r.c.record = node.checked; upd(); });
+        } else {
+          node.addEventListener('input', () => { r.c[k] = node.value; });
+          node.addEventListener('change', () => { r.c[k] = node.value; upd(); });
+        }
+      });
+      row.querySelector('[data-op="del"]').addEventListener('click', () => {
+        model[r.day][r.i] = { subject: '', teacher: '', record: true, cycle: 'every' };
         paint();
       });
     });
   };
 
-  /* ---- 模式二：逐条编辑。列与时间表页对齐，多了「录制」与「科目」 ---- */
-  const COLS = '92px 74px 74px 1fr 120px 68px 58px 136px';
-  const paintTable = () => {
-    body.innerHTML = `
-      <div class="slot-row slot-head" style="grid-template-columns:${COLS}">
-        <div>${esc(t('sc.col_day'))}</div>
-        <div>${esc(t('sc.col_start'))}</div>
-        <div>${esc(t('sc.col_end'))}</div>
-        <div>${esc(t('sc.col_course'))}</div>
-        <div>${esc(t('sc.col_teacher'))}</div>
-        <div>${esc(t('sc.col_cycle'))}</div>
-        <div>${esc(t('sc.col_record'))}</div>
-        <div></div>
-      </div>` +
-      model.map((m, i) => `
-      <div class="slot-row" data-i="${i}" style="grid-template-columns:${COLS}">
-        <select data-k="day">${DAYS.map(([v, k]) =>
-          `<option value="${v}" ${m.day === v ? 'selected' : ''}>${esc(t('sc.' + k))}</option>`).join('')}</select>
-        <input type="text" data-k="start" value="${esc(m.start)}">
-        <input type="text" data-k="end" value="${esc(m.end)}">
-        <input type="text" data-k="course" value="${esc(m.course)}" placeholder="${esc(t('sc.course_ph'))}">
-        <input type="text" data-k="teacher" value="${esc(m.teacher)}" placeholder="${esc(t('sc.teacher_unset'))}">
-        <select data-k="cycle" style="width:74px">${CYCLES.map(([v, k]) =>
-          `<option value="${v}" ${m.cycle === v ? 'selected' : ''}>${esc(t('sc.' + k))}</option>`).join('')}</select>
-        <label class="check" title="${esc(t('sc.record_hint'))}">
-          <input type="checkbox" data-k="record" ${m.record ? 'checked' : ''}>
-        </label>
-        <div class="row-ops">
-          <button class="btn sm" data-op="up" ${i === 0 ? 'disabled' : ''}
-                  title="${esc(t('st.op_up'))}">↑</button>
-          <button class="btn sm" data-op="down" ${i === model.length - 1 ? 'disabled' : ''}
-                  title="${esc(t('st.op_down'))}">↓</button>
-          <button class="btn sm" data-op="ins" title="${esc(t('st.op_insert'))}">+</button>
-          <button class="btn sm danger" data-op="del" title="${esc(t('st.op_del'))}">×</button>
-        </div>
-      </div>`).join('');
-
-    body.querySelectorAll('.slot-row[data-i]').forEach(row => {
-      const i = Number(row.dataset.i);
-      row.querySelectorAll('[data-k]').forEach(node => {
-        const k = node.dataset.k;
-        if (k === 'record') {
-          node.addEventListener('change', () => { model[i].record = node.checked; upd(); });
-        } else {
-          // 每次击键都同步进 model：切模式之前不需要额外「保存草稿」这一步
-          node.addEventListener('input', () => { model[i][k] = node.value; });
-          node.addEventListener('change', () => { model[i][k] = node.value; });
-        }
-      });
-      // 顺序调整：直接改 model 数组再重绘。
-      // 之所以敢重绘，是因为 model 已经提出来了（不是在 DOM 里就地改）——
-      // 重绘后绑定的监听、输入框内容全都跟着重建，不会出现半新半旧的状态。
-      row.querySelectorAll('button[data-op]').forEach(b =>
-        b.addEventListener('click', () => {
-          const op = b.dataset.op;
-          if (op === 'del') {
-            model.splice(i, 1);
-          } else if (op === 'up' && i > 0) {
-            [model[i - 1], model[i]] = [model[i], model[i - 1]];
-          } else if (op === 'down' && i < model.length - 1) {
-            [model[i + 1], model[i]] = [model[i], model[i + 1]];
-          } else if (op === 'ins') {
-            // 插一条与当前行同科目的空条目：接着上一节往下排最省事
-            model.splice(i + 1, 0, {
-              ...model[i],
-              start: model[i].end || '09:00',
-              end: plusMin(model[i].end || '09:00', 45),
-              teacher: model[i].teacher,
-              record: model[i].record,
-            });
-          } else {
-            return;
-          }
-          paint();
-        }));
-    });
-  };
-
-  const paint = () => {
-    if (mode === 'subject') paintSubjects(); else paintTable();
-    upd();
-  };
+  const paint = () => { if (mode === 'grid') paintGrid(); else paintTable(); upd(); };
 
   document.querySelectorAll('#mode .seg-btn').forEach(b =>
     b.addEventListener('click', () => { mode = b.dataset.mode; paint(); }));
 
   document.getElementById('btn-on').addEventListener('click', () => {
-    model.forEach(m => { m.record = true; });
+    Object.keys(model).forEach(day => Object.keys(model[day]).forEach(i => { model[day][i].record = true; }));
     paint();
   });
   document.getElementById('btn-off').addEventListener('click', () => {
-    model.forEach(m => { m.record = false; });
+    Object.keys(model).forEach(day => Object.keys(model[day]).forEach(i => { model[day][i].record = false; }));
     paint();
   });
 
-  document.getElementById('btn-add').addEventListener('click', () => {
-    model.push({
-      day: 'Mon', start: '08:00', end: '08:45', course: '', teacher: '',
-      cycle: 'every', record: true,
-    });
-    // 新加的行在科目视图里会立刻变成一个（还没名字的）科目，那没意义 ——
-    // 直接切到大表，让用户就地填完。
-    mode = 'table';
-    paint();
-  });
+  document.getElementById('bind').addEventListener('change', e => { layoutId = e.target.value; });
+  document.getElementById('rule-day').addEventListener('change', e => { ruleWeekday = Number(e.target.value); });
+  document.getElementById('rule-div').addEventListener('change', e => { ruleDiv = Number(e.target.value); });
+  document.getElementById('rule-on').addEventListener('change', e => { enabled = e.target.checked; });
 
   document.getElementById('btn-csv').addEventListener('click', () => {
     const rows = [['day', 'period', 'start', 'end', 'course', 'teacher', 'cycle', 'record'].join(',')];
-    model.forEach((m, i) => {
-      rows.push([m.day, i + 1, m.start, m.end, m.course, m.teacher, m.cycle, m.record]
+    flat().forEach(r => {
+      const s = slots[r.i] || {};
+      rows.push([r.day, (s.period || '') + '', s.start || '', s.end || '', r.c.subject, r.c.teacher, r.c.cycle, r.c.record]
         .map(v => String(v).replace(/,/g, '，')).join(','));
     });
     const blob = new Blob(['\ufeff' + rows.join('\n')], { type: 'text/csv;charset=utf-8' });
@@ -1280,33 +1481,47 @@ async function renderSchedule() {
   document.getElementById('btn-save').addEventListener('click', async () => {
     // 姓名 -> id：沿用已有教师；输入了新名字就当场建一个。
     // 名字留空 = 未指定（unassigned），校验那边会提醒，但**不拦保存**。
-    const teachers = (d.teachers || []).map(x => ({ ...x }));
+    const tlist = (d.teachers || []).map(x => ({ ...x }));
     const idOf = (name) => {
-      const n = String(name || '').trim();
-      if (!n) return 'unassigned';
-      const hit = teachers.find(x => x.name === n);
+      const nm = String(name || '').trim();
+      if (!nm) return 'unassigned';
+      const hit = tlist.find(x => x.name === nm);
       if (hit) return hit.id;
-      let k = teachers.length + 1;
-      while (teachers.some(x => x.id === 't' + k)) k++;
+      let k = tlist.length + 1;
+      while (tlist.some(x => x.id === 't' + k)) k++;
       const id = 't' + k;
-      teachers.push({ id, name: n, profile: id });
+      tlist.push({ id, name: nm, profile: id });
       return id;
     };
 
-    const entries = model.map((m, i) => ({
-      day: m.day,
-      period: i + 1,
-      start: String(m.start || '').trim(),
-      end: String(m.end || '').trim(),
-      course: String(m.course || '').trim() || '未命名课程',
-      teacherId: idOf(m.teacher),
-      record: !!m.record,
-      cycle: m.cycle,
+    // 课程格 -> 条目：起止时间不写进课表了 —— 它由绑定的时间表算出来，
+    // 这正是 ClassIsland 的做法，时间表一改，所有课的时间自动跟着改。
+    const entries = [];
+    Object.keys(model).forEach(day => Object.keys(model[day]).forEach(i => {
+      const c = model[day][i];
+      const s = slots[Number(i)];
+      if (!s || (!c.subject.trim() && !c.teacher.trim())) return;
+      entries.push({
+        day,
+        period: Number(i) + 1,
+        start: s.start,
+        end: s.end,
+        course: c.subject.trim() || t('sc.unnamed'),
+        teacherId: idOf(c.teacher),
+        record: !!c.record,
+        cycle: c.cycle || 'every',
+      });
     }));
 
     const r = await api('/api/schedule', {
-      teachers,
-      week_template: { cycle: 'every', entries },
+      teachers: tlist,
+      week_template: {
+        cycle: 'every',
+        entries,
+        time_layout_id: layoutId,
+        time_rule: { weekday: ruleWeekday, week_count: { week: ruleDiv, total: ruleDiv ? 2 : 0 } },
+        is_enabled: enabled,
+      },
       weekend_template: { source: 'new', entries: [] },
       overrides: [],
     });
@@ -1316,16 +1531,7 @@ async function renderSchedule() {
       toast(t('common.saved'), String(r.entries));
       // 保存会重建教师名单（新名字会被分配 id），回读一遍让界面与磁盘一致
       const back = await api('/api/schedule');
-      if (back.ok) {
-        state.schedule = back;
-        const names = new Map((back.teachers || []).map(x => [x.id, x.name]));
-        model = (back.entries || []).map(e => ({
-          day: e.day, start: e.start, end: e.end, course: e.course,
-          teacher: e.teacherId === 'unassigned' ? '' : (names.get(e.teacherId) || ''),
-          cycle: e.cycle || 'every', record: e.record !== false,
-        }));
-        paint();
-      }
+      if (back.ok) { state.schedule = back; }
       note.innerHTML = (r.issues && r.issues.length)
         ? `<b style="color:#d9a343">${esc(t('sc.issues'))}</b><br>· ` + r.issues.map(esc).join('<br>· ')
         : `<b style="color:#7fd3ba">${esc(t('sc.ok'))}</b>${esc(t('sc.ok_d'))}`;

@@ -68,6 +68,25 @@ impl WeekParity {
             other => other == self,
         }
     }
+
+    /// 折算成「第几周」，喂给 ClassIsland 那套多周轮换
+    /// （[`CycleRule::matches_week`](crate::model::CycleRule::matches_week)）。
+    ///
+    /// VCA 只区分单双周，所以只表达得了「2 周一循环」。
+    /// `rules` 是课表自己的轮换配置，只有它正好是 2 周一轮时才给出周次；
+    /// 其余情况（不轮换、或 3 周以上）一律返回 `0` —— 那表示
+    /// 「不知道现在是第几周」，`matches_week` 会放行。
+    /// **宁可照常上课，也不要因为算不出周次而静默漏课。**
+    pub fn week_no(self, rules: crate::model::CycleRule) -> u32 {
+        if rules.total != 2 {
+            return 0;
+        }
+        match self {
+            WeekParity::Every => 0,
+            WeekParity::Odd => 1,
+            WeekParity::Even => 2,
+        }
+    }
 }
 
 /// 星期名转 0=周一  6=周日。
@@ -82,6 +101,12 @@ pub fn weekday_from_name(name: &str) -> Option<u32> {
         "Sun" | "sun" | "周日" | "星期日" | "星期天" | "周天" => Some(6),
         _ => None,
     }
+}
+
+/// 0=周一 6=周日 转星期名（[`weekday_from_name`] 的逆）。
+pub fn weekday_name(weekday: u32) -> &'static str {
+    const NAMES: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+    NAMES.get(weekday as usize).copied().unwrap_or("Mon")
 }
 
 /// 计算某一天的实际课程列表。
@@ -100,6 +125,16 @@ pub fn plan_for_date(
 ) -> Vec<LessonInstance> {
     let wd = date.weekday();
     let mut lessons: Vec<LessonInstance> = Vec::new();
+
+    // 课表自己的触发规则（对应 ClassIsland `ClassPlan.TimeRule`）：
+    // 星期不匹配、落在生效区间之外、或多周轮换没轮到这一周，这份课表当天就不生效。
+    // `week_no = 0` 表示「不轮换」，`CycleRule::matches_week` 会直接放行。
+    if !plan
+        .time_rule
+        .matches(date, parity.week_no(plan.time_rule.week_count))
+    {
+        return Vec::new();
+    }
 
     for entry in &plan.entries {
         if let Some(day) = weekday_from_name(&entry.day) {
@@ -388,6 +423,7 @@ mod tests {
         ClassPlan {
             cycle: "every".to_string(),
             entries,
+            ..ClassPlan::default()
         }
     }
 
@@ -413,6 +449,7 @@ mod tests {
         let p = ClassPlan {
             cycle: "odd".to_string(),
             entries: vec![entry("Mon", "08:00", "08:45", "单周课", "t1", true)],
+            ..ClassPlan::default()
         };
         let date = LocalDate::new(2025, 3, 17);
         assert_eq!(
@@ -631,7 +668,9 @@ mod tests {
                 end: "08:45".into(),
                 kind: SlotKind::Class,
                 name: None,
+                ..crate::model::TimetableSlot::default()
             }],
+            ..Timetable::default()
         };
         assert!(validate(
             Some(&tt),

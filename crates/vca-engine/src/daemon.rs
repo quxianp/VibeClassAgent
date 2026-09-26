@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use vca_core::config::{load_schedule_file, load_settings, ScheduleFile, Settings, TimetableFile};
+use vca_core::config::{load_schedule_file, load_settings, ScheduleFile, Settings};
 use vca_core::model::{OverlaySettings, Timetable};
 use vca_core::paths::Layout;
 use vca_core::schedule::{self, LessonInstance, OverlayTiming, OverlayWindow, WeekParity};
@@ -107,6 +107,11 @@ impl Daemon {
         }
         settings.apply_performance_profile();
 
+        // 时间表
+        let tt_path = layout.config_root.join("timetable").join("current.yaml");
+        let all_timetables = vca_core::config::load_timetables(&tt_path);
+        let timetable = all_timetables.iter().find(|t| t.is_active).cloned();
+
         // 课程表：用户配置 → 配置目录里的示例 → 内置模板。
         //
         // 三级兜底是有必要的：用户完全可能直接 `vca.exe run`（跳过首次设置），
@@ -115,7 +120,7 @@ impl Daemon {
         // 提示去补课表，比崩掉强得多。
         let sc_path = layout.config_root.join("schedule").join("current.yaml");
         let sc_example = layout.config_root.join("schedule.example.yaml");
-        let schedule = if sc_path.exists() {
+        let mut schedule = if sc_path.exists() {
             load_schedule_file(&sc_path)?
         } else if sc_example.exists() {
             load_schedule_file(&sc_example)?
@@ -128,15 +133,16 @@ impl Daemon {
             );
             f
         };
-
-        // 时间表
-        let tt_path = layout.config_root.join("timetable").join("current.yaml");
-        let timetable = if tt_path.exists() {
-            let tf: TimetableFile = serde_yaml::from_str(&std::fs::read_to_string(&tt_path)?)?;
-            tf.timetables.into_iter().find(|t| t.is_active)
-        } else {
-            None
-        };
+        // 课表里可以只写「星期 + 第几节」，起止时间由时间表算出来 ——
+        // 这就是 ClassIsland 的做法（课程格按时间点索引对齐），此处把它落地。
+        // 旧格式在这里就地升级，原文件另存 `.bak`，用户不必手工改 YAML。
+        if let Some(bak) = vca_core::import::upgrade_schedule_file(&sc_path, &all_timetables) {
+            tracing::info!("课表已升级为新格式，原文件备份在 {}", bak.display());
+        }
+        if sc_path.exists() {
+            schedule = load_schedule_file(&sc_path).unwrap_or(schedule);
+        }
+        schedule.normalize(&all_timetables);
 
         let python_dir = std::env::var("VCA_PYTHON_DIR")
             .map(PathBuf::from)

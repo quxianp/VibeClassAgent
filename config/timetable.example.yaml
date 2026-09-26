@@ -2,6 +2,16 @@
 # 时间表示例（作息骨架） 格式示例，请按本校实际作息修改
 # ----------------------------------------------------------------------------
 # 时间表 = 一天的作息骨架；课程表 = 在骨架上填充课程。二者严格分离。
+#
+# 这套结构对齐 ClassIsland 的「时间表」：
+#   timetables[]           ←→ TimeLayouts.<guid>
+#   slots[]                ←→ TimeLayout.Layouts[]（TimeLayoutItem）
+#   kind: class / break    ←→ TimeType 0（上课）/ 1（课间）
+#   name                   ←→ BreakName（课间名称）
+#   default_subject        ←→ DefaultClassId（该时间点的默认科目）
+#   is_hidden              ←→ IsHideDefault（是否默认隐藏）
+#   开始 / 结束时刻         ←→ StartTime / EndTime；时长 = 结束 − 开始
+#
 # 来源二选一：source: manual（自主配置）| classisland（导入）
 # 注意：程序出厂时不含任何预置作息，以下均为虚构示例。
 # ============================================================================
@@ -11,14 +21,18 @@ timetables:
     name: "<学校作息名称>"
     is_active: true
     source: manual
+    # group 对应 ClassIsland 的课表群（ClassPlanGroup），VCA 里只用于归类展示
+    group: global
     slots:
       # type: class = 上课节；type: break = 课间/休息段
-      - { period: 1, start: "08:00", end: "08:45", type: class }
-      - { period: 2, start: "08:55", end: "09:40", type: class }
-      - { start: "09:40", end: "10:00", type: break, name: 大课间 }
-      - { period: 3, start: "10:00", end: "10:45", type: class }
-      - { period: 4, start: "10:55", end: "11:40", type: class }
-      - { start: "12:10", end: "13:30", type: break, name: 午餐午休 }
-      - { period: 5, start: "14:00", end: "14:45", type: class }
-      - { period: 6, start: "14:55", end: "15:40", type: class }
+      # period 只在 class 段上有意义，按上课节连续编号（课间不占号）
+      - { period: 1, start: "08:00", end: "08:40", type: class }
+      - { start: "08:40", end: "08:50", type: break, name: 课间 }
+      - { period: 2, start: "08:50", end: "09:30", type: class }
+      - { start: "09:30", end: "10:00", type: break, name: 大课间 }
+      - { period: 3, start: "10:00", end: "10:40", type: class }
+      - { period: 4, start: "10:50", end: "11:30", type: class }
+      - { start: "12:00", end: "13:30", type: break, name: 午餐午休 }
+      - { period: 5, start: "14:00", end: "14:40", type: class }
+      - { period: 6, start: "14:50", end: "15:30", type: class }
       - { start: "17:30", end: "18:30", type: break, name: 晚餐 }

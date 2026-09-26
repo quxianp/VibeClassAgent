@@ -610,13 +610,23 @@ fn probe_recording() -> String {
     lines.join("\n")
 }
 
+/// 配置目录里的全部时间表。
+///
+/// 课表可以只写「第几节」，起止时间由时间表算出来，所以凡是要算课的入口
+/// 都得先把它读出来 —— 收进一个函数，免得每处各写一遍路径拼接。
+fn layout_timetables(layout: &Layout) -> Vec<vca_core::model::Timetable> {
+    vca_core::config::load_timetables(&layout.config_root.join("timetable").join("current.yaml"))
+}
+
 /// 课表是否还是空的。
 fn schedule_state(layout: &Layout, _profile: &str) -> (bool, usize) {
     let p = layout.config_root.join("schedule").join("current.yaml");
     // 复用 core 的加载器，避免在 CLI 里再引一份 serde_yaml
-    let Ok(f) = vca_core::config::load_schedule_file(&p) else {
+    let Ok(mut f) = vca_core::config::load_schedule_file(&p) else {
         return (true, 0);
     };
+    // 新格式的课表只写「第几节」，条数照样能数，但要先把起止时间补全才算数得准
+    f.normalize(&layout_timetables(layout));
     let n = f.week_template.entries.len()
         + f.weekend_template
             .as_ref()
@@ -1052,7 +1062,7 @@ pub fn overlay(_layout: &Layout, action: &str, arg: Option<&str>) -> Result<()> 
             let path = arg
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| std::path::PathBuf::from("config/schedule.example.yaml"));
-            let file = match vca_core::config::load_schedule_file(&path) {
+            let mut file = match vca_core::config::load_schedule_file(&path) {
                 Ok(f) => f,
                 Err(e) => {
                     eprintln!(
@@ -1065,6 +1075,13 @@ pub fn overlay(_layout: &Layout, action: &str, arg: Option<&str>) -> Result<()> 
                     return Ok(());
                 }
             };
+            // 课表可能只写了「第几节」，起止时间要从时间表补；
+            // 调试时 `arg` 可以指向任意一份课表文件，所以时间表按同一目录去找
+            let tt = path
+                .parent()
+                .map(|d| d.join("timetable").join("current.yaml"))
+                .unwrap_or_default();
+            file.normalize(&vca_core::config::load_timetables(&tt));
             let settings = OverlaySettings::default();
             let today = vca_platform::clock::now_local().date;
             let plan = file.plan_for_weekday(today.weekday());

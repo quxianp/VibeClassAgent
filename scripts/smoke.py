@@ -420,10 +420,19 @@ def run_checks(api: Api, base: str, mock: MockOneBot, cfg: Path) -> None:
 
     sc = {
         "teachers": [{"id": "t1", "name": "冒烟老师", "profile": "default"}],
-        "week_template": {"cycle": "every", "entries": [
-            {"day": "Mon", "period": 1, "start": "08:00", "end": "08:45",
-             "course": "冒烟课", "teacherId": "t1", "record": True, "cycle": "every"},
-        ]},
+        # 刻意**不写** start / end：新格式里课表只说「星期 + 第几节」，
+        # 起止时间由绑定的时间表算出来（对齐 ClassIsland 的 Classes 按下标对齐）。
+        # 所以这一段同时在验「时间表 -> 课表」的补全过程。
+        "week_template": {
+            "cycle": "every",
+            "time_layout_id": "default",
+            "time_rule": {"weekday": 0, "week_count": {"week": 0, "total": 0}},
+            "is_enabled": True,
+            "entries": [
+                {"day": "Mon", "period": 1,
+                 "course": "冒烟课", "teacherId": "t1", "record": True, "cycle": "every"},
+            ],
+        },
         "weekend_template": {"source": "new", "entries": []},
         "overrides": [],
     }
@@ -437,6 +446,26 @@ def run_checks(api: Api, base: str, mock: MockOneBot, cfg: Path) -> None:
         ok("回读课表一致")
     else:
         bad("回读课表", str(g))
+
+    # 只写了第 1 节，时间表里第 1 节是 08:00–08:45，读回来必须补上
+    ent0 = (g.get("entries") or [{}])[0]
+    if ent0.get("start") == "08:00" and ent0.get("end") == "08:45":
+        ok("课表时间由时间表补全", f"第 {ent0.get('period')} 节 {ent0.get('start')}–{ent0.get('end')}")
+    else:
+        bad("时间未由时间表补全", json.dumps(ent0, ensure_ascii=False)[:200])
+
+    # 界面上的「课程格」需要时间点清单当列头，接口必须给出来
+    if (g.get("class_slots") or []) and g["class_slots"][0].get("duration") == 45:
+        ok("接口回出上课时间点清单", f"{len(g['class_slots'])} 个，时长 {g['class_slots'][0]['duration']} 分钟")
+    else:
+        bad("缺少上课时间点清单", json.dumps(g.get("class_slots"), ensure_ascii=False)[:200])
+
+    # 触发规则与绑定的时间表要能原样回读 —— 界面顶上那三个下拉框靠它
+    if g.get("time_layout_id") == "default" and (g.get("time_rule") or {}).get("weekday") == 0:
+        ok("课表绑定与触发规则已落盘", f"layout={g.get('time_layout_id')}")
+    else:
+        bad("绑定/触发规则未落盘",
+            f"layout={g.get('time_layout_id')!r} rule={g.get('time_rule')!r}")
 
     # 逐条勾选：写进去的 record 必须原样回读，否则「这节课不录」形同虚设
     ent = g.get("entries") or []
@@ -519,6 +548,14 @@ def run_checks(api: Api, base: str, mock: MockOneBot, cfg: Path) -> None:
            f"{r.get('timetable_name')} / {r['slots']} 时段 / {r['entries']} 节课")
     else:
         bad("导入 ClassIsland 课表", json.dumps(r, ensure_ascii=False)[:200])
+
+    # 导入是**新增**一份时间表，不能把刚才那份「冒烟作息」顶掉
+    g2 = api.call("/api/timetable")[1] or {}
+    alltt = g2.get("all") or []
+    if len(alltt) == 2 and sum(1 for x in alltt if x.get("is_active")) == 1:
+        ok("导入新增时间表而非覆盖", " / ".join(str(x.get("name")) for x in alltt))
+    else:
+        bad("导入覆盖了已有时间表", json.dumps(alltt, ensure_ascii=False)[:200])
 
     # 老师名必须从 Subjects.TeacherName 提取出来，否则录制档案会全是「未分配」
     g = api.call("/api/schedule")[1] or {}

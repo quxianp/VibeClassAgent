@@ -390,16 +390,132 @@ pub struct ScheduleFile {
 
 impl ScheduleFile {
     /// 取指定日期适用的课程表：周六/周日用周末模板，其余用工作日模板。
+    ///
+    /// 对应 ClassIsland 的触发规则：`TimeRule.WeekDay` 不匹配时这份课表**不激活**，
+    /// 也就是那天按它排不出任何课（`weekday = 0` 表示每天，是默认值）。
+    ///
+    /// 为什么把规则判断放在这里而不是排课里：ClassIsland 的 `WeekDay` 是
+    /// **整份课表**的触发条件，而不是某一条课的属性；放在这一层语义才一致。
     pub fn plan_for_weekday(&self, weekday: u32) -> ClassPlan {
+        if !self.week_template.time_rule.match_weekday(weekday) {
+            return ClassPlan {
+                cycle: self.week_template.cycle.clone(),
+                ..ClassPlan::default()
+            };
+        }
         if weekday >= 5 {
             if let Some(w) = &self.weekend_template {
                 return ClassPlan {
                     cycle: self.week_template.cycle.clone(),
                     entries: w.entries.clone(),
+                    ..ClassPlan::default()
                 };
             }
         }
         self.week_template.clone()
+    }
+
+    /// 把「新旧两套写法」统一成 `entries`，幂等。
+    ///
+    /// 对应 ClassIsland 的加载流程：`Classes` 是按时间点索引的课程格，
+    /// 渲染与调度前会先取出课表绑定的时间表，把索引还原成起止时间。
+    /// VCA 这里做的是同一件事，只是统一摊平进 `entries`，
+    /// 好让排课逻辑（[`crate::schedule`]）对两种数据形状完全无感。
+    ///
+    /// 同时兼容旧格式：只写了 `period`（节次）没写 `start`/`end` 的条目由时间表补全，
+    /// 只写了 `start` 没写节次的条目反过来补出节次 —— 两边的信息本来就是一回事。
+    pub fn normalize(&mut self, timetables: &[Timetable]) {
+        let tt = timetables
+            .iter()
+            .find(|t| t.is_active)
+            .or(timetables.first());
+        let weekday = plan_weekday(&mut self.week_template);
+        if let Some(w) = self.weekend_template.as_mut() {
+            let mut plan = ClassPlan {
+                entries: std::mem::take(&mut w.entries),
+                ..ClassPlan::default()
+            };
+            normalize_plan(&mut plan, tt, weekday);
+            w.entries = plan.entries;
+        }
+        normalize_plan(&mut self.week_template, tt, weekday);
+        for ov in self.overrides.iter_mut() {
+            if let Some(t) = ov.target.as_mut() {
+                let mut plan = ClassPlan {
+                    entries: vec![std::mem::take(t)],
+                    ..ClassPlan::default()
+                };
+                normalize_plan(&mut plan, tt, weekday);
+                if let Some(e) = plan.entries.into_iter().next() {
+                    *t = e;
+                }
+            }
+        }
+    }
+}
+
+/// 取出课表写在 `day` 上的 `TimeRule.WeekDay`（1=周一 … 7=周日，0=每天）。
+fn plan_weekday(plan: &mut ClassPlan) -> Option<u32> {
+    let w = plan.day.take().and_then(|v| v.as_u64())? as u32;
+    plan.time_rule.weekday = w;
+    Some(w)
+}
+
+/// 把 `classes` 摊平进 `entries`，并补全缺的节次 / 时间 / 星期。
+fn normalize_plan(plan: &mut ClassPlan, tt: Option<&Timetable>, weekday: Option<u32>) {
+    for d in std::mem::take(&mut plan.classes) {
+        for (i, c) in d.slots.into_iter().enumerate() {
+            plan.entries.push(ClassEntry {
+                day: d.day.clone(),
+                // 课程格按上课时间点顺序排列，索引即第几节；
+                // 但格子上写了 period 时以格子为准（从 ClassIsland 导出的数据会带）
+                period: Some(if c.period > 0 {
+                    c.period as u32
+                } else {
+                    i as u32 + 1
+                }),
+                start: String::new(),
+                end: String::new(),
+                course: c.subject,
+                teacher_id: c.teacher_id,
+                record: c.record,
+                merge: c.merge,
+                room: None,
+                cycle: c.cycle,
+            });
+        }
+    }
+    for e in plan.entries.iter_mut() {
+        if let Some(tt) = tt {
+            fill_from_timetable(e, tt);
+        }
+        if e.day.trim().is_empty() {
+            if let Some(w) = weekday.filter(|w| (1..=7).contains(w)) {
+                e.day = crate::schedule::weekday_name(w - 1).to_string();
+            }
+        }
+    }
+}
+
+/// 用时间表补全一条课程条目里缺的节次与起止时间。
+fn fill_from_timetable(e: &mut ClassEntry, tt: &Timetable) {
+    // 节次优先：新格式只写第几节，时间是算出来的，不需要也不应该让人再抄一遍
+    if let Some(p) = e.period {
+        if let Some(s) = tt.class_slot(p.saturating_sub(1) as usize) {
+            e.start = s.start.clone();
+            e.end = s.end.clone();
+            return;
+        }
+    }
+    if e.start.trim().is_empty() {
+        return;
+    }
+    let Some(idx) = tt.class_slot_index_at(&e.start) else {
+        return;
+    };
+    e.period = Some(idx as u32 + 1);
+    if let Some(s) = tt.class_slot(idx) {
+        e.end = s.end.clone();
     }
 }
 
@@ -460,6 +576,16 @@ pub fn load_timetable_file(path: &std::path::Path) -> Result<TimetableFile, Load
         path: path.display().to_string(),
         source: e,
     })
+}
+
+/// 读时间表列表；文件不存在或读不动都返回空表。
+///
+/// 「课表要把第几节还原成起止时间」这条链路在 daemon 与界面里都要用，
+/// 统一走这里，免得各处各写一遍 `if exists`。
+pub fn load_timetables(path: &std::path::Path) -> Vec<Timetable> {
+    load_timetable_file(path)
+        .map(|tf| tf.timetables)
+        .unwrap_or_default()
 }
 
 /// 从 YAML 文件加载课程表。
@@ -627,7 +753,10 @@ impl ScheduleFile {
 
         match best {
             Some((ver, path)) => match load_schedule_file(&path) {
-                Ok(f) => {
+                Ok(mut f) => {
+                    // 存档里可能是新格式（只写第几节），过一遍归一化再取条目，
+                    // 否则拿到的条目没有起止时间，排课时会当作坏条目丢掉
+                    f.normalize(&[]);
                     let entries = f
                         .weekend_template
                         .as_ref()
@@ -690,5 +819,270 @@ impl PluginRouting {
             v.push(("docgen", self.docgen.as_str()));
         }
         v
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{DayClasses, SlotKind, TimeRule, TimetableSlot};
+
+    fn tt() -> Timetable {
+        Timetable {
+            id: "default".into(),
+            name: "作息".into(),
+            is_active: true,
+            source: "manual".into(),
+            group: "global".into(),
+            slots: vec![
+                TimetableSlot {
+                    period: Some(1),
+                    start: "08:00".into(),
+                    end: "08:40".into(),
+                    kind: SlotKind::Class,
+                    ..TimetableSlot::default()
+                },
+                TimetableSlot {
+                    start: "08:40".into(),
+                    end: "08:50".into(),
+                    kind: SlotKind::Break,
+                    name: Some("课间".into()),
+                    ..TimetableSlot::default()
+                },
+                TimetableSlot {
+                    period: Some(2),
+                    start: "08:50".into(),
+                    end: "09:30".into(),
+                    kind: SlotKind::Class,
+                    ..TimetableSlot::default()
+                },
+            ],
+        }
+    }
+
+    fn sched(yaml: &str) -> ScheduleFile {
+        serde_yaml::from_str(yaml).expect("课表应能解析")
+    }
+
+    #[test]
+    fn normalize_fills_times_from_timetable() {
+        // 新格式的核心：课表只写第几节，时间由时间表算出来
+        let mut f = sched(
+            "week_template:\n  entries:\n    - { day: Mon, period: 2, course: 数学, teacherId: t1 }\n",
+        );
+        f.normalize(&[tt()]);
+        let e = &f.week_template.entries[0];
+        assert_eq!(e.start, "08:50", "第 2 节的开始时间应由时间表给出");
+        assert_eq!(e.end, "09:30", "课间不占节次，第 2 节仍是真正的第 2 节");
+        assert_eq!(e.course, "数学");
+    }
+
+    #[test]
+    fn normalize_recovers_period_from_start_time() {
+        // 旧格式只写了起止时间，反过来把节次补出来（升级时用）
+        let mut f = sched(
+            "week_template:\n  entries:\n    - { day: Tue, start: \"08:00\", end: \"08:40\", course: 语文, teacherId: t1 }\n",
+        );
+        f.normalize(&[tt()]);
+        assert_eq!(f.week_template.entries[0].period, Some(1));
+    }
+
+    #[test]
+    fn normalize_flattens_day_classes() {
+        // ClassIsland 那种「按星期分块」的写法，与 entries 完全等价
+        let mut f = sched(
+            "week_template:\n  classes:\n    - day: Wed\n      slots:\n        - { period: 2, subject: 英语, teacherId: t2, record: false }\n",
+        );
+        f.normalize(&[tt()]);
+        let e = &f.week_template.entries[0];
+        assert_eq!((e.day.as_str(), e.period), ("Wed", Some(2)));
+        assert_eq!((e.course.as_str(), e.start.as_str()), ("英语", "08:50"));
+        assert!(!e.record);
+        assert!(f.week_template.classes.is_empty(), "摊平后不该留两份数据");
+    }
+
+    #[test]
+    fn normalize_is_idempotent() {
+        let mut f = sched(
+            "week_template:\n  entries:\n    - { day: Mon, period: 1, course: x, teacherId: t }\n",
+        );
+        f.normalize(&[tt()]);
+        let once = serde_yaml::to_string(&f).unwrap();
+        f.normalize(&[tt()]);
+        assert_eq!(once, serde_yaml::to_string(&f).unwrap(), "读两次不该改两遍");
+    }
+
+    #[test]
+    fn weekday_number_becomes_day_name() {
+        // ClassIsland 的 TimeRule.WeekDay 是数字，落成 VCA 的星期名
+        let mut f = sched(
+            "week_template:\n  day: 3\n  entries:\n    - { period: 1, course: x, teacherId: t }\n",
+        );
+        f.normalize(&[tt()]);
+        assert_eq!(f.week_template.time_rule.weekday, 3);
+        assert_eq!(f.week_template.entries[0].day, "Wed");
+    }
+
+    /// 一份「每天都有课」的最小课表，用来单独验触发规则。
+    fn one_lesson() -> ScheduleFile {
+        sched("week_template:\n  entries:\n    - { day: Mon, period: 1, start: \"08:00\", end: \"08:40\", course: 语文, teacherId: t1 }\n")
+    }
+
+    fn monday() -> crate::time::LocalDate {
+        crate::time::LocalDate::new(2025, 3, 17)
+    }
+
+    #[test]
+    fn trigger_weekday_blocks_other_days() {
+        let mut f = one_lesson();
+        assert_eq!(
+            f.plan_for_weekday(0).entries.len(),
+            1,
+            "默认 weekday=0 表示每天"
+        );
+        // 改成「只在周二生效」（ClassIsland 的 2 = 周二）
+        f.week_template.time_rule.weekday = 2;
+        assert!(f.plan_for_weekday(0).entries.is_empty(), "周一不该生效");
+        assert_eq!(f.plan_for_weekday(1).entries.len(), 1, "周二才生效");
+    }
+
+    #[test]
+    fn trigger_week_count_rotates_in_planning() {
+        use crate::model::CycleRule;
+        let mut f = one_lesson();
+        // 只在「第 2 周」上（配合双周轮换）
+        f.week_template.time_rule.week_count = CycleRule { week: 2, total: 2 };
+        let plan = f.plan_for_weekday(0);
+        let run = |p: crate::schedule::WeekParity| {
+            crate::schedule::plan_for_date(monday(), p, &plan, &[], false).len()
+        };
+        assert_eq!(run(crate::schedule::WeekParity::Odd), 0, "单周不该上课");
+        assert_eq!(run(crate::schedule::WeekParity::Even), 1, "双周才上课");
+    }
+
+    #[test]
+    fn unknown_week_number_does_not_drop_lessons() {
+        use crate::model::CycleRule;
+        let mut f = one_lesson();
+        // 三周及以上轮换：VCA 算不出「现在是第几教学周」，必须放行而不是漏课
+        f.week_template.time_rule.week_count = CycleRule { week: 3, total: 4 };
+        let plan = f.plan_for_weekday(0);
+        for p in [
+            crate::schedule::WeekParity::Every,
+            crate::schedule::WeekParity::Odd,
+            crate::schedule::WeekParity::Even,
+        ] {
+            assert_eq!(
+                crate::schedule::plan_for_date(monday(), p, &plan, &[], false).len(),
+                1,
+                "算不出周次时应照常上课（{p:?}）"
+            );
+        }
+    }
+
+    #[test]
+    fn trigger_date_range_limits_plan() {
+        let mut f = one_lesson();
+        f.week_template.time_rule.from = Some(crate::time::LocalDate::new(2025, 4, 1));
+        let plan = f.plan_for_weekday(0);
+        assert_eq!(
+            crate::schedule::plan_for_date(
+                monday(),
+                crate::schedule::WeekParity::Every,
+                &plan,
+                &[],
+                false
+            )
+            .len(),
+            0,
+            "3 月还没到生效期"
+        );
+        let later = crate::time::LocalDate::new(2025, 4, 7);
+        assert_eq!(
+            crate::schedule::plan_for_date(
+                later,
+                crate::schedule::WeekParity::Every,
+                &plan,
+                &[],
+                false
+            )
+            .len(),
+            1,
+            "4 月的周一应生效"
+        );
+    }
+
+    #[test]
+    fn time_rule_matches_weekday_and_rotation() {
+        use crate::model::CycleRule;
+        let r = TimeRule {
+            weekday: 3, // 周三
+            week_count: CycleRule { week: 1, total: 2 },
+            ..TimeRule::default()
+        };
+        let wed = crate::time::LocalDate::new(2025, 3, 19);
+        assert_eq!(wed.weekday(), 2, "2025-03-19 是周三");
+        assert!(r.matches(wed, 1), "第 1 周应命中");
+        assert!(!r.matches(wed, 2), "第 2 周不该命中");
+        let thu = crate::time::LocalDate::new(2025, 3, 20);
+        assert!(!r.matches(thu, 1), "星期四不该命中");
+    }
+
+    #[test]
+    fn timetable_issues_flag_overlap_and_missing_class() {
+        let t = Timetable {
+            slots: vec![
+                TimetableSlot {
+                    start: "08:00".into(),
+                    end: "09:00".into(),
+                    kind: SlotKind::Break,
+                    ..TimetableSlot::default()
+                },
+                TimetableSlot {
+                    start: "08:30".into(),
+                    end: "09:30".into(),
+                    kind: SlotKind::Break,
+                    ..TimetableSlot::default()
+                },
+            ],
+            ..Timetable::default()
+        };
+        let issues = t.issues();
+        assert!(
+            issues.iter().any(|s| s.contains("没有上课节")),
+            "{issues:?}"
+        );
+        assert!(issues.iter().any(|s| s.contains("重叠")), "{issues:?}");
+        assert!(tt().issues().is_empty(), "正常作息不该报问题");
+    }
+
+    #[test]
+    fn duration_comes_from_start_and_end() {
+        let s = tt().slots[0].clone();
+        assert_eq!(s.duration_minutes(), 40);
+    }
+
+    #[test]
+    fn day_classes_round_trips_through_yaml() {
+        // 写出去的格式要能读回来（界面保存后立刻回读校验，这条是它的保证）
+        let plan = ClassPlan {
+            time_layout_id: "default".into(),
+            classes: vec![DayClasses {
+                day: "Mon".into(),
+                slots: vec![crate::model::ClassSlot {
+                    period: 1,
+                    subject: "语文".into(),
+                    teacher_id: "t1".into(),
+                    record: true,
+                    merge: false,
+                    cycle: None,
+                }],
+            }],
+            ..ClassPlan::default()
+        };
+        let y = serde_yaml::to_string(&plan).unwrap();
+        let back: ClassPlan = serde_yaml::from_str(&y).unwrap();
+        assert_eq!(back.time_layout_id, "default");
+        assert_eq!(back.classes[0].slots[0].subject, "语文");
     }
 }

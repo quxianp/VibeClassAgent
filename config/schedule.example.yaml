@@ -5,25 +5,37 @@
 # 都不一样。空着启动时程序会明确说「今天没有课」，比假装有课清楚得多。
 #
 # 怎么填（三个办法，任选）
-#   1) 交互界面里选「3 课表管理」→「导入」（推荐）
+#   1) 图形界面「课表」页，在课程格里直接点（推荐）
 #   2) 命令行：vca import classisland "C:\...\Default.json"
 #   3) 直接改这个文件（格式见下）
 #
+# 这套结构对齐 ClassIsland 的「课表」：
+#   week_template            ←→ ClassPlans.<guid>
+#   time_layout_id           ←→ ClassPlan.TimeLayoutId（绑定哪份时间表）
+#   time_rule                ←→ ClassPlan.TimeRule
+#     weekday                ←→ TimeRule.WeekDay（1=周一 … 7=周日，0=每天）
+#     week_count.week        ←→ TimeRule.WeekCountDiv（0=不轮换、1=单周、2=双周）
+#     week_count.total       ←→ TimeRule.WeekCountDivTotal（轮换总周数）
+#   is_enabled               ←→ ClassPlan.IsEnabled（是否默认启用）
+#   entries[]                ←→ ClassPlan.Classes[]
+#   classes[]                ←→ ClassPlan.Classes[]（按星期分块，等价写法）
+#
 # 字段说明
 #   day        星期，Mon / Tue / Wed / Thu / Fri / Sat / Sun
-#   period     第几节，仅用于显示
-#   start/end  起止时间 HH:MM，应当落在时间表里 type: class 的时段内
-#   course     课程名
+#   period     第几节（从 1 起）。**起止时间由绑定的时间表算出来，不用自己写**——
+#              这正是 ClassIsland 的做法：改时间表，所有课的时间跟着变。
+#   start/end  起止时间 HH:MM，可省略；写了就按写的来（兼容旧数据）
+#   course     课程名（对应 ClassIsland 的 Subject）
 #   teacherId  教师 id，对应下面 teachers 里的 id
 #   record     这节课要不要录（true / false）—— 不想录的设 false
 #   cycle      单双周：every（默认）/ odd（单周）/ even（双周）
 #
 # 一条长这样（去掉行首的 # 即可启用）：
-#   - { day: Mon, period: 1, start: "08:00", end: "08:45", course: "语文", teacherId: t1, record: true }
+#   - { day: Mon, period: 1, course: "语文", teacherId: t1, record: true }
 #
 # 单双周排在同一时段是正常用法，程序不会当成冲突：
-#   - { day: Wed, period: 1, start: "08:00", end: "08:45", course: "单周课", teacherId: t1, record: true, cycle: odd }
-#   - { day: Wed, period: 1, start: "08:00", end: "08:45", course: "双周课", teacherId: t1, record: true, cycle: even }
+#   - { day: Wed, period: 1, course: "单周课", teacherId: t1, record: true, cycle: odd }
+#   - { day: Wed, period: 1, course: "双周课", teacherId: t1, record: true, cycle: even }
 # ============================================================================
 
 teachers:
@@ -31,7 +43,23 @@ teachers:
 
 week_template:
   cycle: "every"
+  # 绑定的时间表 id（对应 timetable/current.yaml 里那份的 id）
+  time_layout_id: default
+  # 触发规则：weekday 0 = 每天（也支持 1=周一 … 7=周日，配合单双周做轮换）
+  time_rule:
+    weekday: 0
+    week_count: { week: 0, total: 0 }
+  is_enabled: true
   entries: []
+
+# 另有一种等价的写法，按星期分块（与 ClassIsland 的 Classes 一一对应）：
+#   classes:
+#     - day: Mon
+#       slots:
+#         - { period: 1, subject: "语文", teacherId: t1, record: true }
+#     - day: Tue
+#       slots:
+#         - { period: 1, subject: "数学", teacherId: t2, record: true }
 
 # 周末课表：source 为 new 表示用下面自己的 entries；想沿用工作日课表就写 source: inherit
 weekend_template:

@@ -427,12 +427,13 @@ for ($i=1; $i -le 5; $i++) {
 - 清理：登记 72 小时计划
 - 端到端：`vca debug e2e` 跑通，结束状态 `Pushed`
 - 插件：`vca plugin list` 列出 10 个；示例插件五个方法全部应答正确
-- **质量关（本轮）**：`scripts\gate.cmd` 三关全过 —— fmt 合规、clippy（`--workspace --all-targets -- -D warnings`）零告警、269 个单元测试全绿
-- **GUI 形态（本轮）**：`python scripts/smoke.py` 41 项全过 ——
+- **质量关（本轮）**：`scripts\gate.cmd` 三关全过 —— fmt 合规、clippy（`--workspace --all-targets -- -D warnings`）零告警、289 个单元测试全绿
+- **GUI 形态（本轮）**：`python scripts\smoke.py` **58 项全过** ——
   静态资源、令牌保护（错误 token 403）、配置写入与回读、真实发送测试消息
   （自带 mock OneBot 收报文并校验内容）、时间表推导处理窗口、
-  ClassIsland 课表导入、逐条「录制」开关落盘、界面文案接口、
-  机器人探测、守护进程起停、作业与清理预览、退出接口
+  **课表时间由时间表补全**、**上课时间点清单**、**绑定与触发规则落盘**、
+  ClassIsland 课表导入、**导入新增时间表而非覆盖**、逐条「录制」开关落盘、
+  界面文案接口、机器人探测、守护进程起停、作业与清理预览、退出接口
 - **daemon 全链路（2026-09-20 真实时间轴实测）**：到点自动开录 → 录制中拒绝处理
   → 收尾成 mp4 → 处理窗口内自动跑完转写 / 截图关联 / 生成文档 / 推送 / 登记 72 小时清理。
   终点作业状态 `PUSHED`、`push_succeeded_at` 有值、`expire_at` = +72h、`last_error` 为空；
@@ -451,6 +452,97 @@ for ($i=1; $i -le 5; $i++) {
 | **企业微信智能机器人（aibot）的完整链路**（本轮新增） | 没有真实的企业微信机器人凭据。**但协议实现已经真连验证过**：用假凭据连 `wss://openws.work.weixin.qq.com`，拿到了 `errcode=853000 invalid bot_id or secret` —— 说明 TLS 握手、WebSocket 协议升级、认证帧构造、`req_id` 回执匹配全部正确，只差真凭据。发送帧（`aibot_send_msg`）之后的部分没验过 | 在企业微信后台建一个智能机器人，填上 ID / Secret / 会话 id 后点「发送测试消息」 |
 | **NapCat 的真实下载**（本轮新增） | 开发机**连不上 GitHub**（直连超时、本地代理没在跑），三个下载源一个都验不到。识别 / 解压 / 起停 / 日志这些**逻辑**用构造的假安装目录测过（含 17 个单元测试），但「真的能从 GitHub 下到 60 MB 的包」没验过 | 在能上网的机器上点一次「一键安装」，确认 `tools/napcat/` 里出现 `launcher.bat` 一类入口 |
 | **NapCat 真实启动与扫码登录**（本轮新增） | 没有真实 NapCat 包，也没有可登录的 QQ 小号 | 装好之后点「启动」，看日志里是否出现二维码、扫码后 OneBot 端口（默认 3000）是否开始监听 |
+
+---
+
+### 📐 课表模型与 ClassIsland 的逐项对照（本轮重构）
+
+时间表与课表的**数据结构、编辑交互、调度模型**三条都对齐了 ClassIsland。
+对齐依据是它的官方文档与 API 文档（不是猜的）：
+
+- [时间表 | ClassIsland 文档](https://docs.classisland.tech/app/profile/time-layout.html)
+- [课表 | ClassIsland 文档](https://docs.classisland.tech/app/profile/classplan.html)
+- [ClassIsland.Shared.Models.Profile 命名空间 | API 文档](https://api.docs.classisland.tech/api/ClassIsland.Shared.Models.Profile.html)
+
+#### 一、数据结构逐项对照
+
+| ClassIsland | VCA 对应 | 位置 | 说明 |
+|---|---|---|---|
+| `Profile.TimeLayouts.<guid>` | `Timetable` | `model.rs` | 可有多份；`is_active` 标当前启用 |
+| `Profile.ClassPlans.<guid>` | `ClassPlan` | `model.rs` | 可有多份 |
+| `TimeLayout.Layouts[]` | `Timetable.slots[]` | `model.rs` | 一天的时间点序列 |
+| `TimeLayoutItem.StartTime` / `EndTime` | `TimetableSlot.start` / `end` | `model.rs` | `HH:mm` 字符串 |
+| `TimeLayoutItem.Last`（算出来的时长） | `TimetableSlot::duration_minutes()` | `model.rs` | 由结束减开始算出，不落盘 |
+| `TimeLayoutItem.TimeType`（0 课 / 1 课间 / 2 分割线 / 3 行动） | `SlotKind::{Class, Break}` | `model.rs` | **只实现 0 与 1**，2/3 见下「刻意的差异」 |
+| `TimeLayoutItem.BreakName` | `TimetableSlot.name` | `model.rs` | 课间名称 |
+| `TimeLayoutItem.DefaultClassId` | `TimetableSlot.default_subject` | `model.rs` | 该时间点的默认科目 |
+| `TimeLayoutItem.IsHideDefault` | `TimetableSlot.is_hidden` | `model.rs` | 默认隐藏 |
+| `ClassPlan.TimeLayoutId` | `ClassPlan.time_layout_id` | `model.rs` | 课表绑定哪份时间表 |
+| `ClassPlan.TimeRule.WeekDay`（1=周一…7=周日） | `TimeRule.weekday` | `model.rs` | `0` 表示每天 |
+| `ClassPlan.TimeRule.WeekCountDiv` / `WeekCountDivTotal` | `TimeRule.week_count: CycleRule{week,total}` | `model.rs` | 多周轮换 |
+| `ClassPlan.IsEnabled` | `ClassPlan.is_enabled` | `model.rs` | 是否默认启用 |
+| `ClassPlan.Classes[]` | `ClassPlan.classes[]`（`DayClasses.slots[].ClassSlot`） | `model.rs` | 按星期分块、按时间点索引 |
+| `ClassInfo.Index`（课程在课表中的位置） | `ClassSlot.period` | `model.rs` | 落在第几个**上课**时间点 |
+| `ClassInfo.SubjectId` | `ClassSlot.subject` | `model.rs` | VCA 直接存科目名，省掉一层 GUID 间接 |
+| `ClassInfo.IsEnabled` | `ClassSlot.record` | `model.rs` | VCA 这里还兼作「这节课录不录」 |
+| `ClassPlan.ValidTimeLayoutItems`（只保留上课类型的时间点） | `Timetable::class_slots()` | `model.rs` | 课程格的列头就是它 |
+| `ClassPlanGroup` | `Timetable.group` | `model.rs` | 仅用于归档展示 |
+| 「时间表必须没有被任何课表使用才能删」 | 删除保护 | `app.js` + `post_timetable` | 同样拒绝删除在用的时间表 |
+
+#### 二、交互逐项对照
+
+| ClassIsland 的做法 | VCA 实现 | 位置 |
+|---|---|---|
+| 编辑窗口左侧选时间表、中间编辑、右侧看详情 | `.tt-wrap` 三栏主从布局 | `app.js` `renderTimetable()` |
+| 时间表编辑器有**列表视图**与**时间轴视图** | 表格 + 按分钟数占宽的 `.tl-bar` 时间轴预览 | `app.js` / `style.css` |
+| 新增上课点默认 40 分钟、课间默认 10 分钟 | `addRow` / `data-add` 同默认值 | `app.js` |
+| 新时间点默认接在已有时间点之后 | 插入时 `start = 上一段.end` | `app.js` |
+| 选中时间点后拖动开始/结束把柄改时间 | 改「开始」→ 结束与时长顺延；改「时长」→ 结束随之变 | `app.js` |
+| 「时间点信息」里改名称与默认科目 | 右侧详情栏：默认科目 + 默认隐藏 | `app.js` |
+| 时间点类型可选（上课 / 课间 / 分割线 / 行动） | 上课 / 课间两档（见「刻意的差异」） | `app.js` |
+| 课表按时间点对齐填课程（列=时间点、行=星期） | `.sc-grid` 课程格，列头带节次与时长 | `app.js` `renderSchedule()` |
+| 科目来自统一的科目库 | `<datalist>` 候选来自课表里已出现的科目名 | `app.js` |
+| 课表触发规则（星期 + 单双周）在编辑窗口里设 | 课表页顶部的「时间表 / 触发：星期 / 周次 / 默认启用」四个控件 | `app.js` |
+| 删除正在被课表使用的时间表会被拒绝 | 前端查 `/api/schedule` 后拒绝；后端也校验绑定是否存在 | `app.js` / `api.rs` |
+
+#### 三、调度模型
+
+- ClassIsland：`TimeRule` 全满足 → 该课表激活 → 用它的 `TimeLayoutId` 找到时间表 →
+  `Classes[i]` 与第 i 个**上课**时间点一一对应。
+- VCA：`ScheduleFile::normalize()` 把 `classes`（或旧格式 `entries`）统一摊平成
+  `entries`，`start`/`end` 由绑定的时间表补出；随后
+  `schedule::plan_for_date()` 照旧按下标/时间算课。
+  **对外行为完全没变** —— 只是课表不再要求用户手抄起止时间。
+- 落点：`crates/vca-core/src/config.rs::ScheduleFile::normalize`，
+  以及 `fill_from_timetable`（节次 → 时间、时间 → 节次双向补全）。
+- **触发规则真的参与排课**（不只是落盘校验）：
+  - `ScheduleFile::plan_for_weekday` 先用 `TimeRule.WeekDay` 判断这份课表当天是否生效
+    （`0` = 每天，是默认值）—— `WeekDay` 在 ClassIsland 里是**整份课表**的触发条件，
+    不是某一条课的属性，所以判断放在这一层
+  - `schedule::plan_for_date` 再用 `TimeRule` 判一遍「星期 + 生效日期区间 + 周次轮换」
+  - 周次来源是 `WeekParity`：`week_no(rule)` 只在课表确实是「2 周一轮」时
+    给出周次（单周=1、双周=2）；其余情况返回 `0` 表示「不知道第几周」，
+    `CycleRule::matches_week` 会放行 —— **宁可照常上课，也不要因为算不出周次而静默漏课**
+    （三周及以上的轮换要等「当前是第几个教学周」有来源时再补）
+
+#### 四、旧数据自动升级（不丢东西）
+
+- 读到旧格式（`entries` 只有起止时间、没有节次）时自动补出节次，
+  **原文件另存为 `current.yaml.bak`**，然后就地升级。
+- 判据保守：只有确实能补出信息才动文件；格式已经对的配置一个字节都不改。
+- 代码：`crates/vca-core/src/import.rs::upgrade_schedule_file`
+  （`needs_upgrade` 先试跑一遍再决定要不要落盘）。
+- daemon 与 GUI 两条读盘路径都会触发，用户不需要手工改 YAML。
+
+#### 五、刻意的差异（**不是漏做**）
+
+| 项 | 为什么不做 |
+|---|---|
+| `TimeType` 2（分割线）/ 3（行动） | VCA 没有「自动化行动」这一层，分割线只是显示效果；实现它只会多两个永远不触发的分支 |
+| `ClassPlan.IsOverlay` / `OverlaySourceId`（临时层） | VCA 用 `Overrides`（`cancel` / `cancel-one` / `add` / `move`）表达当天的临时调整，语义等价且更简单 |
+| `ClassPlanGroup` 的群优先级加载 | VCA 单教师、单套课表，`group` 只留作归档展示 |
+| `TimeRule` 缺省时「所有课表都不激活」 | VCA 是 `week_template` 直接生效（没有多套并存），否则用户排完课却发现「今天没课」，比不激活更难解释 |
+| 科目单独一张 GUID 表 | VCA 直接用科目名，避免在单机场景里多一层查表 |
 
 ---
 

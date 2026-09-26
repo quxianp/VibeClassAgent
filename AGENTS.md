@@ -10,8 +10,8 @@
 「语音转写 → 要点提取 → 截图关联 → 生成带图文档 → 推送到微信/QQ → 到期清理」。
 
 - 技术栈：**纯 Rust**（无 Python 运行时）
-- 规模：约 1.2 万行源码，39 个 `.rs`
-- 状态：**四大核心功能已实测通过**，269 个单元测试全绿，clippy 零告警（`scripts\gate.cmd`）
+- 规模：约 2.3 万行源码，60 个 `.rs`
+- 状态：**四大核心功能已实测通过**，289 个单元测试全绿，clippy 零告警（`scripts\gate.cmd`）
 
 ## 接续工作前必读
 
@@ -23,7 +23,7 @@
 ## 三条硬规矩
 
 1. **文档里不写没验证过的数字或功能**。上一任 agent 的 README 在同一页里
-   写着「109 个测试」和「88 个测试」（实测 123），还把只有空壳的功能写成"已实现" ——
+   写着「109 个测试」和「88 个测试」（实测 289），还把只有空壳的功能写成"已实现" ——
    这是用户给出"太垃圾了"评价的直接原因。**不确定就标注为待确认。**
 2. **绝不提交凭据**。token / webhook / password 一律走环境变量或
    `secrets.env`（已被 `.gitignore` 排除）。推送 GitHub 时注意别把 token 打进输出。
@@ -38,6 +38,7 @@
 cd D:\VibeClassAgent
 .\scripts\gate.cmd             # 提交前的三道关（fmt / clippy / test）
 .\scripts\gate.cmd -SkipTest   # 只想快速看格式与静态检查
+.\scripts\fmt.cmd              # 就地格式化（直接敲 cargo fmt 会走 rustup 默认工具链而失败）
 .\scripts\dev.cmd              # 编译并进交互界面（数字菜单 + / 命令）
 .\scripts\dev.cmd -Check       # 只做 cargo check
 .\scripts\dev.cmd doctor       # 环境自检

@@ -293,6 +293,7 @@ mod tests {
             is_active: true,
             source: "manual".into(),
             slots,
+            ..Timetable::default()
         }
     }
 
@@ -303,6 +304,7 @@ mod tests {
             end: e.into(),
             kind: SlotKind::Class,
             name: None,
+            ..TimetableSlot::default()
         }
     }
 
@@ -313,6 +315,7 @@ mod tests {
             end: e.into(),
             kind: SlotKind::Break,
             name: Some(name.into()),
+            ..TimetableSlot::default()
         }
     }
 

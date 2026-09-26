@@ -35,7 +35,7 @@ pub struct PushEntry {
     pub target_type: String,
 }
 
-/// 全部渠道的记忆，按渠道 id 索引（`onebot` / `wecom` / `dingtalk` / …）。
+/// 全部渠道的记忆，按渠道 id 索引（`onebot` / `qq` / `wecom` / …）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PushProfiles {
     /// 渠道 id -> 该渠道上次用的地址与目标。
@@ -101,15 +101,15 @@ mod tests {
     fn remember_and_read_back() {
         let mut p = PushProfiles::default();
         p.remember(
-            "dingtalk",
+            "qq",
             PushEntry {
-                endpoint: "https://oapi.dingtalk.com/robot/send?access_token=x".into(),
+                endpoint: "https://api.sgroup.qq.com".into(),
                 target: "13800000000".into(),
                 target_type: "group".into(),
             },
         );
-        let got = p.get("dingtalk");
-        assert!(got.endpoint.contains("dingtalk"));
+        let got = p.get("qq");
+        assert!(got.endpoint.contains("qq"));
         assert_eq!(got.target, "13800000000");
     }
 
@@ -126,9 +126,9 @@ mod tests {
             },
         );
         p.remember(
-            "dingtalk",
+            "qq",
             PushEntry {
-                endpoint: "https://oapi.dingtalk.com/robot/send?access_token=y".into(),
+                endpoint: "https://api.sgroup.qq.com".into(),
                 target: "13900000000".into(),
                 target_type: "group".into(),
             },
@@ -136,8 +136,8 @@ mod tests {
 
         assert_eq!(p.get("onebot").endpoint, "http://127.0.0.1:3000");
         assert_eq!(p.get("onebot").target, "123456");
-        assert!(p.get("dingtalk").endpoint.contains("dingtalk"));
-        assert_eq!(p.get("dingtalk").target, "13900000000");
+        assert!(p.get("qq").endpoint.contains("qq"));
+        assert_eq!(p.get("qq").target, "13900000000");
     }
 
     #[test]
@@ -152,7 +152,7 @@ mod tests {
                 target_type: "group".into(),
             },
         );
-        let fresh = p.get("telegram");
+        let fresh = p.get("wecom");
         assert_eq!(fresh.endpoint, "");
         assert_eq!(fresh.target, "");
     }
@@ -162,9 +162,9 @@ mod tests {
         let f = tmp("roundtrip");
         let mut p = PushProfiles::default();
         p.remember(
-            "feishu",
+            "wecom",
             PushEntry {
-                endpoint: "https://open.feishu.cn/open-apis/bot/v2/hook/abc".into(),
+                endpoint: "https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc".into(),
                 target: String::new(),
                 target_type: String::new(),
             },
@@ -172,7 +172,7 @@ mod tests {
         p.save(&f).unwrap();
 
         let back = PushProfiles::load(&f);
-        assert_eq!(back.get("feishu").endpoint, p.get("feishu").endpoint);
+        assert_eq!(back.get("wecom").endpoint, p.get("wecom").endpoint);
         let _ = std::fs::remove_dir_all(f.parent().unwrap());
     }
 

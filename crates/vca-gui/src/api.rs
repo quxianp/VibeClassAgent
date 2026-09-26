@@ -431,7 +431,6 @@ fn pick(v: &Value, key: &str, env: &str) -> String {
 /// 开始找会话。
 ///
 /// 两个渠道的取法完全不同：
-/// - **Telegram**：`getUpdates` 一次调用就列出来（用户得先给机器人发过话）。
 /// - **企业微信智能机器人**：企业微信**不提供**会话列表接口，只能连上 WS
 ///   监听一段时间，把期间出现过的会话收集起来 —— 所以这里得等十几秒。
 ///
@@ -445,7 +444,7 @@ fn push_discover(body: &str) -> Result<Value> {
     let provider = v
         .get("provider")
         .and_then(|x| x.as_str())
-        .unwrap_or("telegram")
+        .unwrap_or("wecom-aibot")
         .to_string();
 
     {
@@ -505,17 +504,9 @@ fn push_discover(body: &str) -> Result<Value> {
         }));
     }
 
-    // Telegram
-    let token = pick(&v, "token", "VCA_PUSH_TOKEN");
-    std::thread::spawn(move || {
-        let mut st = discover_state();
-        match vca_platform::bots::telegram_chat_ids(&token, 20_000) {
-            Ok(list) => st.chats = list,
-            Err(e) => st.error = Some(e.to_string()),
-        }
-        st.running = false;
-    });
-    Ok(json!({"ok": true, "message": "正在问 Telegram 要会话列表…"}))
+    // 只有企微智能机器人需要「找会话」（它要一个 chatid）。
+    // QQ 侧的两个渠道都不需要：OneBot 填群号、QQ 官方填群 openid。
+    Ok(json!({"ok": false, "error": "这个渠道没有「获取会话」这种方式"}))
 }
 
 /// 让正在跑的会话监听提前收工（用户已经拿到想要的会话了）。
@@ -712,19 +703,59 @@ fn timetable_file(opts: &ServeOptions) -> PathBuf {
     opts.config_root.join("timetable").join("current.yaml")
 }
 
+/// 读时间表文件（不存在就返回空表）。
+fn load_timetables(opts: &ServeOptions) -> Vec<vca_core::model::Timetable> {
+    vca_core::config::load_timetables(&timetable_file(opts))
+}
+
+/// 读课表文件并归一化（不存在返回 None）。
+///
+/// 顺便把旧格式就地升级成新格式并留一份 `.bak` ——
+/// 升级意味着用户以后不用再人肉对着时间表抄起止时间。
+fn load_schedule(opts: &ServeOptions) -> Option<vca_core::config::ScheduleFile> {
+    let p = schedule_file(opts);
+    let tts = load_timetables(opts);
+    if let Some(bak) = vca_core::import::upgrade_schedule_file(&p, &tts) {
+        tracing::info!("课表已升级为新格式，原文件备份在 {}", bak.display());
+    }
+    let text = std::fs::read_to_string(&p).ok()?;
+    let mut f: vca_core::config::ScheduleFile = serde_yaml::from_str(&text).ok()?;
+    f.normalize(&tts);
+    Some(f)
+}
+
 fn get_schedule(opts: &ServeOptions) -> Result<Value> {
     ensure_settings(opts, &settings_path(opts));
-    let p = schedule_file(opts);
-    if !p.is_file() {
+    let tts = load_timetables(opts);
+    let Some(mut f) = load_schedule(opts) else {
         return Ok(json!({"ok": true, "exists": false, "entries": [], "teachers": []}));
-    }
-    let text = std::fs::read_to_string(&p)?;
-    let f: vca_core::config::ScheduleFile =
-        serde_yaml::from_str(&text).map_err(|e| anyhow::anyhow!("课表文件解析失败：{e}"))?;
+    };
+    f.normalize(&tts);
+    let active = tts.iter().find(|t| t.is_active).or(tts.first());
+    // 上课时间点清单：界面上「课表」是按时间点排课程格，需要它当列头
+    let class_slots: Vec<Value> = active
+        .map(|t| {
+            t.class_slots()
+                .iter()
+                .enumerate()
+                .map(|(i, s)| {
+                    json!({
+                        "index": i,
+                        "period": s.period,
+                        "start": s.start,
+                        "end": s.end,
+                        "duration": s.duration_minutes(),
+                        "default_subject": s.default_subject,
+                        "is_hidden": s.is_hidden,
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(json!({
         "ok": true,
         "exists": true,
-        "path": p.display().to_string(),
+        "path": schedule_file(opts).display().to_string(),
         "teachers": f.teachers,
         "entries": f.week_template.entries,
         "week_cycle": f.week_template.cycle,
@@ -734,12 +765,24 @@ fn get_schedule(opts: &ServeOptions) -> Result<Value> {
             .map(|w| w.entries.clone())
             .unwrap_or_default(),
         "overrides": f.overrides,
+        // 与 ClassIsland 一样，把「这份课表绑的时间表 / 触发规则」一并给界面，
+        // 界面才有东西可编辑（而不是只能改一堆隐式约定）
+        "time_layout_id": f.week_template.time_layout_id,
+        "time_rule": f.week_template.time_rule,
+        "is_enabled": f.week_template.is_enabled,
+        "class_slots": class_slots,
+        "time_layouts": tts
+            .iter()
+            .map(|t| json!({"id": t.id, "name": t.name, "is_active": t.is_active}))
+            .collect::<Vec<_>>(),
     }))
 }
 
 fn post_schedule(opts: &ServeOptions, body: &str) -> Result<Value> {
-    let f: vca_core::config::ScheduleFile =
+    let mut f: vca_core::config::ScheduleFile =
         serde_json::from_str(body).map_err(|e| anyhow::anyhow!("提交的课表格式不对：{e}"))?;
+    let tts = load_timetables(opts);
+    f.normalize(&tts);
     let p = schedule_file(opts);
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
@@ -758,8 +801,23 @@ fn post_schedule(opts: &ServeOptions, body: &str) -> Result<Value> {
     std::fs::write(&p, text)?;
 
     // 回读确认
-    let back: vca_core::config::ScheduleFile = serde_yaml::from_str(&std::fs::read_to_string(&p)?)?;
-    let issues = vca_core::schedule::validate(None, &back.week_template);
+    let mut back: vca_core::config::ScheduleFile =
+        serde_yaml::from_str(&std::fs::read_to_string(&p)?)?;
+    back.normalize(&tts);
+    let active = tts.iter().find(|t| t.is_active).or(tts.first());
+    let mut issues = vca_core::schedule::validate(active, &back.week_template);
+    // 与 ClassIsland 一致：课表必须引用一个存在的时间表。
+    // 时间表一个都没有时不算错 —— 用户可能就是先排课再补作息。
+    if !back.week_template.time_layout_id.is_empty()
+        && !tts
+            .iter()
+            .any(|t| t.id == back.week_template.time_layout_id)
+    {
+        issues.push(format!(
+            "课表绑定的时间表 {} 不存在",
+            back.week_template.time_layout_id
+        ));
+    }
     Ok(json!({
         "ok": true,
         "saved": p.display().to_string(),
@@ -771,22 +829,38 @@ fn post_schedule(opts: &ServeOptions, body: &str) -> Result<Value> {
 fn get_timetable(opts: &ServeOptions) -> Result<Value> {
     let p = timetable_file(opts);
     if !p.is_file() {
-        return Ok(json!({"ok": true, "exists": false, "slots": []}));
+        return Ok(json!({"ok": true, "exists": false, "slots": [], "all": []}));
     }
-    let text = std::fs::read_to_string(&p)?;
-    let tf: vca_core::config::TimetableFile =
-        serde_yaml::from_str(&text).map_err(|e| anyhow::anyhow!("时间表文件解析失败：{e}"))?;
+    let tf = vca_core::config::load_timetable_file(&p)
+        .map_err(|e| anyhow::anyhow!("时间表文件解析失败：{e}"))?;
     let active = tf
         .timetables
         .iter()
         .find(|t| t.is_active)
         .or(tf.timetables.first());
+    // 每个时间点带上时长：界面上「时长」是与起止时间并列的一列（对齐 ClassIsland
+    // 时间轴视图里的 Duration），让前端自己算一遍没有意义
+    let slots: Vec<Value> = active
+        .map(|t| {
+            t.slots
+                .iter()
+                .map(|s| {
+                    let mut v = serde_json::to_value(s).unwrap_or_else(|_| json!({}));
+                    if let Some(o) = v.as_object_mut() {
+                        o.insert("duration".into(), json!(s.duration_minutes()));
+                    }
+                    v
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     Ok(json!({
         "ok": true,
         "exists": true,
         "path": p.display().to_string(),
+        "id": active.map(|t| t.id.clone()).unwrap_or_default(),
         "name": active.map(|t| t.name.clone()).unwrap_or_default(),
-        "slots": active.map(|t| t.slots.clone()).unwrap_or_default(),
+        "slots": slots,
         "all": tf.timetables,
     }))
 }
@@ -815,11 +889,14 @@ fn post_timetable(opts: &ServeOptions, body: &str) -> Result<Value> {
     let windows = active
         .map(|t| vca_core::windows::derive_windows(t, vca_core::windows::WindowSpec::default()))
         .unwrap_or_default();
+    // 时间点重叠要当场说 —— 两份重叠的作息会让「这一节到底几点下课」变得没答案
+    let issues = active.map(|t| t.issues()).unwrap_or_default();
     Ok(json!({
         "ok": true,
         "saved": p.display().to_string(),
         "slots": active.map(|t| t.slots.len()).unwrap_or(0),
         "windows": windows,
+        "issues": issues,
     }))
 }
 
@@ -982,13 +1059,10 @@ fn daemon_start(opts: &ServeOptions, body: &str) -> Result<Value> {
         hints.push("推送渠道还没配 —— 文档只会存在本地");
     }
     let layout = vca_core::paths::Layout::new(opts.data_root.clone(), opts.config_root.clone());
-    let sc = opts.config_root.join("schedule").join("current.yaml");
-    let lessons = if sc.is_file() {
-        vca_core::config::load_schedule_file(&sc).ok()
-    } else {
-        None
-    };
-    if lessons.is_none() {
+    let has_lessons = load_schedule(opts)
+        .map(|f| !f.week_template.entries.is_empty())
+        .unwrap_or(false);
+    if !has_lessons {
         hints.push("课表还没导入 —— 不知道要录哪些课");
     }
 
@@ -1063,11 +1137,14 @@ fn import_classisland(opts: &ServeOptions, body: &str) -> Result<Value> {
 
     // 覆盖前存档（与界面里手工保存走同一套逻辑）
     let stamp = unix_secs();
+    // 时间表走「合并」：导入是**新增**一份，不能把用户已排好的作息顶掉
+    // （和 `import::write_current` 保持同一语义，两处别各写一套）。
+    let merged_tt = merge_imported_timetable(opts, &imp.timetable);
     for (sub, name, yaml) in [
         (
             "timetable",
             "current.yaml",
-            serde_yaml::to_string(&wrap_timetable(&imp))?,
+            serde_yaml::to_string(&merged_tt)?,
         ),
         (
             "schedule",
@@ -1096,11 +1173,20 @@ fn import_classisland(opts: &ServeOptions, body: &str) -> Result<Value> {
     }))
 }
 
-/// 把导入得到的时间表包成 `TimetableFile`（配置文件的外层结构）。
-fn wrap_timetable(imp: &vca_core::import::ClassIslandImport) -> vca_core::config::TimetableFile {
-    vca_core::config::TimetableFile {
-        timetables: vec![imp.timetable.clone()],
+/// 把导入得到的时间表合并进现有列表：同 id 替换，其余保留，新的设为启用。
+fn merge_imported_timetable(
+    opts: &ServeOptions,
+    imported: &vca_core::model::Timetable,
+) -> vca_core::config::TimetableFile {
+    let mut list = load_timetables(opts);
+    list.retain(|t| t.id != imported.id);
+    for t in list.iter_mut() {
+        t.is_active = false;
     }
+    let mut added = imported.clone();
+    added.is_active = true;
+    list.push(added);
+    vca_core::config::TimetableFile { timetables: list }
 }
 
 /// 界面文案：一次性把 `web.*` 整段给前端。

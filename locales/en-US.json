@@ -639,7 +639,8 @@
       "saved_windows": "Saved {n} slots; derived {w} processing windows.",
       "bad_time": "Time must look like HH:mm",
       "auto": "End time follows start and duration automatically.",
-      "default_40": "New lesson slots default to 40 min, breaks to 10 min."
+      "default_40": "New lesson slots default to 40 min, breaks to 10 min.",
+      "tl_hint": "Drag an edge to change start/end, drag the middle to shift the whole slot (5-minute steps)."
     },
     "sc": {
       "title": "Class plan",

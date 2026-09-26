@@ -985,17 +985,19 @@ async function renderTimetable() {
       const kind = r.querySelector('[data-k="kind"]').value;
       p = kind === 'class' ? p + 1 : p;
       r.firstElementChild.textContent = kind === 'class' ? p : '—';
-      r.style.opacity = i === sel ? '1' : '1';
       r.classList.toggle('sel', i === sel);
     });
   };
 
-  /* ---- 时间轴预览：每一段按分钟数占宽度，一眼看出一天的松紧 ---- */
+  /* ---- 时间轴预览：每一段按分钟数占宽度，一眼看出一天的松紧 ----
+     对齐 ClassIsland 时间轴视图：拖动段的两端改起止时间，拖中间平移整段。
+     段本身很窄（只有几分钟宽），靠把手抓不准，所以按鼠标在段内的相对位置判断：
+     左 22% 改开始、右 22% 改结束、中间整段平移。 */
   const paintTimeline = () => {
     const slots = list[cur].slots;
-    const total = slots.reduce((a, s) => a + Math.max(0, Number(durOf(s.start, s.end)) || 0), 0) || 1;
     document.getElementById('tl').innerHTML =
-      `<div class="tl-hd">${esc(t('st.timeline'))}</div><div class="tl-bar">` +
+      `<div class="tl-hd">${esc(t('st.timeline'))}</div>` +
+      `<div class="tl-hint">${esc(t('st.tl_hint'))}</div><div class="tl-bar">` +
       slots.map((s, i) => {
         const m = Math.max(0, Number(durOf(s.start, s.end)) || 0);
         const cls = s.kind === 'break' ? 'brk' : 'cls';
@@ -1003,7 +1005,91 @@ async function renderTimetable() {
           style="flex:${m}" title="${esc(s.start)}–${esc(s.end)} ${esc(t('st.dur_min').replace('{n}', m))}">${m >= 20 ? m : ''}</div>`;
       }).join('') + '</div>';
     document.querySelectorAll('#tl .tl-seg').forEach(el =>
-      el.addEventListener('click', () => { sel = Number(el.dataset.i); renumber(); paintDetail(); paintTimeline(); }));
+      el.addEventListener('click', () => { sel = Number(el.dataset.i); renumber(); paintDetail(); paintTimelineOnly(); }));
+  };
+
+  /* ---- 时间轴上的拖动编辑（对齐 ClassIsland 拖把柄改时间）----
+     按下时记下起点，移动超过 3px 才算拖动（否则当点击选中）。
+     像素 → 分钟按「这一段的宽度 = 它的分钟数」换算，段越窄越精细，至少 5 分钟一档。
+
+     绑定挂在 `#tl` 这个**静态**节点上（它整个页面生命周期里只创建一次），
+     用事件委托找 `.tl-seg`。这样时间轴每次重绘都不需要重新绑定 ——
+     之前把 onmousedown 挂在 `.tl-bar` 上，而 `.tl-bar` 每次重绘都会被换掉，
+     于是重绘之后就再也点不动了（实测踩过：第一次能拖，之后拖不动）。 */
+  const tlDrag = { on: false };
+  document.getElementById('tl').onmousedown = (ev) => {
+    const el = ev.target.closest('.tl-seg');
+    if (!el) return;
+    const i = Number(el.dataset.i);
+    const s = list[cur].slots[i];
+    if (!s) return;
+    const r = el.getBoundingClientRect();
+    const x = (ev.clientX - r.left) / Math.max(1, r.width);
+    // 段本身可能只有几分钟宽，靠把手抓不准，所以按鼠标在段内的相对位置定模式
+    Object.assign(tlDrag, {
+      on: true, i, el, moved: false, x0: ev.clientX,
+      mode: x < 0.22 ? 'start' : x > 0.78 ? 'end' : 'move',
+      start: s.start, end: s.end,
+    });
+    sel = i;
+    ev.preventDefault();
+  };
+
+  window.addEventListener('mousemove', (ev) => {
+    if (!tlDrag.on) return;
+    syncTimelineDrag(ev.clientX);
+  });
+  window.addEventListener('mouseup', () => {
+    if (!tlDrag.on) return;
+    const moved = tlDrag.moved;
+    tlDrag.on = false;
+    if (moved) { renumber(); paintDetail(); paintTimeline(); }
+  });
+
+  /** 按当前鼠标位置更新正在拖的那一段。 */
+  const syncTimelineDrag = (clientX) => {
+    const dx = clientX - tlDrag.x0;
+    if (!tlDrag.moved && Math.abs(dx) < 3) return;
+    tlDrag.moved = true;
+    const whole = Number(durOf(tlDrag.start, tlDrag.end)) || 1;
+    const perMin = Math.max(1, tlDrag.el.getBoundingClientRect().width) / whole;
+    // 至少 5 分钟一档，否则手一抖就变成 1 分钟
+    const delta = Math.trunc(dx / perMin / 5) * 5;
+    const s = list[cur].slots[tlDrag.i];
+    if (!s) return;
+    if (tlDrag.mode === 'start') {
+      const t2 = plusMin(tlDrag.start, Math.min(delta, whole - 5));
+      s.start = t2;
+      s.end = plusMin(t2, whole);
+    } else if (tlDrag.mode === 'end') {
+      s.start = tlDrag.start;
+      s.end = plusMin(tlDrag.end, Math.max(delta, -(whole - 5)));
+    } else {
+      s.start = plusMin(tlDrag.start, delta);
+      s.end = plusMin(tlDrag.end, delta);
+    }
+    const row = host.children[tlDrag.i];
+    if (row) {
+      row.querySelector('[data-k="start"]').value = s.start;
+      row.querySelector('[data-k="end"]').value = s.end;
+      row.querySelector('[data-k="duration"]').value = durOf(s.start, s.end);
+    }
+    paintTimelineOnly();
+  };
+
+  /** 拖动过程中只重绘时间轴（重建整张表会把正在拖的元素换掉，拖动就断了）。 */
+  const paintTimelineOnly = () => {
+    const slots = list[cur].slots;
+    const segs = document.querySelectorAll('#tl .tl-seg');
+    slots.forEach((s, i) => {
+      const el = segs[i];
+      if (!el) return;
+      const m = Math.max(0, Number(durOf(s.start, s.end)) || 0);
+      el.style.flex = String(m);
+      el.title = `${s.start}–${s.end} ${t('st.dur_min').replace('{n}', String(m))}`;
+      el.textContent = m >= 20 ? String(m) : '';
+      el.classList.toggle('sel', i === sel);
+    });
   };
 
   /* ---- 右侧详情：选中时间点的详细属性（对应 ClassIsland 视图右侧）---- */
@@ -1053,7 +1139,9 @@ async function renderTimetable() {
       vOf(row, 'end').value = end;
     }
     renumber();
-    paintTimeline();
+    // 只更新段的宽度，不重建整条时间轴：重建会连带把绑定丢掉，
+    // 而这里每次改时长都会触发
+    paintTimelineOnly();
   });
 
   host.addEventListener('change', (e) => {
@@ -1069,7 +1157,7 @@ async function renderTimetable() {
     if (!row) return;
     const i = [...host.children].indexOf(row);
     const btn = e.target.closest('button[data-op]');
-    if (!btn) { sel = i; renumber(); paintDetail(); paintTimeline(); return; }
+    if (!btn) { sel = i; renumber(); paintDetail(); paintTimelineOnly(); return; }
     const slots = list[cur].slots;
     const op = btn.dataset.op;
     if (op === 'del') {

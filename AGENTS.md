@@ -18,11 +18,12 @@
 
 | 目录 | 谁负责 |
 |---|---|
-| **`web/`** | **前端 agent** —— 界面全部在这里。只读 `web/CONTRACT.md` 就够，不用碰 Rust |
+| **`web/`** | **前端 agent** —— 界面全部在这里 |
 | `crates/` | 后端 —— 业务逻辑与接口实现 |
 | `crates/vca-gui/src/web/` | 后端 —— 内置兜底（`include_str!`）。**别改这里** |
 
-- 接口契约：**`web/CONTRACT.md`**（40 个接口、返回结构、i18n 约定）
+- **接手界面工作**：先读 `web/README.md`（怎么跑起来看效果、改哪不改哪、怎么自检），
+  接口细节查 `web/CONTRACT.md`。**两份读完就不用碰 Rust 了。**
 - 前端改了 `web/` 之后，**后端负责**同步一份到 `crates/vca-gui/src/web/` 再重编译 ——
   否则「exe 单独拷走」会退化成旧界面
 - 加新文案请找后端加进 `locales/*.json`，不要在 JS 里硬编码中文

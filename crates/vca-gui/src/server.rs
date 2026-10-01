@@ -457,18 +457,6 @@ fn handle(req: tiny_http::Request, opts: &ServeOptions, token: &str) -> Result<(
     }
 
     match path.as_str() {
-        "/" | "/index.html" => {
-            let body = web::resolve(opts.web_dir.as_deref(), "index.html", web::INDEX_HTML);
-            respond(req, 200, "text/html; charset=utf-8", body)
-        }
-        "/style.css" => {
-            let body = web::resolve(opts.web_dir.as_deref(), "style.css", web::STYLE_CSS);
-            respond(req, 200, "text/css; charset=utf-8", body)
-        }
-        "/app.js" => {
-            let body = web::resolve(opts.web_dir.as_deref(), "app.js", web::APP_JS);
-            respond(req, 200, "application/javascript; charset=utf-8", body)
-        }
         // 内网预览页：推送给群里的链接就落在这里。
         // 它用**独立的长期令牌**（ui.preview_token），不是界面那个一次性的 ——
         // 推送由 daemon 发出，那个进程拿不到界面启动时随机生成的令牌。
@@ -494,8 +482,46 @@ fn handle(req: tiny_http::Request, opts: &ServeOptions, token: &str) -> Result<(
                 ),
             }
         }
-        _ => respond(req, 404, "text/plain; charset=utf-8", "404".into()),
+        // 其余一律当成前端资源。
+        //
+        // 原来这里是三个硬编码分支（`/index.html`、`/style.css`、`/app.js`），
+        // 前端每多拆一个文件就得回来改 Rust —— 分离就白做了。
+        // 现在交给 `serve_web_asset`：外部目录里的**任意**文件都能取到，
+        // 文件名 → Content-Type 走一张表，加新类型不用碰这个 match。
+        other => serve_web_asset(req, opts, other),
     }
+}
+
+/// 供一份前端资源（**前后端分离的落点**）。
+///
+/// 查找顺序：外部目录（`web_dir`）→ 内置资源 → 404。
+/// 外部优先让"改完刷新即见"成立，内置兜底让"exe 单独拷走也能开界面"成立。
+///
+/// # no-store 是刻意的
+///
+/// 这个服务的所有内容都是"随程序版本走的"，而且静态资源的**路径不变**
+/// （每次启动只是多了个一次性 token），浏览器会心安理得地复用缓存 ——
+/// 结果就是改了前端看不到效果，人先怀疑缓存再怀疑后端，白折腾半天。
+/// 所以一律 `no-store`。
+fn serve_web_asset(req: tiny_http::Request, opts: &ServeOptions, raw_path: &str) -> Result<()> {
+    let rel = web::normalize_path(raw_path);
+
+    // 先从外部目录取（开发 / 界面重构走这条），取不到再用内置的
+    let (body, ctype) = match opts.web_dir.as_deref() {
+        Some(dir) => match web::resolve_external(dir, &rel) {
+            Some(text) => (text, web::content_type(&rel)),
+            None => match web::builtin_for(&rel) {
+                Some(text) => (text.to_string(), web::content_type(&rel)),
+                None => return respond(req, 404, "text/plain; charset=utf-8", "404".into()),
+            },
+        },
+        None => match web::builtin_for(&rel) {
+            Some(text) => (text.to_string(), web::content_type(&rel)),
+            None => return respond(req, 404, "text/plain; charset=utf-8", "404".into()),
+        },
+    };
+
+    respond(req, 200, ctype, body)
 }
 
 /// 读配置里的预览令牌（读不到就返回空串 —— 那样等于不校验，

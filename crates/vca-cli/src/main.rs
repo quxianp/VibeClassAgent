@@ -306,11 +306,64 @@ fn run_gui(
         profile: profile.to_string(),
         open_browser: !no_open,
         port,
-        // 开发时把 VCA_WEB_DIR 指向 assets/web 就能改页面即时看到效果
-        web_dir: std::env::var("VCA_WEB_DIR")
-            .ok()
-            .map(std::path::PathBuf::from),
+        web_dir: resolve_web_dir(),
     })
+}
+
+/// 找前端资源目录 —— **前后端分离的约定入口**。
+///
+/// 查找顺序（先命中先用）：
+/// 1. `VCA_WEB_DIR` 环境变量 —— 显式指定，脚本/CI 用；
+/// 2. 仓库根的 `web/` —— 从 `target/{debug,release}/vca.exe` 往上找到仓库根；
+/// 3. exe 同级的 `web/` —— 发布形态：`vca.exe` 旁边放一个 `web/` 目录；
+/// 4. 都没有 → `None`，用 `include_str!` 编进 exe 的内置版本。
+///
+/// # 为什么要有第 3 条
+///
+/// 发布时用户拿到的如果只有 exe，改界面就得重新编译、重新分发。
+/// 有了「exe 同级 web/」，前端可以单独更新：**换掉那个目录即可**，
+/// 后端一行不用动。这也正是前后端分离想要的部署形态。
+///
+/// # 为什么第 2 条要往上找
+///
+/// 开发时 `cargo run` 的 exe 在 `target/debug/` 下，前端文件在仓库根
+/// 的 `web/`。不往上找的话开发者必须每次设环境变量，很容易忘。
+fn resolve_web_dir() -> Option<std::path::PathBuf> {
+    // 1) 环境变量
+    if let Ok(p) = std::env::var("VCA_WEB_DIR") {
+        if !p.trim().is_empty() {
+            return Some(std::path::PathBuf::from(p));
+        }
+    }
+
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+
+    // 3) exe 同级的 web/（发布形态）
+    if let Some(dir) = &exe_dir {
+        let sibling = dir.join("web");
+        if sibling.join("index.html").is_file() {
+            return Some(sibling);
+        }
+    }
+
+    // 2) 从 exe 所在目录往上找仓库根（开发形态）
+    if let Some(dir) = &exe_dir {
+        let mut cur = Some(dir.as_path());
+        // 最多往上 4 层：target/debug → target → 仓库根
+        for _ in 0..4 {
+            let Some(here) = cur else { break };
+            let candidate = here.join("web");
+            if candidate.join("index.html").is_file() {
+                return Some(candidate);
+            }
+            cur = here.parent();
+        }
+    }
+
+    // 4) 都没有：用编进 exe 的内置资源
+    None
 }
 
 /// 隐藏控制台窗口（仅 GUI 模式调用），返回一句可记录的结果说明。
@@ -453,4 +506,67 @@ fn build_layout(cli: &Cli) -> (Layout, vca_core::paths::PathSource) {
 #[allow(dead_code)]
 fn product() -> &'static str {
     PRODUCT_NAME
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `VCA_WEB_DIR` 显式指定时必须优先 —— 脚本/CI 靠它指向临时前端目录。
+    ///
+    /// 这条测试会改进程级环境变量，所以只在一个测试里做、并在结尾还原，
+    /// 避免和其它测试互相干扰（cargo 默认多线程跑测试）。
+    #[test]
+    fn env_var_wins_when_set() {
+        let key = "VCA_WEB_DIR";
+        let old = std::env::var(key).ok();
+
+        std::env::set_var(key, "D:\\some\\custom\\web");
+        let got = resolve_web_dir();
+        assert_eq!(
+            got.as_deref(),
+            Some(std::path::Path::new("D:\\some\\custom\\web")),
+            "设了 VCA_WEB_DIR 却不是它优先"
+        );
+
+        // 空字符串要当成"没设"，否则会得到一个空路径去 join，行为很怪
+        std::env::set_var(key, "   ");
+        let got_empty = resolve_web_dir();
+        assert_ne!(
+            got_empty.as_deref(),
+            Some(std::path::Path::new("   ")),
+            "空白 VCA_WEB_DIR 被当成了有效路径"
+        );
+
+        match old {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    /// 仓库根真的有 `web/index.html` —— 这是前后端分离的落点，
+    /// 删掉/改名了前端就静默退回内置版本（表现为"改了没效果"）。
+    #[test]
+    fn repo_has_web_dir_at_root() {
+        let here = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        // crates/vca-cli → 仓库根
+        let root = here
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("找不到仓库根");
+        let index = root.join("web").join("index.html");
+        assert!(
+            index.is_file(),
+            "仓库根没有 web/index.html（{}）—— 前端资源目录丢失了",
+            index.display()
+        );
+    }
+
+    /// 内置兜底资源必须齐全：exe 单独被拷走时全靠它们。
+    #[test]
+    fn builtin_assets_are_not_empty() {
+        for (name, body) in vca_gui::web::BUILTIN {
+            assert!(!body.trim().is_empty(), "内置资源 {name} 是空的");
+        }
+    }
 }

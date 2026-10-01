@@ -12,7 +12,7 @@
 
 **这个项目已经能跑，不要再从头重构。**
 
-- 代码 **373 个单元测试全绿**（2 个 ignored 的需要外网），
+- 代码 **399 个单元测试全绿**（2 个 ignored 的需要外网），
   `cargo clippy --workspace --all-targets -- -D warnings` **零告警**，`cargo fmt --all -- --check` **无差异**。
 - 四大核心功能（静默录制 / 课后处理 / 推送 / 清理）**已端到端验证通过**。
 - GUI 冒烟 `python scripts\smoke.py` **58 项全过**。
@@ -118,12 +118,22 @@ flowchart LR
 > 第二次启动直接把已开的窗口前置；② **启动即自检依赖** —— 缺 ffmpeg / whisper / 模型
 > 会弹窗告知后果并提供一键下载（检查是异步的，不拖慢启动）。
 
+> **前后端已分离（本轮）**：界面全部搬到仓库根的 **`web/`**，改完**刷新即见，
+> 不需要重新编译 Rust**（实测：服务运行中改 `web/style.css`，下一次请求就是新的）。
+> 接口契约见 **`web/CONTRACT.md`**，负责界面重构的 agent 只读那一份就够。
+> 详见 §4.10。
+
 ---
 
 ## 3. 代码地图
 
 ```
 D:\VibeClassAgent\
+├── web/                             ★ 前端（界面重构改这里，不用碰 Rust）
+│   ├── index.html                   入口（后端"前端是否存在"的判据就是这个文件名）
+│   ├── style.css                    样式
+│   ├── app.js                       逻辑（vanilla JS，无构建步骤）
+│   └── CONTRACT.md                  ★ 前后端接口契约（给前端 agent 看的唯一文档）
 ├── crates/                          Rust 源码（39 个 .rs，约 1.2 万行）
 │   ├── vca-core/                    领域核心（无 IO、无 unsafe）
 │   │   ├── paths.rs                 ★ 数据/配置目录解析（不落 C 盘那条逻辑在这）
@@ -284,12 +294,57 @@ Edge 用完整 Chromium 排版引擎，中文零配置、体积小。
 > 真机上请用 `VCA_STARTUP_TRACE=1` 对比一次开窗口的观感。
 
 ### 4.9 便携布局 + 引导文件
-
 数据默认放在**程序所在目录**（`data/` 与 `config/`），不碰 C 盘用户目录。
 用户可用 `/paths set D:\课堂数据` 换位置，选择记在 exe 同级的 `vca.paths.json`
 （不能记在待选择的目录里，那是鸡生蛋问题）。
 
 优先级：`--data-dir` > `VCA_DATA_DIR` > 引导文件 > 便携 > `%LOCALAPPDATA%` 兜底。
+
+### 4.10 前后端分离：`web/` ↔ Rust
+
+**目标**：前端能独立于 Rust 改动。另一个 agent 重构界面时不该碰 `crates/`，
+更不该每改一行 CSS 就等一次 `cargo build`。
+
+**做法**是「运行时资源查找 + 内置兜底」两层，**不是**把前端拆成独立进程/仓库：
+
+| 层 | 位置 | 作用 |
+|---|---|---|
+| 外部 | 仓库根 / exe 同级 / `VCA_WEB_DIR` 的 **`web/`** | 开发与界面重构走这条，**改完刷新即见** |
+| 内置 | `crates/vca-gui/src/web/`，`include_str!` 编进 exe | 兜底，保证 exe 单独拷走也能开界面 |
+
+查找顺序见 `crates/vca-cli/src/main.rs` 的 `resolve_web_dir()`。
+
+**为什么不做成独立前端工程**：这是要部署到一体机上的桌面程序，
+目标机器上**不装任何运行时**是硬约束（HANDOFF 开头就写了"纯 Rust"）。
+引入 node 构建链会把这条底线破掉。所以分离的边界划在**文件系统**，
+而不是"两个进程"。想加构建步骤也行，但产物必须落在 `web/` 下且浏览器能直接跑。
+
+**服务端为此改了什么**（原来只认死三个文件名，前端多拆一个文件就得回来改 Rust）：
+
+- 外部目录下的**任意**文件都能被服务，支持子目录（`components/table.js`）；
+- 文件名 → `Content-Type` 走一张小表（`web.rs::content_type`），加新类型不用改 match；
+- **路径穿越必须挡住**：外部目录是可控的，`/../config/...` 能把带
+  `preview_token` 的配置读出来。`safe_join()` 拒绝 `..`、绝对路径、盘符、UNC ——
+  有 6 个测试专门守这条（含 `%2f` 编码绕过）。
+
+**验证过的**（本轮实测）：
+
+```
+外部新文件 /_probe.txt          → 200 'EXTERNAL-OK'  text/plain
+子目录 /sub/mod.js              → 200               application/javascript
+/../config/settings.example.yaml → 404（挡住）
+/..%2fconfig%2f...yaml          → 404（挡住）
+/sub/../../Cargo.toml           → 404（挡住）
+Cache-Control                   → no-store
+服务运行中改 web/style.css       → 下一次请求就是新内容（exe 时间戳未变）
+```
+
+**后端要同步的事**：前端改了 `web/` 之后，后端把它同步一份到
+`crates/vca-gui/src/web/`（内置兜底）再重编译。这步由后端负责，
+前端 agent 不用管 —— 但**别忘了**，否则"exe 单独拷走"会退化成旧界面。
+
+> 契约文档在 **`web/CONTRACT.md`**（40 个接口、返回结构、i18n 约定、
+> `need_notice` 这类"后端已经替你算好"的字段）。给前端 agent 看那一份就够。
 
 ---
 
@@ -335,6 +390,7 @@ Edge 用完整 Chromium 排版引擎，中文零配置、体积小。
 | 29 | **磁盘满会伪装成「代码有 bug」**（本轮新增） | 9 个工作区测试突然失败（`shots::*` 7 个 + `docgen` + `fetch`），报错五花八门（`ENOSPC`、`memory allocation failed`、`StorageFull 磁盘空间不足`），看着像逻辑错误。真相是 **C 盘只剩 0.07 GB**（`%TEMP%` 就在 C 盘）。清掉 `target/debug/incremental` 并把 `TEMP`/`TMP` 指到 D 盘后，**9 个失败全部消失、373 全绿**。**排查建议**：一次冒出一堆互不相干的失败时，先量磁盘余量再读代码 |
 | 30 | **`git checkout -- <file>` 会连未提交的改动一起冲掉**（本轮新增） | 为了插一行计时探针，我改完发现中文注释被 PowerShell 按 GBK 读坏了，于是 `git checkout -- server.rs` 想"还原到干净状态" —— 结果 **Task F 那 380 行未提交的改动全没了**（775 行 → 396 行）。**教训**：这个仓库里大量工作是"未提交"状态，`git checkout` / `git restore` / `git stash` 都不是"撤销我刚才那一下"，而是"回到上次提交"。正确做法是重做那一次编辑（或用更窄的手段），**不是 checkout**。恢复路径：`target/release/vca.exe` 里有完整代码，`.o` 文件里有全部字符串常量、函数符号与测试名 —— 靠这两样能精确重建 |
 | 31 | **PowerShell 改 `.rs` 文件会把中文注释毁掉**（本轮新增） | `Get-Content -Raw` 默认按 ANSI/GBK 解码 UTF-8，`Set-Content` 再写回去，中文全部变成 `鍚姩鏈嶅姟` 这样的乱码，而且 `cargo check` 之前看不出来。**改源码一律用编辑工具或 Python**（`encoding='utf-8'`），别用 PowerShell 的读写命令做"文本替换" |
+| 32 | **`.gitignore` 漏了运行期配置，真实课表差点进仓库**（本轮新增） | 提交前 `git status` 里冒出 `config/profiles/`、`config/schedule/`、`config/timetable/`，本来想"顺手 add 进去"。查了内容才发现：**`settings.yaml` 里有长期有效的 `preview_token`，`schedule/current.yaml` 里有真实教师姓名**。差点推上 GitHub。**教训**：① `config/` 下"程序真正读写的那一份"必须靠 `.gitignore` 挡住（只放行 `*.example.yaml`），不能指望自己记得住；② 提交前 `git diff --cached` 搜一遍 `token`/人名。**已修**：见 `.gitignore` 的「用户的真实配置与课表」一节 |
 
 ### 5.3 PowerShell / git 用法类
 

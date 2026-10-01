@@ -18,3 +18,5 @@ tracing = { workspace = true }
 # 为什么不用 axum/warp：那些都要拉 tokio 全家桶，为了几十行路由不值 ——
 # 而且本项目其余部分（录制、转写）全是同步阻塞的，混一套异步运行时只会更复杂。
 tiny_http = "0.12"
+wry = { version = "0.57.0", default-features = false, features = ["os-webview"] }
+tao = "0.37.1"

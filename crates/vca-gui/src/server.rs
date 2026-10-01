@@ -1,8 +1,12 @@
-//! HTTP 服务：只绑回环地址，用系统浏览器以「应用模式」打开界面。
+//! HTTP 服务：只绑回环地址，界面由**本进程的原生窗口**加载。
+//!
+//! 窗口在 [`crate::window`] 里（WebView2）。这个模块负责把页面和接口
+//! 伺服出去 —— 之所以还留 HTTP 而不是走 `file://`，是因为前端那 40 个
+//! 接口本来就是 HTTP 的，而且保留它让"浏览器里也能打开同一个地址"
+//! 这条退路还在（原生窗口起不来时就是靠它兜底）。
 
 use std::net::TcpListener;
 use std::path::PathBuf;
-use std::process::Command;
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
@@ -29,6 +33,24 @@ static UI_URL: OnceLock<String> = OnceLock::new();
 /// 托盘线程持有的 HWND，退出时用来先摘图标（见 `release_tray`）。
 static TRAY_HWND: OnceLock<isize> = OnceLock::new();
 
+/// 原生窗口句柄。
+///
+/// 存起来是为了让「第二次启动时聚焦已有窗口」和「点托盘菜单打开界面」
+/// 能直接给窗口线程发命令 —— 比按标题搜窗口可靠（标题可能被前端改过）。
+///
+/// # 为什么能放进 `static`
+///
+/// `WindowHandle` 内部只有两个 channel 端点，全是 `Send + Sync` 的；
+/// 它**不持有任何窗口指针** —— 真正的窗口对象在窗口线程里，
+/// 跨线程只靠 channel 传命令。所以这里天然是线程安全的，
+/// 不需要 `unsafe`、也不需要自己 `impl Send`。
+static WINDOW: OnceLock<crate::window::WindowControl> = OnceLock::new();
+
+/// 取原生窗口的控制端（没有则 `None`）。
+fn window_handle() -> Option<&'static crate::window::WindowControl> {
+    WINDOW.get()
+}
+
 /// 启动选项。
 #[derive(Debug, Clone)]
 pub struct ServeOptions {
@@ -53,10 +75,10 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
     let clock = StartupClock::new();
     clock.mark("serve 进入");
 
-    // 单实例保护：**必须抢在起托盘/拉浏览器之前**。
+    // 单实例保护：**必须抢在起托盘/开窗口之前**。
     //
     // 没有这道闸时，用户「双击没反应 -> 再双击」每点一次就多一整套后台：
-    // 多个托盘图标、多个 Edge 窗口、多个常驻进程，内存线性叠加。
+    // 多个托盘图标、多个界面窗口、多个常驻进程，内存线性叠加。
     // 用户会觉得是程序在膨胀，其实是没人拦着重复启动。
     //
     // 只在**面向用户的 GUI 模式**（会自动开窗口的那种）下拦：
@@ -86,19 +108,6 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
     // 存全局是因为托盘命令是在另一个线程里被处理的，拿不到这里的局部变量。
     let _ = UI_URL.set(url.clone());
 
-    // 预热 Edge 的 profile —— **必须在开窗口之前、且与后面的准备工作并行**。
-    //
-    // 为什么：整个启动里最慢的一段不是我们自己的代码（实测 222 ms 就绪），
-    // 而是 Edge 起来后要建/校验用户数据目录。那个目录第一次不存在时，
-    // Edge 要解压资源、建 SQLite、跑首次运行检查，冷启动能到好几秒。
-    //
-    // 这里先空跑一次 Edge 把目录建出来，等真正 `--app=` 打开时它已经是热的。
-    // 但不能串行地等它 —— 那等于把慢的那段挪到前面，总时长没变。
-    // 所以丢到后台线程，和「起托盘 / 生成预览令牌」这些活并行。
-    if opts.open_browser {
-        warm_up_profile();
-    }
-
     // 预览令牌在这里保证一次"非空"：预览路由现在把空令牌当拒绝处理，
     // 如果不在这里生成，用户升级后第一次打开推送链接会收到 403 而不知道为什么。
     // 已有令牌不会被覆盖（换令牌会让之前发出去的链接全部失效）。
@@ -111,27 +120,66 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
 
     tracing::info!("界面地址：{url}");
     clock.mark("界面地址就绪 ← 到达这里用户就能用了");
-    if opts.open_browser {
-        match open_app_window(&url) {
-            Ok(how) => tracing::info!("已用「{how}」打开界面"),
-            Err(e) => {
-                // 打不开浏览器不该让程序退出：地址已经打出来了，用户手动点开也能用。
-                // 但**不能只写日志** —— 用户看到的会是「双击了没反应，只有托盘图标」，
-                // 完全不知道发生了什么。所以必须通过托盘气泡把地址告诉他。
-                tracing::warn!("自动打开浏览器失败（{e}），已把地址放进托盘提示");
-                // 托盘句柄可能还没就绪（比如托盘被用户在配置里关了），
-                // 那种情况下拿不到气泡可用 —— 但地址仍然写在日志里。
-                match TRAY_HWND.get() {
-                    Some(h) => {
-                        vca_platform::tray::notify_fallback_url(*h, &url);
+
+    // HTTP 服务必须**先**挪到别的线程。
+    //
+    // 因为下面 `window::run()` 会占住主线程跑事件循环（Windows 上窗口
+    // 事件循环只能跑在主线程，见 `window.rs` 里的说明）。请求处理是
+    // 独立的 IO 循环，放后台线程正合适 —— 它本来就是阻塞式的。
+    //
+    // 不开窗口的模式（测试、`--no-open`）不需要线程，所以这里先备着，
+    // 到下面再决定是丢线程还是就地跑。
+    let mut server = Some(server);
+    let serve_opts = opts.clone();
+    let serve_token = token.clone();
+    let http_thread = if opts.open_browser {
+        let s = server.take().expect("server 已被取走");
+        Some(
+            std::thread::Builder::new()
+                .name("vca-http".into())
+                .spawn(move || {
+                    for req in s.incoming_requests() {
+                        if let Err(e) = handle(req, &serve_opts, &serve_token) {
+                            tracing::warn!("处理请求出错：{e}");
+                        }
                     }
-                    None => tracing::warn!("托盘不可用，只能手动访问：{url}"),
-                }
+                })
+                .map_err(|e| anyhow::anyhow!("启动 HTTP 线程失败：{e}"))?,
+        )
+    } else {
+        None
+    };
+
+    if opts.open_browser {
+        // 起**自己的原生窗口**（WebView2）。窗口、任务栏图标、alt-tab
+        // 条目全是 VibeClassAgent 自己的，观感就是原生程序。
+        //
+        // ⚠️ 这行会阻塞到窗口被关闭 —— 主线程交给窗口事件循环。
+        let outcome = crate::window::run(url.clone());
+        match outcome {
+            Ok(win) => {
+                clock.mark("原生窗口已起");
+                let _ = WINDOW.set(win.control_only());
+                tracing::info!("已用「原生窗口」打开界面");
+            }
+            Err(e) => {
+                // 原生窗口起不来（多半是系统没装 WebView2）。
+                // **不能让程序退出** —— 退回系统浏览器，至少用户能用上。
+                tracing::warn!("原生窗口起不来（{e}），退回系统浏览器");
+                open_in_system_browser(&url);
             }
         }
-        clock.mark("已拉起浏览器（之后的耗时都在浏览器侧）");
+        clock.mark("界面已关闭");
+        // 窗口关掉 = 用户要退出。主动关掉托盘，否则图标会僵在任务栏上。
+        release_tray();
+        // HTTP 线程阻塞在 accept 上，进程退出时由操作系统回收，
+        // 这里不 join（join 会挂住）。
+        drop(http_thread);
+        return Ok(());
     }
 
+    // 不开窗口的模式：就在当前线程伺服请求。
+    let server = server.expect("非窗口模式下 server 应当还在");
     for req in server.incoming_requests() {
         if let Err(e) = handle(req, &opts, &token) {
             tracing::warn!("处理请求出错：{e}");
@@ -140,23 +188,73 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
     Ok(())
 }
 
+/// 兜底：用系统默认浏览器打开界面。
+///
+/// 只在**原生窗口起不来**时走这条路（比如系统没装 WebView2）。
+/// 会有地址栏、任务栏图标是浏览器的 —— 但至少用户能用上，
+/// 比"窗口没出来又没有任何提示"好得多。
+fn open_in_system_browser(url: &str) {
+    #[cfg(windows)]
+    {
+        match std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn()
+        {
+            Ok(_) => tracing::info!("已用「系统浏览器」打开界面"),
+            Err(e) => {
+                tracing::warn!("系统浏览器也打不开（{e}）");
+                notify_ui_address(url);
+            }
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        tracing::warn!("当前平台没有可用的浏览器启动方式");
+        notify_ui_address(url);
+    }
+}
+
+/// 实在打不开时，用托盘气泡把地址送到用户眼前。
+///
+/// 这是最后一层兜底。原来失败只写日志，用户看到的是"双击没反应"，
+/// 完全不知道程序是活的、手动打开地址就能用。
+fn notify_ui_address(url: &str) {
+    match TRAY_HWND.get() {
+        Some(h) => {
+            vca_platform::tray::notify_fallback_url(*h, url);
+        }
+        None => tracing::warn!("托盘不可用，只能手动访问：{url}"),
+    }
+}
+
 /// 把已经打开的界面窗口拉到前台。
 ///
 /// 单实例保护命中时调用：用户双击了第二次，本意通常是「我要看界面」。
 /// 能拉到前台就拉，拉不到返回 `false`（调用方只记日志，不算失败）。
 fn focus_or_open_ui() -> bool {
+    // 首选：自己的原生窗口。直接给它发命令，比按标题搜窗口可靠
+    // （标题可能被前端改过，也不受别的程序同名窗口干扰）。
+    if let Some(win) = window_handle() {
+        win.focus();
+        return true;
+    }
+    // 退路：窗口没建成（走的浏览器兜底），按标题找那个浏览器窗口。
     try_focus_existing_window()
 }
 
 /// 按标题找界面窗口并前置。
 ///
+/// **只在走浏览器兜底时才有意义** —— 原生窗口走上面的直接命令。
 /// 复用时间可能有几十毫秒（要枚举/查找窗口），但只在「重复启动」这条
 /// 冷路径上跑，正常启动一次都不会走到这里。
 fn try_focus_existing_window() -> bool {
     vca_platform::window::focus_by_title(UI_WINDOW_TITLE)
 }
 
-/// 界面窗口的标题（Edge `--app=` 模式下就是页面 `<title>`）。
+/// 界面窗口的标题。
+///
+/// 原生窗口模式下由 `window.rs` 设置成产品名；浏览器兜底模式下
+/// 是页面的 `<title>` —— 两边刻意保持一致，兜底切换时用户看不出差别。
 const UI_WINDOW_TITLE: &str = "VibeClassAgent";
 
 /// 配置里 settings.yaml 的路径（多处要用，收在一处免得写歪）。
@@ -167,105 +265,10 @@ fn settings_path(opts: &ServeOptions) -> PathBuf {
         .join("settings.yaml")
 }
 
-/// 在后台把 Edge 的 profile 预热出来。
-///
-/// # 为什么需要这个
-///
-/// 启动慢的**不是我们自己的代码**：实测从进程起来到 HTTP 服务能响应只要
-/// 约 900 ms，其中日志显示「界面地址」到「已用 Edge 应用模式打开界面」
-/// 之间只有约 160 ms。真正让用户觉得"等很久"的是 **Edge 建/校验
-/// 用户数据目录**这一步 —— 那个目录不存在时，Edge 要解压资源、建 SQLite
-/// 数据库、跑一圈首次运行检查，冷启动能到好几秒。
-///
-/// # 为什么不直接等它
-///
-/// 串行地"先预热再开窗口"等于把慢的那段原样挪到前面，用户等待的总时长
-/// 一点没变，只是慢的动作换了个位置。所以这里**丢到后台线程**，
-/// 与「起托盘」「生成预览令牌」这些活并行跑；等真正要用时它多半已经好了。
-///
-/// # 为什么是空跑一个 `about:blank`
-///
-/// 只是为了让 Edge 把目录结构和数据库建出来，不需要它真渲染我们的页面 ——
-/// 所以开一个最小页面，并且加 `--no-startup-window` 之外不加任何多余的旗标。
-/// 起来之后立刻关掉：用户不应该看到第二个窗口闪一下。
-///
-/// 失败一律吞掉：预热只是优化，失败了无非是回到"第一次打开慢一点"，
-/// 绝不能因此让程序报错或退出。
-fn warm_up_profile() {
-    let profile = vca_temp_dir();
-    // 已经预热过（目录里有 Edge 的标记文件）就不用再跑一趟，
-    // 免得每次启动都白起一个进程。
-    if profile.join("Default").join("Preferences").is_file() {
-        return;
-    }
-
-    std::thread::Builder::new()
-        .name("vca-profile-warmup".into())
-        .spawn(move || {
-            let Some(exe) = edge_candidates().into_iter().find(|c| c.is_file()) else {
-                return;
-            };
-            let started = std::time::Instant::now();
-            // ⚠️⚠️ 这里的 profile 目录**必须**和正式窗口用的那个不同。
-            //
-            // 血泪教训（本轮真实故障：双击后只有托盘、没有窗口）：
-            // 最初这里传的是 `vca_temp_dir()` —— 和 `open_app_window` 用**同一个**目录。
-            // 而 Chromium/Edge 的规则是「一个 user-data-dir 只能有一个浏览器进程」：
-            // 预热进程先起来占了那个 profile，紧接着正式启动 `--app=` 时，
-            // Edge 不会开新窗口，而是把这个请求**交给已经在跑的那个进程** ——
-            // 那个进程是 `--headless`，于是**永远不会有窗口出现**。
-            // 从外面看就是"托盘有图标、页面没出来"，而且日志里一切正常
-            // （因为 spawn 确实成功了），极难排查。
-            //
-            // 所以预热改用旁边一个独立的 `-warm` 目录：
-            // 它照样能让 Edge 把资源解压/缓存到磁盘层（那部分是跨 profile 共享的），
-            // 但**绝不占用**正式窗口要用的那个 profile。
-            let warm_profile = profile.with_file_name("ui-profile-warm");
-
-            let child = Command::new(exe)
-                .args([
-                    "--headless",
-                    "--disable-gpu",
-                    "--no-first-run",
-                    "--no-default-browser-check",
-                    // 预热进程也别去后台联网（和正式启动保持一致的克制）
-                    "--disable-background-networking",
-                    "--disable-features=msEdgeBackgroundPreload,Translate,msEdgeTranslate",
-                ])
-                .arg(format!("--user-data-dir={}", warm_profile.display()))
-                .arg("about:blank")
-                .spawn();
-
-            match child {
-                Ok(mut c) => {
-                    // 等它把 profile 写完。给一个上限，避免 Edge 卡住时
-                    // 这个后台线程一直挂着（虽然不影响主流程，但没必要）。
-                    let deadline = std::time::Duration::from_secs(20);
-                    loop {
-                        match c.try_wait() {
-                            Ok(Some(_)) => break,
-                            Ok(None) if started.elapsed() < deadline => {
-                                std::thread::sleep(std::time::Duration::from_millis(100));
-                            }
-                            _ => {
-                                // 超时或出错：收掉子进程，别再挂着
-                                let _ = c.kill();
-                                break;
-                            }
-                        }
-                    }
-                    tracing::debug!("profile 预热结束（{:?}）", started.elapsed());
-                }
-                Err(e) => tracing::debug!("profile 预热跳过（{e}）"),
-            }
-        })
-        .ok();
-}
-
 /// 启动耗时的观测点：`VCA_STARTUP_TRACE=1` 时把各阶段耗时打到日志。
 ///
 /// 留着它是因为**启动慢这类问题只能靠量，不能靠猜**。这次排查就是靠它
-/// 才确认了「我们自己的代码只要 ~200 ms，慢的是 Edge」—— 没有这个观测点，
+/// 才确认了「我们自己的代码只要 ~200 ms，慢的是浏览器那一侧」—— 没有它，
 /// 很容易误以为是 Rust 侧在拖，然后去优化一堆根本没花时间的代码。
 ///
 /// 默认关闭（要设环境变量），因为它对用户没有任何价值，只在排查时开。
@@ -707,342 +710,9 @@ fn make_token() -> String {
     format!("{x:032x}")
 }
 
-/// 以「应用模式」打开窗口：没有地址栏、独立窗口、有任务栏图标。
-///
-/// 优先 Edge（Win10 一定自带），找不到就退回默认浏览器（会有地址栏，但能用）。
-fn open_app_window(url: &str) -> Result<&'static str> {
-    for cand in edge_candidates() {
-        if cand.is_file() {
-            let mut child = Command::new(&cand)
-                .args(edge_args(url, &vca_temp_dir()))
-                .spawn()
-                .context("启动 Edge 失败")?;
-
-            // ⚠️ 光看 spawn 成功是不够的 —— 它只说明"进程创建了"，
-            // 不说明"窗口出来了"。Edge 完全可能起来 200ms 后就崩
-            // （缺 DLL、profile 被占、被安全软件拦），
-            // 而用户看到的是"双击了没反应，只有托盘图标"。
-            //
-            // 真实故障（本轮）：预热进程占着同一个 profile，正式启动会把
-            // 请求交给那个 headless 进程，于是**窗口永远不出现，而日志全绿**。
-            // 所以这里必须**实际观察一会儿**：进程若在极短时间内自己退出，
-            // 就说明它没成功撑起窗口，应当报告失败并继续尝试下一个候选。
-            if let Some(code) = died_immediately(&mut child) {
-                tracing::warn!(
-                    "Edge 启动后立刻退出（exit={code:?}），换下一个方式试试：{}",
-                    cand.display()
-                );
-                continue;
-            }
-            return Ok("Edge 应用模式");
-        }
-    }
-    // 回退：交给系统默认浏览器（会有地址栏）
-    #[cfg(windows)]
-    {
-        Command::new("cmd")
-            .args(["/C", "start", "", url])
-            .spawn()
-            .context("打开默认浏览器失败")?;
-        Ok("默认浏览器")
-    }
-    #[cfg(not(windows))]
-    {
-        anyhow::bail!("当前平台没有可用的浏览器启动方式")
-    }
-}
-
-/// 观察一小会儿：如果子进程已经退出了，返回它的退出码。
-///
-/// 返回 `None` 表示"还活着"（正常，说明它撑住并开了窗口）。
-///
-/// # 为什么需要这个
-///
-/// `spawn()` 成功 ≠ 窗口出现。Edge 可以在 200 毫秒内崩掉
-/// （profile 被别的实例占着、缺 VC++ 运行库、被安全软件拦），
-/// 而 `spawn` 照样返回 `Ok`。不检查的话，程序会认为"界面已经打开了"，
-/// 用户那边却是"双击没反应，只有托盘图标"，且日志里没有任何异常 ——
-/// 这是最难查的一类故障。
-///
-/// # 为什么是 1.2 秒
-///
-/// 太短抓不住真实崩溃（Edge 起进程到报错通常要几百毫秒），
-/// 太长会把正常启动也拖慢。1.2 秒足够覆盖"起不来"的情况，
-/// 而正常启动时这几百毫秒落在用户按下列 alt-tab 之前，感知不到。
-fn died_immediately(child: &mut std::process::Child) -> Option<Option<i32>> {
-    let deadline = std::time::Duration::from_millis(1200);
-    let start = std::time::Instant::now();
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => return Some(status.code()),
-            Ok(None) => {}
-            // 查询失败（比如进程已被回收）：当作没崩，不误报
-            Err(_) => return None,
-        }
-        if start.elapsed() >= deadline {
-            return None;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(80));
-    }
-}
-
-/// 拼 Edge 的启动参数。
-///
-/// 单独抽出来是为了**可测**：这些标志多数是「反直觉但必需」的，
-/// 而它们的效果只有肉眼能看出来（窗口有没有地址栏、按 F12 有没有反应），
-/// 写成测试至少能防住「重构时手一抖删掉一个」。
-///
-/// 每个标志为什么在这里：
-/// - `--app=`：应用模式，去掉地址栏/标签栏，这是"看起来像原生程序"的关键。
-/// - `--user-data-dir=`：独立 profile。**必须**用独立的，否则会和用户自己开的
-///   Edge 抢同一个 profile，`--app` 会被当成"在当前窗口开个标签"，就没有独立窗口了。
-/// - `--no-first-run` / `--no-default-browser-check`：跳过首次运行的欢迎向导
-///   和默认浏览器询问。**这两个是冷启动慢的主因之一** —— 没有它们时，
-///   即使 profile 已存在，Edge 仍会做一轮首次运行检查。
-/// - `--disable-background-networking`：别在后台偷偷联网同步/更新。
-/// - `--disable-features=...`：**只能出现一次**。DevTools 关掉开发者工具，
-///   Translate / msEdgeTranslate 关掉翻译气泡（页面上弹一条"是否翻译"很出戏），
-///   msEdgeBackgroundPreload 关掉后台预加载。
-///   ⚠️ 写两处 `--disable-features=` 不会合并，**后者会静默覆盖前者**。
-/// - `--disable-translate` / `--disable-save-password-bubble`：翻译与密码气泡，
-///   都是"这看起来是个浏览器"的破绽。
-/// - `--no-service-autorun` / `--disable-component-update`：别装后台服务、
-///   别自动更新组件（一体机上我们不想让 Edge 在后台折腾）。
-fn edge_args(url: &str, profile_dir: &std::path::Path) -> Vec<String> {
-    vec![
-        format!("--app={url}"),
-        format!("--user-data-dir={}", profile_dir.display()),
-        "--no-first-run".into(),
-        "--no-default-browser-check".into(),
-        "--disable-background-networking".into(),
-        "--disable-features=msEdgeBackgroundPreload,DevTools,Translate,msEdgeTranslate".into(),
-        "--disable-translate".into(),
-        "--disable-save-password-bubble".into(),
-        "--no-service-autorun".into(),
-        "--disable-component-update".into(),
-    ]
-}
-
-/// 可能的 Edge 可执行文件位置。
-fn edge_candidates() -> Vec<PathBuf> {
-    let mut v = Vec::new();
-    for env in ["ProgramFiles(x86)", "ProgramFiles", "ProgramW6432"] {
-        if let Ok(base) = std::env::var(env) {
-            v.push(
-                PathBuf::from(base)
-                    .join("Microsoft")
-                    .join("Edge")
-                    .join("Application")
-                    .join("msedge.exe"),
-            );
-        }
-    }
-    v
-}
-
-/// 给界面窗口用的独立用户数据目录。
-///
-/// **必须放在一个稳定的位置**，不能放 `%TEMP%`。原因：
-/// `%TEMP%` 会被系统/清理软件定期清空，一旦 profile 没了，Edge 下次启动
-/// 就得从零建 profile（解压、建数据库、首次运行检查），冷启动肉眼可见地慢。
-/// 更糟的是这个目录每次被清掉，用户就要再等一次。
-///
-/// 所以放 `%LOCALAPPDATA%\VibeClassAgent\ui-profile` —— 同样是"用户私有、
-/// 不进版本库"的位置，但不会被当垃圾清掉，第二次启动开始就是热的。
-fn vca_temp_dir() -> PathBuf {
-    let base = std::env::var("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .or_else(|_| std::env::var("TEMP").map(PathBuf::from))
-        .unwrap_or_else(|_| PathBuf::from("."));
-    base.join("VibeClassAgent").join("ui-profile")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// 每个参数各占一个 argv 位置 —— 不能把 `--user-data-dir=` 和它的值
-    /// 拼成一个字符串（Edge 会把它当成一个未知参数，profile 路径就丢了）。
-    fn args_for(url: &str) -> Vec<String> {
-        edge_args(url, std::path::Path::new(r"C:\tmp\profile"))
-    }
-
-    #[test]
-    fn app_mode_flag_present() {
-        let a = args_for("http://127.0.0.1:1234/?t=abc");
-        assert!(
-            a.iter().any(|x| x.starts_with("--app=")),
-            "缺少 --app=，窗口会有地址栏（看起来就是个浏览器）"
-        );
-    }
-
-    #[test]
-    fn url_goes_into_app_flag_verbatim() {
-        let url = "http://127.0.0.1:45678/?t=deadbeef";
-        let a = args_for(url);
-        assert!(a.contains(&format!("--app={url}")));
-    }
-
-    #[test]
-    fn user_data_dir_follows_dash_form() {
-        let a = args_for("http://127.0.0.1:1/?t=x");
-        assert!(
-            a.iter().any(|x| x.starts_with("--user-data-dir=")),
-            "缺少独立 profile，会和用户自己的 Edge 抢 profile，--app 会退化成开标签"
-        );
-    }
-
-    /// 冷启动慢的主因：少了这两个标志，Edge 每次都要跑一轮首次运行检查。
-    #[test]
-    fn cold_start_flags_present() {
-        let a = args_for("http://127.0.0.1:1/?t=x");
-        assert!(a.iter().any(|x| x == "--no-first-run"));
-        assert!(a.iter().any(|x| x == "--no-default-browser-check"));
-    }
-
-    #[test]
-    fn devtools_are_disabled() {
-        let a = args_for("http://127.0.0.1:1/?t=x");
-        let feats: Vec<&String> = a
-            .iter()
-            .filter(|x| x.starts_with("--disable-features="))
-            .collect();
-        // **只能有一条**：写两处不会合并，后者会静默覆盖前者。
-        assert_eq!(feats.len(), 1, "--disable-features 只能出现一次");
-        assert!(feats[0].contains("DevTools"), "开发者工具没关掉");
-    }
-
-    #[test]
-    fn preload_disabled_alongside_devtools() {
-        let a = args_for("http://127.0.0.1:1/?t=x");
-        let feats: Vec<&String> = a
-            .iter()
-            .filter(|x| x.starts_with("--disable-features="))
-            .collect();
-        assert!(feats[0].contains("msEdgeBackgroundPreload"));
-    }
-
-    #[test]
-    fn translate_bubble_disabled() {
-        let a = args_for("http://127.0.0.1:1/?t=x");
-        assert!(
-            a.iter().any(|x| x == "--disable-translate"),
-            "翻译气泡会冒出来，很像浏览器"
-        );
-        let feats: Vec<&String> = a
-            .iter()
-            .filter(|x| x.starts_with("--disable-features="))
-            .collect();
-        assert!(feats[0].contains("Translate"));
-    }
-
-    /// profile 必须落在**稳定**位置。放 `%TEMP%` 会被清理软件删掉，
-    /// 于是每次冷启动都要重建 profile —— 这正是启动慢的元凶。
-    #[test]
-    fn profile_path_is_stable_and_not_in_temp_root() {
-        let dir = vca_temp_dir();
-        let s = dir.to_string_lossy().to_lowercase();
-
-        assert!(
-            s.contains("vibeclassagent"),
-            "profile 路径里没有程序名，太容易被误删：{s}"
-        );
-        assert!(s.ends_with("ui-profile"));
-
-        // 不能是 %TEMP% 的直接子目录
-        if let Ok(temp) = std::env::var("TEMP") {
-            let t = PathBuf::from(temp);
-            assert_ne!(
-                dir.parent(),
-                Some(t.as_path()),
-                "profile 直接躺在 %TEMP% 下，会被清掉"
-            );
-        }
-    }
-
-    #[test]
-    fn profile_dir_is_absolute() {
-        // 相对路径会随工作目录漂移：从开始菜单启动和从命令行启动会得到
-        // 两个不同的 profile，每个都要重建一遍。
-        assert!(vca_temp_dir().is_absolute() || std::env::var("LOCALAPPDATA").is_err());
-    }
-
-    /// 预热是「优化」不是「必需」：不论 Edge 在不在、能不能起，
-    /// 这个函数都必须立刻返回、绝不 panic、绝不阻塞调用方。
-    ///
-    /// 这条测试同时守着一个容易犯的错：有人后来把它改成同步等待，
-    /// 那就会把启动时长直接拖长，而"测试还是绿的"（因为功能没坏）。
-    #[test]
-    fn warm_up_never_blocks_or_panics() {
-        let t0 = std::time::Instant::now();
-        warm_up_profile();
-        let took = t0.elapsed();
-        assert!(
-            took < std::time::Duration::from_millis(1500),
-            "warm_up_profile 阻塞了 {took:?} —— 它必须是后端异步的"
-        );
-    }
-
-    /// 预热用的 profile 目录**必须**和正式窗口用的不同。
-    ///
-    /// 守的是一个真实故障（用户报「双击后只有托盘图标、没有界面」）：
-    /// 两者共用同一个 `--user-data-dir` 时，Chromium/Edge 的
-    /// 「一个 profile 只能有一个浏览器进程」规则会让正式启动的 `--app=`
-    /// 把请求**交给已经在跑的 headless 预热进程** —— 于是窗口永远不出现，
-    /// 而日志里一切正常（`spawn` 确实成功了）。这是最难查的一类故障。
-    #[test]
-    fn warmup_profile_differs_from_window_profile() {
-        let window_profile = vca_temp_dir();
-        let warm_profile = window_profile.with_file_name("ui-profile-warm");
-
-        assert_ne!(
-            window_profile, warm_profile,
-            "预热 profile 和窗口 profile 是同一个目录 —— 正式窗口会被预热进程吞掉，\
-             表现为「只有托盘图标、没有界面」"
-        );
-        assert!(
-            !window_profile.starts_with(&warm_profile)
-                && !warm_profile.starts_with(&window_profile),
-            "两个 profile 存在包含关系，仍会互相干扰"
-        );
-    }
-
-    /// `died_immediately` 必须能识别「起来就死」的进程。
-    ///
-    /// 这是「spawn 成功 ≠ 窗口出现」那半个 bug 的守门测试：
-    /// 不检查的话，Edge 秒退时程序会以为界面已经开好了。
-    #[test]
-    #[cfg(windows)]
-    fn died_immediately_detects_a_process_that_exits() {
-        let mut child = std::process::Command::new("cmd")
-            .args(["/C", "exit 3"])
-            .spawn()
-            .expect("起 cmd 失败");
-        let got = died_immediately(&mut child);
-        assert!(
-            got.is_some(),
-            "没识别出已经退出的进程 —— Edge 秒退时程序会以为界面开好了，用户却在干等"
-        );
-    }
-
-    /// 活着的进程不能被误判成「崩了」，否则每次启动都白等 1.2 秒
-    /// 并且错误地放弃 Edge 方式。
-    #[test]
-    #[cfg(windows)]
-    fn died_immediately_lets_a_live_process_through() {
-        // ping 本机跑约 2 秒，比 1.2 秒的观察窗口长
-        let mut child = std::process::Command::new("cmd")
-            .args(["/C", "ping 127.0.0.1 -n 3 > NUL"])
-            .spawn()
-            .expect("起 ping 失败");
-        let got = died_immediately(&mut child);
-        let _ = child.kill();
-        let _ = child.wait();
-        assert!(
-            got.is_none(),
-            "把一个还活着的进程误判成崩溃了（返回 {got:?}）"
-        );
-    }
 
     #[test]
     fn missing_window_returns_false_without_panicking() {
@@ -1051,5 +721,35 @@ mod tests {
         assert!(!vca_platform::window::focus_by_title(
             "VibeClassAgent-Definitely-Not-A-Real-Window-12345"
         ));
+    }
+
+    /// 没起原生窗口时，`focus_or_open_ui` 必须安全地退到"按标题找窗口"。
+    ///
+    /// 守的是：`WINDOW` 还没被设置时（走浏览器兜底的场景）这条路径
+    /// 不能 panic，也不能谎报成功。
+    #[test]
+    fn focus_falls_back_when_no_native_window() {
+        // 这个测试进程里没起过原生窗口，所以走的必然是兜底路径。
+        assert!(
+            window_handle().is_none(),
+            "测试进程里不该有原生窗口 —— 有的话说明有测试泄漏了状态"
+        );
+        // 不该 panic。返回真假取决于系统里是否真有同名窗口，所以不断言。
+        let _ = focus_or_open_ui();
+    }
+
+    /// 界面窗口标题必须是产品名。
+    ///
+    /// 原生窗口和浏览器兜底两条路都用它 —— 刻意保持一致，
+    /// 这样"退回浏览器"时用户也分辨不出差别。
+    #[test]
+    fn ui_window_title_is_the_product_name() {
+        assert_eq!(UI_WINDOW_TITLE, "VibeClassAgent");
+        assert!(!UI_WINDOW_TITLE.contains("http"), "标题里不该有地址");
+        assert!(
+            !UI_WINDOW_TITLE.contains("localhost"),
+            "标题里不该有 localhost"
+        );
+        assert!(!UI_WINDOW_TITLE.contains(':'), "标题里不该有端口号");
     }
 }

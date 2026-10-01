@@ -31,5 +31,7 @@ pub mod api;
 pub mod daemon;
 pub mod server;
 pub mod web;
+pub mod window;
 
 pub use server::{serve, ServeOptions};
+pub use window::{WindowEvent, WindowHandle};

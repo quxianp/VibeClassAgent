@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "命令行入口（类 Claude Code 的 CLI 交互）"
+# 构建脚本：把 WebView2Loader.dll 拷到 exe 旁边。
+# 少了它 exe 连 main 都进不去（STATUS_DLL_NOT_FOUND），且日志里什么都没有。
+build = "build.rs"
 
 [[bin]]
 name = "vca"

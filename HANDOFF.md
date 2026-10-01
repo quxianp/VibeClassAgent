@@ -12,7 +12,7 @@
 
 **这个项目已经能跑，不要再从头重构。**
 
-- 代码 **399 个单元测试全绿**（2 个 ignored 的需要外网），
+- 代码 **402 个测试全绿**（2 个 ignored 的需要外网），
   `cargo clippy --workspace --all-targets -- -D warnings` **零告警**，`cargo fmt --all -- --check` **无差异**。
 - 四大核心功能（静默录制 / 课后处理 / 推送 / 清理）**已端到端验证通过**。
 - GUI 冒烟 `python scripts\smoke.py` **58 项全过**。
@@ -541,7 +541,30 @@ for ($i=1; $i -le 5; $i++) {
 - 清理：登记 72 小时计划
 - 端到端：`vca debug e2e` 跑通，结束状态 `Pushed`
 - 插件：`vca plugin list` 列出 10 个；示例插件五个方法全部应答正确
-- **质量关（本轮）**：`scripts\gate.cmd` 三关全过 —— fmt 合规、clippy（`--workspace --all-targets -- -D warnings`）零告警、**373 个单元测试全绿**（2 个 ignored 是需要外网的）
+- **依赖下载逻辑（本轮新增，用本地服务器验证真实实现）**：
+  开发机沙箱挡掉一切出网请求（`curl` 的 CONNECT 隧道建起来之后收不到任何响应，
+  系统代理 `127.0.0.1:10818` 明明在听也没用），**所以"真去 GitHub 下载 98MB ffmpeg"
+  仍然没验过**。但下载逻辑里的绝大多数风险跟"服务器是谁"无关，
+  于是用「起一个本地 HTTP 服务器冒充下载源、故意扮演坏源」的方式，
+  验了**真正会跑的那套代码**（`ureq` + `zip`，不是另写一份复刻品）：
+  - `crates/vca-platform/tests/fetch_offline.rs`（3 个集成测试）：正常下载长度一致 /
+    HTTP 500 与 404 必须报错而不被静默吞掉 / 断流不能被当成成功 /
+    空响应长度为 0（会被 `min_bytes` 拦下）/ zip 内层套一层版本目录时
+    仍能按文件名找到目标 / 同伴 DLL 一起解出来（少一个就是"下完了但跑不起来"）；
+  - `min_bytes` 下限的取值边界固定成测试：**下限的唯一职责是识别碎片，
+    不是猜"正常该多大"** —— 曾经写成 512KB，而真实 `whisper-cli.exe` 只有 469KB，
+    导致健康机器上一直误报缺依赖。
+  - **仍未验到**：真实站点的 TLS/重定向/限速行为、大文件（98MB）长时间下载的
+    稳定性、各镜像站当前的 URL 是否还有效。这些只能在能出网的真机上跑一次。
+- **前后端分离（本轮新增）**：外部 `web/` 目录优先、内置 `include_str!` 兜底。
+  实测：外部目录里的**新文件**（`/_probe.txt`）与**子目录**（`/sub/mod.js`）
+  都能取到且 Content-Type 正确；`/../config/...`、`/..%2fconfig%2f...`、
+  `/sub/../../Cargo.toml` 三种穿越尝试全部 404；`Cache-Control: no-store` 生效；
+  **服务运行中改 `web/style.css`，下一次请求就是新内容，exe 时间戳未变** ——
+  即前端真的可以改完刷新即见，全程不碰 Rust
+- **质量关（`scripts\gate.cmd`）**：三关全过 —— fmt 合规、
+  clippy（`--workspace --all-targets -- -D warnings`）零告警、
+  **402 个测试全绿**（2 个 ignored 是需要外网的）
 - **启动依赖自检（本轮新增）**：用真实挪走依赖文件的方式端到端验过三条路径 ——
   ① 全就绪时 `missing=0 need_notice=0`（不会打扰用户）；
   ② 缺 `ffmpeg` + 模型时 `missing=2 notice_required=true`，逐项给出「文件不存在」；

@@ -30,8 +30,10 @@
 pub mod api;
 pub mod daemon;
 pub mod server;
+pub mod startup_check;
 pub mod web;
 pub mod window;
 
 pub use server::{serve, ServeOptions};
+pub use startup_check::StartupCheck;
 pub use window::{WindowEvent, WindowHandle};

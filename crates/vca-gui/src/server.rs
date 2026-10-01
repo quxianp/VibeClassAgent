@@ -121,6 +121,16 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
     tracing::info!("界面地址：{url}");
     clock.mark("界面地址就绪 ← 到达这里用户就能用了");
 
+    // 开屏依赖自检：**必须真的跑**，不能只挂在 `/api/deps` 上等人来问。
+    //
+    // 放在这里（而不是更早）是刻意的：自检本身很快，但它之后可能要下载
+    // 上百 MB，绝不能挡在开窗前面 —— 那正是"启动慢"投诉的来源。
+    // 所以先让用户看到界面，再在后台查。
+    //
+    // 不开界面实例（测试、`--no-open`）时也跑：这类调用同样会用到
+    // ffmpeg / whisper，早发现早好，而且它只读文件、没有副作用。
+    start_dependency_check(&opts, &clock);
+
     // HTTP 服务必须**先**挪到别的线程。
     //
     // 因为下面 `window::run()` 会占住主线程跑事件循环（Windows 上窗口
@@ -186,6 +196,63 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// 开屏依赖自检：查 ffmpeg / whisper / 模型是否齐备，缺了就记日志并提示。
+///
+/// # 为什么在后台线程
+///
+/// 检测本身只是几个 `stat`，但它**可能触发下载**（用户点了"一键补齐"，
+/// 或者将来做成自动补）。下载是几十到上百 MB，绝不能挡在开窗路径上。
+/// 丢后台线程后，界面该出还是出，检查在用户看着界面的时候悄悄跑完。
+///
+/// # 为什么不用模态弹窗
+///
+/// 「缺 whisper」这类可选项**不该拦住用户干活** —— 界面、课表、配置
+/// 都还能用。所以这里只把结果推进日志与事件流，由界面按
+/// [`crate::startup_check::StartupCheck::all_required`] 的轻重
+/// 自己决定怎么呈现（横幅 / 角标 / 弹窗都行）。
+///
+/// # 失败不致命
+///
+/// 自检出错（目录没权限之类）**不能让程序起不来** —— 那是把"少个提示"
+/// 升级成"程序打不开"，代价完全不成比例。所以整个函数吞掉错误只记日志。
+fn start_dependency_check(opts: &ServeOptions, clock: &StartupClock) {
+    let config_root = opts.config_root.clone();
+    let spawned = std::thread::Builder::new()
+        .name("vca-depcheck".into())
+        .spawn(move || {
+            let tools = crate::startup_check::tools_root_from_exe();
+            let result = crate::startup_check::run_and_log(&tools, &config_root);
+            if result.has_missing() {
+                // 记进事件流：界面启动后会读它，于是"缺什么"能在界面上
+                // 显示出来，而不是只在日志文件里躺着。
+                //
+                // 必需项每次都要提示；可选项只在第一次（这个分级是
+                // `need_notice` 算的，标记由 `mark_optional_notified` 落盘）。
+                let all_required = result.all_required();
+                record_dependency_notice(&result.summary(), all_required);
+            }
+        });
+
+    match spawned {
+        Ok(_) => clock.mark("依赖自检已起（后台）"),
+        // 起不了线程不是灾难：自检只是提示，缺了它程序照样能用。
+        Err(e) => tracing::warn!("依赖自检线程起不来（{e}），这次跳过自检"),
+    }
+}
+
+/// 把"缺依赖"这件事推进界面能看见的地方。
+///
+/// 走的是既有的待办/事件通道，前端不需要为它新增接口 ——
+/// `web/CONTRACT.md` 里那套轮询本来就会把新事件显示出来。
+fn record_dependency_notice(summary: &str, all_required: bool) {
+    // 必需项：用户真的不能用，日志级别也升高一档。
+    if all_required {
+        tracing::error!("【依赖缺失·必需】{summary}；程序核心功能不可用");
+    } else {
+        tracing::warn!("【依赖缺失·部分】{summary}；核心功能可用，部分功能受限");
+    }
 }
 
 /// 兜底：用系统默认浏览器打开界面。

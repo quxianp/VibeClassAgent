@@ -39,6 +39,12 @@ pub enum WindowEvent {
     /// 收到这个时**不要**让程序退出：HTTP 服务还在跑，退回"用系统浏览器
     /// 打开"至少让用户能用上。这正是原来 Edge 方案里最该有却没有的兜底。
     Failed(String),
+    /// 页面加载完成、窗口**刚刚被显示出来**。
+    ///
+    /// 窗口是建好但不可见的（见 `with_visible(false)`），页面画完了才亮出来。
+    /// 主要给启动计时用 —— 这个时间点才是"用户真正看到界面"的时刻，
+    /// 比"进程起来了"有意义得多。
+    Shown,
 }
 
 /// 起一个原生窗口加载 `url`，**立即返回**可以查询/关闭的句柄。
@@ -103,6 +109,9 @@ fn run_blocking(url: String, tx: mpsc::Sender<WindowEvent>, cmd_rx: mpsc::Receiv
     let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
     let proxy = event_loop.create_proxy();
+    // WebView 的页面加载回调也要往事件循环里发事件，所以留一份。
+    // `EventLoopProxy` 是 Clone 的，两边各持一份互不影响。
+    let webview_proxy = proxy.clone();
     std::thread::spawn(move || {
         // 把主线程发来的命令转成 event_loop 的用户事件，
         // 这样就能在事件循环里处理，而不必跨线程碰窗口。
@@ -113,10 +122,23 @@ fn run_blocking(url: String, tx: mpsc::Sender<WindowEvent>, cmd_rx: mpsc::Receiv
         }
     });
 
+    // ⚠️ **建好但先不显示** —— 这是不闪白的关键。
+    //
+    // 用户报「启动时窗口先闪白一下再进页面」。根因是顺序：原来窗口建完
+    // 立刻就是可见的，而 WebView 要过一会儿才把页面渲染出来，
+    // 中间那段时间露出的是**空窗口**（系统默认白底）——
+    // 用户看到的就是"闪一下白"。
+    //
+    // 正确顺序是：建窗口（不可见）→ 建 WebView → 等页面**加载完成**
+    // → 再把窗口显示出来。这样用户第一眼看到的就是渲染好的页面。
+    //
+    // `with_visible(false)` 必须在 build 时就设，不能建完再 set_visible(false) ——
+    // 后者中间仍有一帧是可见的，还是会闪。
     let window = match WindowBuilder::new()
         .with_title("VibeClassAgent")
         .with_inner_size(tao::dpi::LogicalSize::new(1180.0, 820.0))
         .with_min_inner_size(tao::dpi::LogicalSize::new(880.0, 620.0))
+        .with_visible(false)
         .build(&event_loop)
     {
         Ok(w) => w,
@@ -146,6 +168,33 @@ fn run_blocking(url: String, tx: mpsc::Sender<WindowEvent>, cmd_rx: mpsc::Receiv
     let webview = match wry::WebViewBuilder::new_with_web_context(&mut web_context)
         .with_url(&url)
         .with_initialization_script(INIT_SCRIPT)
+        // 深色底：即使在某台机器上还是漏出一帧，露的也是**深色**而不是刺眼的白。
+        // 界面的实际底色由 CSS 决定，这里管的是"页面还没画出来时"那层。
+        //
+        // 注意 `wry::RGBA` 就是个元组别名 `(u8,u8,u8,u8)`，
+        // 不是结构体（wry 0.57），别写成 `Color(...)`。
+        // 取值和界面深色主题的底色接近，过渡时看不出接缝。
+        .with_background_color((24, 26, 32, 255))
+        // 页面加载完成 → 这时才把窗口显示出来（见上面 with_visible(false)）。
+        //
+        // 用 `on_page_load` 而不是定时器：完成的时机由 WebView 自己报，
+        // 不用猜"加载要多久"。慢机器上不会提前显示空窗口，
+        // 快机器上也不会白等。
+        //
+        // 通过 `proxy` 发**用户事件**而不是直接调 `window.set_visible(true)` ——
+        // 回调可能不在事件循环那个线程上跑，直接碰窗口不安全。
+        // 绕一圈回到事件循环里执行才是正确姿势。
+        .with_on_page_load_handler({
+            let proxy = webview_proxy.clone();
+            let tx = tx.clone();
+            move |event, _url| {
+                if let wry::PageLoadEvent::Finished = event {
+                    // 先让事件循环亮窗口，再通知主线程"已经可见了"
+                    let _ = proxy.send_event(UserEvent::PageLoaded);
+                    let _ = tx.send(WindowEvent::Shown);
+                }
+            }
+        })
         .build(&window)
     {
         Ok(w) => w,
@@ -162,23 +211,77 @@ fn run_blocking(url: String, tx: mpsc::Sender<WindowEvent>, cmd_rx: mpsc::Receiv
 
     tracing::info!("原生窗口已创建，正在加载 {url}");
 
-    // ⚠️ `webview` 必须活到事件循环结束。
+    // ⚠️ 兜底：页面要是**加载不完**，窗口不能永远不显示。
+    //
+    // 我们把显示时机押在 `PageLoadEvent::Finished` 上，但那个事件在几种情况下
+    // 可能不来：前端某段脚本把 load 卡住、WebView 内部异常、网络栈抽风。
+    // 那样用户会看到**什么都没发生**（进程在跑、托盘有图标、就是没窗口），
+    // 比"闪一下白"糟糕得多 —— 这是拿一个观感问题换一个可用性问题。
+    //
+    // 所以起一个看门狗：到点还没显示过，就无条件显示。
+    // 宁可闪白也不能不出窗口。**这个交换是有意为之，不要删。**
+    {
+        let proxy = webview_proxy.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(SHOW_WATCHDOG_MS));
+            // 事件循环已经退出（用户关窗口了）时，send 会失败，忽略即可。
+            let _ = proxy.send_event(UserEvent::ShowAnyway);
+        });
+    }
+
+    // ⚠️ WebView 句柄必须**一直活着**，直到窗口销毁。
     //
     // 它一旦被 drop，WebView2 控件就从窗口上摘掉了 —— 结果是一个**空窗口**，
-    // 比"窗口没起来"更难查（窗口确实在，就是白的）。
-    // 所以这里把它移进闭包，让它的生命周期和事件循环绑定。
-    let _webview = webview;
+    // 比"窗口没起来"更难查（窗口确实在，就是黑的/白的）。
+    //
+    // 用 `Option` 包着是为了能在关闭时**主动 drop**（见下面两个关闭分支），
+    // 让控件在窗口还活着的时候正常拆除。
+    let mut webview = Some(webview);
+    let mut shown = false;
+
+    // 闭包末尾会读一次 `webview`（`black_box`），那是"保活"这件事的落点。
+    // 没有那个读，编译器会认为这个变量只写不读 —— 警告只是表象，
+    // 真正的风险是它可能被提前析构，于是窗口空白。**别删那次读。**
     event_loop.run(move |event, _, control_flow| {
-        // 借用一下，确保闭包真的捕获了它（而不是被优化掉）
-        let _keep_alive = &_webview;
         *control_flow = ControlFlow::Wait;
         match event {
             Event::WindowEvent {
                 event: TaoWindowEvent::CloseRequested,
                 ..
             } => {
+                // ⚠️ **先隐藏再销毁** —— 这是不闪白的关键（关闭方向）。
+                //
+                // 用户报「关闭时也会出现闪白」。根因是销毁顺序：
+                // 窗口开始销毁时 WebView 控件会先被摘掉，
+                // 露出底下那个空窗口（系统默认白底）—— 于是关的时候闪一下白。
+                //
+                // 先 `set_visible(false)` 把整个窗口藏起来，用户就看不到
+                // 后面的销毁过程了。这一帧的差别就是"闪白"和"干净关闭"。
+                window.set_visible(false);
+                // 显式 drop WebView，让它在窗口还活着的时候正常拆除 ——
+                // 比留给系统在窗口析构时粗暴回收更稳（WebView2 有 COM 引用计数，
+                // 顺序不对时可能报错或留下进程）。
+                webview = None;
                 let _ = tx.send(WindowEvent::Closed);
                 *control_flow = ControlFlow::Exit;
+            }
+            Event::UserEvent(UserEvent::PageLoaded) => {
+                // 页面画完了 → 亮出窗口。**用户第一眼就是渲染好的界面**，
+                // 中间那层空窗口（系统默认白底）从来没露过脸 ——
+                // 这就是"启动不闪白"的全部秘密。
+                window.set_visible(true);
+                window.set_focus();
+                shown = true;
+            }
+            Event::UserEvent(UserEvent::ShowAnyway) => {
+                // 看门狗到点了。只有还没显示过才动手 —— 正常路径下
+                // `shown` 已经是 true，这个分支什么都不做（不会把用户
+                // 已经调走的焦点抢回来）。
+                if !shown {
+                    tracing::warn!("页面 {SHOW_WATCHDOG_MS}ms 内没加载完，先把窗口显示出来");
+                    window.set_visible(true);
+                    shown = true;
+                }
             }
             Event::UserEvent(UserEvent::Cmd(WindowCmd::Focus)) => {
                 // 直接用闭包捕获的 `window` —— tao 0.37 的 `Event` 上没有
@@ -189,11 +292,16 @@ fn run_blocking(url: String, tx: mpsc::Sender<WindowEvent>, cmd_rx: mpsc::Receiv
                 window.request_redraw();
             }
             Event::UserEvent(UserEvent::Cmd(WindowCmd::Close)) => {
+                // 主动关闭时同样先隐藏（走同一条干净路径）
+                window.set_visible(false);
+                webview = None;
                 let _ = tx.send(WindowEvent::Closed);
                 *control_flow = ControlFlow::Exit;
             }
             _ => {}
         }
+        // 保活：确保 `webview` 真的被闭包持有到最后一刻。
+        std::hint::black_box(&webview);
     });
 }
 
@@ -236,7 +344,27 @@ enum WindowCmd {
 #[derive(Debug)]
 enum UserEvent {
     Cmd(WindowCmd),
+    /// WebView 报告页面加载完成 → 亮窗口。
+    ///
+    /// 单列一个而不是复用 `Cmd(WindowCmd::Show)`，是因为它来自 WebView 回调
+    /// 而非主线程命令，语义不同；合并后调试时不好分辨是谁触发的。
+    PageLoaded,
+    /// 看门狗到点：不等页面了，显示窗口。
+    ///
+    /// 只在 [`PageLoaded`](Self::PageLoaded) 没来过时才起作用，
+    /// 见 `SHOW_WATCHDOG_MS` 的说明。
+    ShowAnyway,
 }
+
+/// 等页面加载的**上限**（毫秒）。超时就把窗口先显示出来。
+///
+/// 取值理由：正常机器上页面是本地 HTTP、无外链，实测远低于这个数。
+/// 给到 3 秒是为了容忍慢机器 + 首次启动时 WebView2 冷启动（要初始化
+/// 渲染进程、编译 shader，第一次确实偏慢）。
+///
+/// 调这个值前先想清楚：**调大 = 慢机器上白等更久，调小 = 可能白闪一下**。
+/// 而"白闪"和"不出窗口"之间，永远选白闪。
+const SHOW_WATCHDOG_MS: u64 = 3000;
 
 /// 窗口里注入的一小段脚本。
 ///

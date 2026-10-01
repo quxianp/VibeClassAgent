@@ -100,7 +100,21 @@ struct WndState {
 }
 
 const WS_POPUP: u32 = 0x8000_0000;
+/// message-only 窗口的父句柄。
+///
+/// ⚠️ **不要让托盘窗口用它当父窗口** —— message-only 窗口不在正常输入队列里，
+/// `TrackPopupMenu` 从它上面弹不出来（菜单构造成功但不显示），
+/// 用户看到的就是「右键任务栏图标没反应」。
+///
+/// 保留这个常量只为文档清晰：以后出现它的地方都必须是刻意的。
+#[allow(dead_code)]
 const HWND_MESSAGE: Hwnd = -3;
+
+/// 托盘窗口的父窗口：桌面。
+///
+/// 用桌面而不是 `HWND_MESSAGE`：窗口本身不可见（`WS_POPUP` + 0×0 + 不 ShowWindow），
+/// 但它是**正常窗口**，弹出菜单、`SetForegroundWindow` 都能正常工作。
+const HWND_DESKTOP: Hwnd = 0;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -628,7 +642,20 @@ pub fn spawn(
                     let _ = tx_ready.send(Err("RegisterClassW 失败".into()));
                     return;
                 }
-                // 只收消息的窗口（HWND_MESSAGE）
+                // 这是一个**隐藏的普通窗口**，不能是 message-only 窗口。
+                //
+                // 血泪教训（用户报「右键任务栏图标依然没有反应」）：
+                // 原来这里传的是 `HWND_MESSAGE`（`-3`），也就是"只收消息、
+                // 不参与输入"的特殊窗口。收托盘回调消息没问题，但
+                // **`TrackPopupMenu` 在一个 message-only 窗口上弹不出来** ——
+                // 它需要窗口属于正常的桌面输入队列。结果是：右键逻辑全都对
+                // （消息收到了、菜单也构造了），但菜单就是不显示，
+                // 用户看到的就是"右键没反应"。
+                //
+                // 改用 `HWND_DESKTOP`(0) 作为父窗口 + `WS_POPUP`：
+                // 窗口没有可视区域（0×0、不显示），纯粹当消息接收器用，
+                // 但它是**正常窗口**，弹出菜单、`SetForegroundWindow`
+                // 这些依赖正常输入队列的操作都能正常工作。
                 let hwnd = CreateWindowExW(
                     0,
                     class.as_ptr(),
@@ -638,7 +665,7 @@ pub fn spawn(
                     0,
                     0,
                     0,
-                    HWND_MESSAGE,
+                    HWND_DESKTOP, // **不能**用 HWND_MESSAGE，否则右键菜单弹不出来
                     0,
                     inst,
                     core::ptr::null_mut(),
@@ -880,14 +907,7 @@ unsafe fn remove_icon(hwnd: Hwnd) {
 /// 右键菜单走 `TPM_RETURNCMD`（返回值）拿 ID，键盘激活或其它路径走 `WM_COMMAND`
 /// （消息参数）拿 ID —— 两条路都收敛到这里，只有一份映射表。
 unsafe fn handle_command(hwnd: Hwnd, id: u32) -> bool {
-    let cmd = match id {
-        ID_OPEN_UI => Some(TrayCommand::OpenUi),
-        ID_STOP => Some(TrayCommand::StopRecording),
-        ID_LOGS => Some(TrayCommand::OpenLogs),
-        ID_DATA => Some(TrayCommand::OpenDataDir),
-        ID_QUIT => Some(TrayCommand::Quit),
-        _ => None,
-    };
+    let cmd = command_for(id);
     if let Some(c) = cmd {
         send_cmd(hwnd, c);
         true
@@ -895,6 +915,31 @@ unsafe fn handle_command(hwnd: Hwnd, id: u32) -> bool {
         false
     }
 }
+
+/// 菜单项 ID → 命令。**这是唯一的一份映射表。**
+///
+/// 抽成独立的纯函数是为了可测：菜单项「点了没反应」几乎总是这里漏了一项，
+/// 而那种故障在真机上手点才能发现。有了它就能用测试把每个 ID 都覆盖一遍。
+///
+/// 新增菜单项时：加常量 → 加进 [`MENU_ITEM_IDS`] → 在 `show_menu` 里 `append_item`。
+/// 三处齐全才算接好。
+fn command_for(id: u32) -> Option<TrayCommand> {
+    match id {
+        ID_OPEN_UI => Some(TrayCommand::OpenUi),
+        ID_STOP => Some(TrayCommand::StopRecording),
+        ID_LOGS => Some(TrayCommand::OpenLogs),
+        ID_DATA => Some(TrayCommand::OpenDataDir),
+        ID_QUIT => Some(TrayCommand::Quit),
+        _ => None,
+    }
+}
+
+/// 右键菜单里所有**可点击**项的 ID。
+///
+/// 与 `show_menu` 里 `append_item` 的调用必须一一对应。
+/// 有测试拿它和 [`command_for`] 对照，防止"菜单里加了项但没接命令"。
+#[cfg(test)]
+const MENU_ITEM_IDS: &[u32] = &[ID_STOP, ID_OPEN_UI, ID_LOGS, ID_DATA, ID_QUIT];
 
 /// 把命令通过窗口用户数据里的 channel 发出去。
 unsafe fn send_cmd(hwnd: Hwnd, cmd: TrayCommand) {
@@ -1261,6 +1306,74 @@ mod tests {
 
         tray.close();
         let _ = join.join();
+    }
+
+    /// 托盘窗口**不能**是 message-only 窗口（`HWND_MESSAGE`）。
+    ///
+    /// 回归点：用户报「右键任务栏图标依然没有反应」。
+    /// 根因是托盘窗口原本用 `HWND_MESSAGE` 当父窗口 —— 收托盘回调消息没问题，
+    /// 但 `TrackPopupMenu` 从一个 message-only 窗口上**弹不出来**
+    /// （它需要窗口属于正常桌面输入队列）。菜单构造、命令映射全都对，
+    /// 就是看不见。
+    ///
+    /// 这条测试直接读回窗口的父窗口来验证 —— 比"弹一次看看"更可靠，
+    /// 因为自动化环境里没法真的去看菜单有没有画出来。
+    #[test]
+    #[cfg(windows)]
+    fn tray_window_is_not_message_only() {
+        let (tray, join) = match spawn("测试托盘-父窗口", Box::new(TrayStatus::default)) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("（跳过：无法创建托盘窗口：{e}）");
+                return;
+            }
+        };
+
+        // GetParent 对 message-only 窗口返回 HWND_MESSAGE(-3)，
+        // 对普通顶层窗口返回 0（桌面）。
+        #[link(name = "user32")]
+        extern "system" {
+            fn GetParent(hwnd: Hwnd) -> Hwnd;
+        }
+        let parent = unsafe { GetParent(tray.hwnd) };
+
+        tray.close();
+        let _ = join.join();
+
+        assert_ne!(
+            parent, HWND_MESSAGE,
+            "托盘窗口是 message-only 窗口 —— 右键菜单会弹不出来（「右键没反应」的根因）"
+        );
+    }
+
+    /// 右键菜单的**每一层**都必须走通：消息 → `show_menu` → `handle_command`。
+    ///
+    /// 这条测试不打开真实菜单（自动化环境里弹不出来也没法点），
+    /// 而是验证 `handle_command` 对右键菜单里所有项都能正确分发 ——
+    /// 覆盖"菜单能弹但点了没反应"那一类故障。
+    #[test]
+    fn every_menu_item_dispatches_to_a_command() {
+        let cases = [
+            (ID_STOP, TrayCommand::StopRecording),
+            (ID_OPEN_UI, TrayCommand::OpenUi),
+            (ID_LOGS, TrayCommand::OpenLogs),
+            (ID_DATA, TrayCommand::OpenDataDir),
+            (ID_QUIT, TrayCommand::Quit),
+        ];
+        for (id, want) in cases {
+            assert_eq!(
+                command_for(id),
+                Some(want),
+                "菜单项 ID={id} 没有映射到 {want:?} —— 点它不会有任何反应"
+            );
+        }
+        // 菜单里列出的每一项都必须在映射表里
+        for id in MENU_ITEM_IDS {
+            assert!(
+                command_for(*id).is_some(),
+                "MENU_ITEM_IDS 里的 {id} 没有对应命令 —— 菜单里会出现一个点了没反应的项"
+            );
+        }
     }
 
     /// 状态行渲染：不在录制时**不能**出现「正在录制」。

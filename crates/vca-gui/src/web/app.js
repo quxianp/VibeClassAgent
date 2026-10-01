@@ -1384,28 +1384,134 @@ async function renderSchedule() {
         <button class="seg-btn active" data-mode="grid">${esc(t('sc.mode_grid'))}</button>
         <button class="seg-btn" data-mode="table">${esc(t('sc.mode_table'))}</button>
       </div>
-      <button class="btn sm" id="btn-on">${esc(t('sc.all_on'))}</button>
-      <button class="btn sm" id="btn-off">${esc(t('sc.all_off'))}</button>
       <span class="spacer"></span>
       <span style="font-size:12px;color:var(--text-dim2)" id="cnt"></span>
       <button class="btn sm" id="btn-csv">${esc(t('sc.export'))}</button>
       <button class="btn primary" id="btn-save">${esc(t('common.save'))}</button>
     </div>
+
+    <!-- 录播批量勾选。
+         原先只有两个"全部开启/全部关闭"，而且它们作用于**全部格子**（含空格），
+         想只勾其中几节课只能一格格点。这里换成真正的批量选择：
+         全选 / 取消全选 / 反选，作用域是**当前筛选结果**（见 bulkScopeNote）。 -->
+    <div class="bulk-bar">
+      <input type="text" id="sc-filter" class="bulk-search" placeholder="${esc(t('sc.filter_ph'))}">
+      <button class="btn sm" id="btn-clear-filter" style="display:none">${esc(t('sc.filter_clear'))}</button>
+      <div class="bulk-ops">
+        <button class="btn sm" id="btn-on">${esc(t('sc.bulk_all'))}<span class="bulk-scope" id="scope-on"></span></button>
+        <button class="btn sm" id="btn-off">${esc(t('sc.bulk_none'))}</button>
+        <button class="btn sm" id="btn-invert">${esc(t('sc.bulk_invert'))}<span class="bulk-scope" id="scope-inv"></span></button>
+      </div>
+    </div>
+    <p class="hint" id="bulk-note" style="margin:0 0 10px"></p>
+
     <div id="body"></div>
     <div class="note" id="save-note" style="display:none"></div>
   </div>`;
 
   const body = document.getElementById('body');
-  const upd = () => {
-    let n = 0, r = 0;
+
+  // 搜索关键词。空 = 不过滤。
+  let keyword = '';
+
+  /**
+   * 参与批量选择与计数的条目。
+   *
+   * # 为什么必须和网格里的格子用同一套判定
+   *
+   * 网格是「星期 × 节次」的**全量**格子，绝大部分是空的。批量勾选如果
+   * 把空格也算进去，"全选"看着勾了 200 个、实际只有 12 节课，计数就假了。
+   * 所以统一定义：**填了科目或教师**的格子才算"一门课"。
+   *
+   * 返回 [{ day, i, c }]，顺序与列表视图一致（星期 → 节次），
+   * 这样"反选"之后用户在两个视图里看到的顺序是同一个。
+   */
+  const items = () => {
+    const out = [];
     Object.keys(model).forEach(day => Object.keys(model[day]).forEach(i => {
       const c = model[day][i];
-      if (c.subject.trim()) { n++; if (c.record) r++; }
+      if ((c.subject || '').trim() || (c.teacher || '').trim()) {
+        out.push({ day, i: Number(i), c });
+      }
     }));
-    document.getElementById('cnt').textContent =
-      `${t('sc.count')} ${n} ${t('sc.entries')} · ${t('sc.recording')} ${r}`;
+    const order = DAYS.map(d => d[0]);
+    out.sort((a, b) => order.indexOf(a.day) - order.indexOf(b.day) || a.i - b.i);
+    return out;
+  };
+
+  /** 关键词命中的条目（全选/反选/计数都只看它）。 */
+  const visibleItems = () => {
+    const all = items();
+    const kw = keyword.trim().toLowerCase();
+    if (!kw) return all;
+    return all.filter(it =>
+      (it.c.subject || '').toLowerCase().includes(kw) ||
+      (it.c.teacher || '').toLowerCase().includes(kw));
+  };
+
+  /**
+   * 刷新计数、作用域提示与空状态。
+   *
+   * 三个数字各说各话最容易出问题，所以在这里一次算清：
+   * - `m` 总课程数（填了内容的格子）
+   * - `n` 已勾选数（**不受筛选影响** —— 筛掉不等于取消勾选，
+   *       否则用户搜一下再清空搜索，勾选就没了，这属于静默丢数据）
+   * - `v` 当前可见数（筛选命中）
+   */
+  const upd = () => {
+    const all = items();
+    const vis = visibleItems();
+    const m = all.length;
+    const n = all.filter(it => it.c.record).length;
+    const filtered = keyword.trim().length > 0;
+
+    const cnt = document.getElementById('cnt');
+    if (cnt) {
+      if (!m) {
+        cnt.textContent = t('sc.count_none');
+      } else if (filtered) {
+        // 有筛选时把"筛选范围内勾了几个"也说清楚。
+        //
+        // 只报全局的 n/m 会造成困惑：列表被筛得只剩 1 行，计数却说"已选 4"，
+        // 用户会以为勾选没生效。所以补一个 v 维度：
+        // 「已选 4 / 共 12 个 · 当前 1 项中 1 项已选」。
+        // 两个数都在，谁也误导不了谁。
+        const vOn = vis.filter(it => it.c.record).length;
+        cnt.textContent = t('sc.count_selected')
+          .replace('{n}', String(n)).replace('{m}', String(m))
+          + ' · ' + t('sc.count_in_filter')
+            .replace('{n}', String(vOn)).replace('{m}', String(vis.length));
+      } else {
+        cnt.textContent = t('sc.count_selected')
+          .replace('{n}', String(n)).replace('{m}', String(m));
+      }
+    }
+
+    // 作用域提示：全选到底会勾多少，直接标在按钮上，避免误解
+    const so = document.getElementById('scope-on');
+    const si = document.getElementById('scope-inv');
+    if (so) so.textContent = filtered ? t('sc.bulk_scope_filtered').replace('{n}', String(vis.length)) : '';
+    if (si) si.textContent = filtered ? t('sc.bulk_scope_filtered').replace('{n}', String(vis.length)) : '';
+
+    const note = document.getElementById('bulk-note');
+    if (note) {
+      // 只在使用者需要知道的时候说话：一门课都没有时给出引导，
+      // 其余情况交给按钮上的作用域标注与计数，不再重复
+      note.textContent = m ? '' : t('sc.empty_no_course');
+    }
+
+    // 清除按钮只在有内容时出现，免得多个常年无用的按钮
+    const cf = document.getElementById('btn-clear-filter');
+    if (cf) cf.style.display = keyword ? '' : 'none';
+
     document.querySelectorAll('#mode .seg-btn').forEach(b =>
       b.classList.toggle('active', b.dataset.mode === mode));
+  };
+
+  /** 批量改录播开关。`pick(item, idx) -> bool` 决定每个条目勾不勾。 */
+  const bulkSet = (pick) => {
+    visibleItems().forEach((it, idx) => { it.c.record = pick(it, idx); });
+    paint();
   };
 
   /* ---- 科目 / 教师候选：与 ClassIsland 的「科目」库对应 ---- */
@@ -1434,6 +1540,16 @@ async function renderSchedule() {
       body.innerHTML = `<div class="empty">${esc(t('sc.no_layout_why'))}</div>`;
       return;
     }
+    // 筛选在网格里只做**变暗**，不做隐藏。
+    // 网格是编辑用的画布，藏掉格子会让用户以为课没了、
+    // 也可能在看不见的地方改错行。一眼看出"哪些不在筛选范围里"就够了。
+    const kw = keyword.trim().toLowerCase();
+    const dimmed = (c) => {
+      if (!kw) return false;
+      if (!(c.subject || '').trim() && !(c.teacher || '').trim()) return false;
+      return !((c.subject || '').toLowerCase().includes(kw) ||
+        (c.teacher || '').toLowerCase().includes(kw));
+    };
     body.innerHTML = dl() + `<div class="sc-scroll"><table class="sc-grid"><thead><tr>
       <th class="sc-day"></th>
       ${slots.map(s => `<th><div class="sc-th-t">${esc(s.start)}</div>
@@ -1444,7 +1560,8 @@ async function renderSchedule() {
         ${slots.map((s, i) => {
           const c = cell(day, i);
           const ph = esc(s.default_subject || t('sc.cell_ph'));
-          return `<td><div class="sc-cell">
+          const dim = dimmed(c) ? ' sc-dim' : '';
+          return `<td><div class="sc-cell${dim}">
             <input type="text" data-day="${day}" data-i="${i}" data-k="subject"
                    list="dl-course" value="${esc(c.subject)}" placeholder="${ph}">
             <div class="sc-sub">
@@ -1463,7 +1580,9 @@ async function renderSchedule() {
         node.addEventListener('change', () => { c().record = node.checked; upd(); });
       } else {
         node.addEventListener('input', () => { c()[node.dataset.k] = node.value; });
-        node.addEventListener('change', () => { c()[node.dataset.k] = node.value; upd(); });
+        // 科目/教师改了会影响筛选结果与计数，所以 change 时重绘 ——
+        // 只 input 时重绘会把正在输入的光标位置弄丢
+        node.addEventListener('change', () => { c()[node.dataset.k] = node.value; paint(); });
       }
     });
   };
@@ -1480,7 +1599,23 @@ async function renderSchedule() {
     return rows;
   };
   const paintTable = () => {
-    const rows = flat();
+    // 列表视图是"核对与批量操作"用的，所以这里**真的过滤**（隐藏不匹配的行）——
+    // 这和网格视图的变暗策略不同，是有意的：
+    // 列表本来就是全量条目的投影，隐藏不匹配的行正好让用户看清"全选会勾哪些"。
+    const all = flat();
+    const rows = keyword.trim() ? visibleItems() : all;
+
+    // 空状态分三种，不能都显示成空白列表：
+    // 课表本来就空 / 筛选没命中 / 正常有内容。
+    if (!all.length) {
+      body.innerHTML = dl() + `<div class="empty">${esc(t('sc.empty_no_course'))}</div>`;
+      return;
+    }
+    if (!rows.length) {
+      body.innerHTML = dl() + `<div class="empty">${esc(t('sc.empty_filtered'))}</div>`;
+      return;
+    }
+
     body.innerHTML = dl() + `
       <div class="slot-row slot-head" style="grid-template-columns:${COLS}">
         <div>${esc(t('sc.col_day'))}</div><div>${esc(t('sc.col_start'))}</div>
@@ -1522,7 +1657,8 @@ async function renderSchedule() {
           node.addEventListener('change', () => { r.c.record = node.checked; upd(); });
         } else {
           node.addEventListener('input', () => { r.c[k] = node.value; });
-          node.addEventListener('change', () => { r.c[k] = node.value; upd(); });
+          // 改课名/教师会影响筛选命中与计数，所以 change 时整体重绘
+          node.addEventListener('change', () => { r.c[k] = node.value; paint(); });
         }
       });
       row.querySelector('[data-op="del"]').addEventListener('click', () => {
@@ -1537,12 +1673,31 @@ async function renderSchedule() {
   document.querySelectorAll('#mode .seg-btn').forEach(b =>
     b.addEventListener('click', () => { mode = b.dataset.mode; paint(); }));
 
+  // 批量操作。三者的作用域都是**当前筛选结果**（无筛选时即全部课程），
+  // 这一点已经标在按钮上的「（当前 N 项）」里。
   document.getElementById('btn-on').addEventListener('click', () => {
-    Object.keys(model).forEach(day => Object.keys(model[day]).forEach(i => { model[day][i].record = true; }));
-    paint();
+    // 全选：把当前可见的全部勾上（已在勾选中的保持勾选，是幂等的）
+    bulkSet(() => true);
   });
   document.getElementById('btn-off').addEventListener('click', () => {
-    Object.keys(model).forEach(day => Object.keys(model[day]).forEach(i => { model[day][i].record = false; }));
+    bulkSet(() => false);
+  });
+  document.getElementById('btn-invert').addEventListener('click', () => {
+    // 反选：按"操作前"的值取反。
+    // 注意 pick 是在同一个循环里被逐个调用的，每次读的都是当前值 ——
+    // 但每个条目的值只被读一次、写一次，所以不会出现"改了 A 影响 B"。
+    bulkSet(it => !it.c.record);
+  });
+
+  // 搜索框：输入即过滤（本地过滤，不发请求 —— 课表本来就在内存里）
+  const filterEl = document.getElementById('sc-filter');
+  filterEl.addEventListener('input', () => {
+    keyword = filterEl.value;
+    paint();
+  });
+  document.getElementById('btn-clear-filter').addEventListener('click', () => {
+    filterEl.value = '';
+    keyword = '';
     paint();
   });
 
@@ -1567,6 +1722,22 @@ async function renderSchedule() {
   });
 
   document.getElementById('btn-save').addEventListener('click', async () => {
+    const note = document.getElementById('save-note');
+
+    // 空选择拦截。
+    //
+    // 判的是「有课程、但一节课都没勾」—— 那多半是手滑把全选取消了，
+    // 保存下去这一学期就一节课都不录，而界面上不会有任何异常迹象。
+    // 课表本来就空的（一门课都没填）不算，那是还没开始编辑，轮不到这里拦。
+    const all = items();
+    if (all.length && !all.some(it => it.c.record)) {
+      note.style.display = 'block';
+      note.innerHTML = `<b style="color:#d9a343">${esc(t('sc.select_all_first'))}</b><br>` +
+        esc(t('sc.need_pick'));
+      toast(t('common.save_failed'), t('sc.need_pick'), 'err');
+      return;
+    }
+
     // 姓名 -> id：沿用已有教师；输入了新名字就当场建一个。
     // 名字留空 = 未指定（unassigned），校验那边会提醒，但**不拦保存**。
     const tlist = (d.teachers || []).map(x => ({ ...x }));
@@ -1613,7 +1784,6 @@ async function renderSchedule() {
       weekend_template: { source: 'new', entries: [] },
       overrides: [],
     });
-    const note = document.getElementById('save-note');
     note.style.display = 'block';
     if (r.ok) {
       toast(t('common.saved'), String(r.entries));
@@ -1826,7 +1996,214 @@ async function renderJobs() {
     }));
 }
 
-/* ---------------------------------------------------------------- 路由 */
+/* ---------------------------------------------------------------- 日志 */
+
+/**
+ * 日志页：程序全部输出的集中展示。
+ *
+ * 背景：这个程序以前会弹一个控制台窗口，所有 println / tracing 输出都在那儿。
+ * 那个黑框已经去掉了（GUI 模式下启动即隐藏），于是这些输出必须有个新去处 ——
+ * 就是这里。所以这一页不是"锦上添花的调试功能"，而是**唯一的可见通道**：
+ * 少了它，用户点了「开始运行」之后出了什么事就完全无从得知。
+ *
+ * 三个设计要点：
+ * 1. 轮询用游标增量拉取（只拿新增的行），开销与日志总量无关；
+ * 2. 自动滚动只在用户本来就贴底时才跟着滚 —— 否则他会发现自己
+ *    正在往回翻的时候被硬拽到底部；
+ * 3. 全部状态放在闭包外的一个对象里，重新渲染页面不会把游标搞丢。
+ */
+const logsState = {
+  cursor: null,   // 上次拿到的最大 seq
+  lines: [],      // 已显示的行
+  timer: null,    // 轮询句柄
+  level: '',      // 级别筛选：'' = 全部
+};
+
+/** 级别对应的颜色，与终端里的观感保持一致（WARN 黄、ERROR 红）。 */
+const LOG_LEVELS = ['', 'INFO', 'WARN', 'ERROR', 'DEBUG', 'TRACE'];
+
+function logLevelClass(lv) {
+  switch (lv) {
+    case 'ERROR': return 'lv-error';
+    case 'WARN': return 'lv-warn';
+    case 'DEBUG': case 'TRACE': return 'lv-dim';
+    default: return 'lv-info';
+  }
+}
+
+async function renderLogs() {
+  // 每次进页面都重新开始：先拿一段上下文（最近的 500 行），
+  // 而不是从空白开始 —— 用户点进来通常是想看"刚才发生了什么"
+  logsState.cursor = null;
+  logsState.lines = [];
+
+  view.innerHTML = `
+  <div class="card">
+    <h2>${esc(t('lg.title'))}</h2>
+    <p class="hint">${t('lg.hint')}</p>
+
+    <div class="log-toolbar">
+      <label class="log-filter">
+        <span>${esc(t('lg.level'))}</span>
+        <select id="log-level">
+          ${LOG_LEVELS.map(l => `<option value="${l}">${
+            l === '' ? esc(t('lg.level_all')) : l}</option>`).join('')}
+        </select>
+      </label>
+      <label class="log-check">
+        <input type="checkbox" id="log-follow" checked>
+        <span>${esc(t('lg.follow'))}</span>
+      </label>
+      <span class="log-count" id="log-count"></span>
+      <span style="flex:1"></span>
+      <button class="btn ghost sm" id="log-reload">${esc(t('lg.reload'))}</button>
+      <button class="btn ghost sm" id="log-copy">${esc(t('lg.copy'))}</button>
+      <button class="btn ghost sm" id="log-clear">${esc(t('lg.clear'))}</button>
+    </div>
+
+    <div class="log-view" id="log-view"><div class="empty">${esc(t('common.loading'))}</div></div>
+
+    <p class="hint" id="log-path" style="margin-top:10px"></p>
+  </div>`;
+
+  await loadLogsInto();
+  scheduleLogsPoll();
+}
+
+/** 初次（或手动刷新）载入：清空并重新拉取整段。 */
+async function loadLogsInto() {
+  logsState.cursor = null;
+  logsState.lines = [];
+  const r = await api('/api/logs?limit=500');
+  if (!r.ok) {
+    paintLogs(`<div class="empty">${esc(r.error || t('common.unknown'))}</div>`);
+    return;
+  }
+  logsState.lines = r.lines || [];
+  logsState.cursor = r.cursor;
+  paintLogPath(r);
+  paintLogs();
+}
+
+/** 按当前筛选重绘整个日志区。 */
+function paintLogs(errorHtml) {
+  const box = document.getElementById('log-view');
+  if (!box) return;
+  if (errorHtml) { box.innerHTML = errorHtml; return; }
+
+  const lv = logsState.level;
+  const shown = lv ? logsState.lines.filter(l => l.level === lv) : logsState.lines;
+
+  // 贴底判断必须在替换 innerHTML **之前**做 —— 之后 scrollTop 已经归零，
+  // 就永远判断不出"用户本来在看底部"
+  const atBottom = box.scrollHeight - box.scrollTop - box.clientHeight < 40;
+  const follow = document.getElementById('log-follow');
+  const shouldFollow = follow ? follow.checked : true;
+
+  if (!shown.length) {
+    box.innerHTML = `<div class="empty">${
+      esc(logsState.lines.length ? t('lg.filter_empty') : t('lg.empty'))}</div>`;
+  } else {
+    box.innerHTML = shown.map(l => `<div class="log-line ${logLevelClass(l.level)}">` +
+      `<span class="log-time">${esc(l.time)}</span>` +
+      `<span class="log-lv">${esc(l.level)}</span>` +
+      `<span class="log-text">${esc(l.text)}</span></div>`).join('');
+  }
+
+  if (shouldFollow && atBottom) box.scrollTop = box.scrollHeight;
+
+  const cnt = document.getElementById('log-count');
+  if (cnt) {
+    cnt.textContent = lv
+      ? t('lg.count_filtered').replace('{n}', shown.length).replace('{m}', logsState.lines.length)
+      : t('lg.count').replace('{n}', logsState.lines.length);
+  }
+}
+
+/** 显示日志文件位置 —— 界面里看不到的往期内容在那里。 */
+function paintLogPath(r) {
+  const el = document.getElementById('log-path');
+  if (!el) return;
+  el.textContent = (r.file_exists ? t('lg.file') : t('lg.file_missing')) + ' ' + (r.path || '');
+}
+
+/** 增量拉取：只要游标之后的新行。 */
+async function pollLogs() {
+  if (current !== 'logs') return; // 切走了就别再占着接口
+  const q = logsState.cursor === null || logsState.cursor === undefined
+    ? '/api/logs?limit=500'
+    : `/api/logs?since=${logsState.cursor}`;
+  try {
+    const r = await api(q);
+    if (r.ok) {
+      // 后端说缓冲被清空过：我们手里的游标已经作废，整段重来
+      if (r.cleared) {
+        logsState.lines = [];
+        logsState.cursor = null;
+        await loadLogsInto();
+      } else if ((r.lines || []).length) {
+        logsState.lines = logsState.lines.concat(r.lines);
+        // 本地也留个上限，防止长时间挂在页面上把内存堆起来
+        if (logsState.lines.length > 3000) {
+          logsState.lines = logsState.lines.slice(-3000);
+        }
+        logsState.cursor = r.cursor;
+        paintLogs();
+      }
+    }
+  } catch { /* 一次拉不到不影响下次 */ }
+  scheduleLogsPoll();
+}
+
+function scheduleLogsPoll() {
+  if (logsState.timer) clearTimeout(logsState.timer);
+  // 1 秒一次：日志要"实时"，但也没必要更密。开销很小（通常返回 0 行）。
+  logsState.timer = setTimeout(pollLogs, 1000);
+}
+
+function stopLogsPoll() {
+  if (logsState.timer) { clearTimeout(logsState.timer); logsState.timer = null; }
+}
+
+/** 绑定工具栏。单独一个函数是因为重新载入后要重绑。 */
+function bindLogToolbar() {
+  const lv = document.getElementById('log-level');
+  if (lv) {
+    lv.value = logsState.level;
+    lv.addEventListener('change', () => { logsState.level = lv.value; paintLogs(); });
+  }
+  const re = document.getElementById('log-reload');
+  if (re) re.addEventListener('click', () => loadLogsInto());
+
+  const cp = document.getElementById('log-copy');
+  if (cp) cp.addEventListener('click', async () => {
+    // 复制的是**当前看到的**（含筛选），所见即所得
+    const lvSel = logsState.level;
+    const shown = lvSel ? logsState.lines.filter(l => l.level === lvSel) : logsState.lines;
+    const text = shown.map(l => l.time + ' ' + l.level + ' ' + l.text).join('\n');
+    try {
+      await navigator.clipboard.writeText(text);
+      show(esc(t('lg.copied')));
+    } catch {
+      // 剪贴板 API 在非安全上下文里会被拒（虽然这里是 127.0.0.1）
+      const ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); show(esc(t('lg.copied'))); }
+      catch { show(esc(t('lg.copy_failed')), 'err'); }
+      ta.remove();
+    }
+  });
+
+  const cl = document.getElementById('log-clear');
+  if (cl) cl.addEventListener('click', async () => {
+    await api('/api/logs/clear', {});
+    logsState.lines = [];
+    logsState.cursor = null;
+    paintLogs();
+    show(esc(t('lg.cleared')));
+  });
+}
+
 
 const PAGES = {
   overview: ['nav.overview', renderOverview],
@@ -1837,11 +2214,16 @@ const PAGES = {
   schedule: ['nav.schedule', renderSchedule],
   record: ['nav.record', renderRecord],
   jobs: ['nav.jobs', renderJobs],
+  logs: ['nav.logs', renderLogs],
 };
 
 let current = 'overview';
 
 async function go(page) {
+  // 离开日志页就停掉轮询：否则它会一直在后台拉，
+  // 而且 current 已经变了，白费力气
+  if (current === 'logs' && page !== 'logs') stopLogsPoll();
+
   current = page;
   const [titleKey, fn] = PAGES[page] || PAGES.overview;
   titleEl.textContent = t(titleKey);
@@ -1850,6 +2232,8 @@ async function go(page) {
   view.innerHTML = `<div class="empty">${esc(t('common.loading'))}</div>`;
   try {
     await fn();
+    // 日志页的工具栏在 renderLogs 里生成，绑定放在渲染之后
+    if (page === 'logs') bindLogToolbar();
   } catch (e) {
     view.innerHTML = `<div class="empty">${esc(t('common.error_prefix'))}${esc(e.message)}</div>`;
   }
@@ -1879,6 +2263,182 @@ document.getElementById('btn-quit').addEventListener('click', async () => {
     `<div style="margin-top:8px">${esc(t('common.quit_done_note'))}</div></div>`;
 });
 
+/* ------------------------------------------------ 去掉「浏览器套壳」痕迹 */
+
+/**
+ * 这是一个桌面应用，不是网页。
+ *
+ * 窗口本体已经是 `--app=` 模式（没有地址栏/标签栏），F12 之类的开发者工具
+ * 在启动参数里也已经关掉了。这里再补一层**页面内**的拦截：
+ *
+ * - `F12` / `Ctrl+Shift+I` / `Ctrl+Shift+J` / `Ctrl+U`（查看源代码）
+ * - 右键菜单（这是最像浏览器的一处：原生菜单里全是「重新加载/另存为/检查」）
+ *
+ * 为什么明知道启动参数已经关了还要拦一遍：
+ * 启动参数只对我们自己拉起的那条路径有效（比如用户手动把地址粘进浏览器时
+ * 就不生效了）。页面内这层是兜底，代价接近零。
+ *
+ * 注意作用范围：只拦这几个组合键，**不是**全面禁用 F5/输入框右键 ——
+ * 过度拦截会让页面里正常的文本复制粘贴都不可用，那才是真的惹人烦。
+ */
+(function blockBrowserChrome() {
+  window.addEventListener('keydown', e => {
+    const k = (e.key || '').toLowerCase();
+    // F12
+    if (e.key === 'F12') { e.preventDefault(); return; }
+    // Ctrl+Shift+I / J / C（开发者工具、控制台、元素选择）
+    if (e.ctrlKey && e.shiftKey && ['i', 'j', 'c'].includes(k)) { e.preventDefault(); return; }
+    // Ctrl+U 查看源代码
+    if (e.ctrlKey && !e.shiftKey && k === 'u') { e.preventDefault(); }
+  }, true); // 用捕获阶段：抢在页面其它监听器之前吃掉
+
+  window.addEventListener('contextmenu', e => {
+    // 允许在输入框/文本域里用右键（复制、粘贴是正经需求），
+    // 其余位置一律屏蔽 —— 那些位置的原生菜单只有浏览器项，没有应用项。
+    const el = e.target;
+    const isTextInput =
+      el && (el.tagName === 'INPUT' || el.tagName === 'TEXTAREA' || el.isContentEditable);
+    if (!isTextInput) e.preventDefault();
+  });
+})();
+
+/* ------------------------------------------------------------ 依赖缺失提示 */
+
+/**
+ * 启动时检查外部依赖（ffmpeg / whisper / 语音模型）是否齐备。
+ *
+ * 为什么要有这个：这几个组件加起来一百多 MB，不可能塞进安装包，
+ * 所以部署到一台新的一体机上时可能是缺的。缺了以后程序的**表现**很迷惑 ——
+ * 点了录制没反应、转写按钮转半天不出字 —— 用户完全不知道是缺文件。
+ * 与其让人去猜，不如启动时直接说清楚缺什么、点一下就补。
+ *
+ * 提醒策略（与后端 /api/deps 的 need_notice 一致）：
+ * - 缺**必需**项（ffmpeg）：每次都提示，因为程序真的没法用；
+ * - 缺**可选**项（whisper / 模型）：只提示一次，之后走界面上的按钮补，
+ *   不再反复弹窗骚扰。
+ */
+async function checkDeps() {
+  let st;
+  try {
+    st = await api('/api/deps');
+  } catch { return; }              // 查不出来就当没缺，别因为检查失败拦住用户
+  if (!st || !st.ok) return;
+
+  const missing = (st.items || []).filter(i => !i.ready);
+  if (!missing.length) return;      // 都齐了，静默通过
+
+  // 只有「这次该提醒的」才弹。全是可选且已提醒过 -> need_notice 为 0。
+  if (!st.need_notice) return;
+
+  showDepsModal(st, missing);
+}
+
+/**
+ * 依赖缺失弹窗。
+ *
+ * 点「确定」后自动补齐 —— 这是需求的核心：用户不需要知道 ffmpeg 是干什么的、
+ * 该放到哪个目录，只要点一下。
+ */
+function showDepsModal(st, missing) {
+  const box = document.createElement('div');
+  box.className = 'modal-mask';
+  box.id = 'deps-modal';
+
+  const required = missing.filter(i => i.required);
+  const optional = missing.filter(i => !i.required);
+
+  const row = i => `
+    <li class="dep-row${i.required ? ' dep-req' : ''}">
+      <div class="dep-name">${esc(i.label)}
+        <span class="dep-tag">${i.required ? t('deps.tag_required') : t('deps.tag_optional')}</span>
+      </div>
+      <div class="dep-why">${esc(i.reason)}${i.reason && i.consequence ? ' · ' : ''}${esc(i.consequence)}</div>
+    </li>`;
+
+  box.innerHTML = `
+    <div class="modal-box">
+      <div class="modal-title">${esc(t('deps.title'))}</div>
+      <div class="modal-body">
+        <p class="dep-lead">${esc(t('deps.lead'))}</p>
+        <ul class="dep-list">
+          ${required.map(row).join('')}
+          ${optional.map(row).join('')}
+        </ul>
+        <div class="dep-note" id="deps-note">${esc(t('deps.download_note'))}</div>
+        <div class="dep-progress" id="deps-progress" hidden></div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn primary" id="deps-ok">${esc(t('deps.ok'))}</button>
+        <button class="btn" id="deps-later">${esc(t('deps.later'))}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(box);
+
+  const noteEl = box.querySelector('#deps-note');
+  const progEl = box.querySelector('#deps-progress');
+  const okBtn = box.querySelector('#deps-ok');
+  const laterBtn = box.querySelector('#deps-later');
+
+  laterBtn.addEventListener('click', async () => {
+    // 记住"可选项已经提醒过"，下次启动不再为它们弹窗。
+    // 必需项不受影响 —— 那个必须每次都提醒。
+    try { await api('/api/deps/dismiss', {}); } catch { /* 记不住就下次再问 */ }
+    box.remove();
+  });
+
+  okBtn.addEventListener('click', async () => {
+    okBtn.disabled = true;
+    laterBtn.disabled = true;
+    okBtn.textContent = t('deps.fetching');
+    progEl.hidden = false;
+    progEl.textContent = t('deps.starting');
+
+    try {
+      const r = await api('/api/deps/fetch', {});
+      if (!r.ok) {
+        progEl.textContent = r.error || t('deps.failed');
+        okBtn.disabled = false;
+        laterBtn.disabled = false;
+        okBtn.textContent = t('deps.retry');
+        return;
+      }
+    } catch (e) {
+      progEl.textContent = String(e);
+      okBtn.disabled = false;
+      laterBtn.disabled = false;
+      return;
+    }
+
+    // 轮询进度。800ms 一次：下载是分钟级的事，查太勤没必要。
+    const timer = setInterval(async () => {
+      let p;
+      try { p = await api('/api/deps/fetch'); } catch { return; }
+      if (p && p.message) progEl.textContent = p.message;
+      if (p && !p.running) {
+        clearInterval(timer);
+        // 补完复查一遍：真的齐了才允许关窗，免得用户以为补上了其实还缺
+        let after;
+        try { after = await api('/api/deps'); } catch { after = null; }
+        const stillMissing = ((after && after.items) || []).filter(i => !i.ready);
+        if (!stillMissing.length) {
+          progEl.textContent = t('deps.done');
+          okBtn.textContent = t('deps.close');
+          okBtn.disabled = false;
+          okBtn.onclick = () => box.remove();
+          laterBtn.hidden = true;
+          box.querySelector('#deps-note').textContent = t('deps.done_note');
+        } else {
+          progEl.textContent = (p.message || '') + ' · ' + t('deps.still_missing');
+          okBtn.disabled = false;
+          laterBtn.disabled = false;
+          okBtn.textContent = t('deps.retry');
+          okBtn.onclick = null;
+        }
+      }
+    }, 800);
+  });
+}
+
 /* ---------------------------------------------------------------- 启动 */
 
 (async function boot() {
@@ -1891,4 +2451,7 @@ document.getElementById('btn-quit').addEventListener('click', async () => {
   paintBrand();
   go('overview');
   refreshDots();
+  // 依赖检查放在最后：界面已经能用了再弹窗，不让检查拖慢首屏。
+  // 而且它**不 await**——就算检查卡在网络超时上，界面也照常能用。
+  checkDeps();
 })();

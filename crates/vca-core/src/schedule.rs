@@ -1,4 +1,4 @@
-//! 排课计划计算与悬浮窗时序（纯逻辑，无 IO，可完整单测）。
+// 排课计划计算与悬浮窗时序（纯逻辑，无 IO，可完整单测）。
 //!
 //! 职责：
 //! 1. 由「时间表 + 课程表 + 日期」算出当天的实际课程实例（[`LessonInstance`]）；
@@ -86,6 +86,41 @@ impl WeekParity {
             WeekParity::Odd => 1,
             WeekParity::Even => 2,
         }
+    }
+}
+
+/// 给某一天算出实际的单双周。
+///
+/// # 为什么需要它
+///
+/// `daemon` 曾把 `WeekParity::Every` 写死传给 `plan_for_date`（评审 R-01），
+/// 于是 `settings.term`（`first_monday` / `first_week_parity`）只被用来打日志：
+/// 用户在配置里认真填了学期第 1 周，排课时却完全不看，单双周的课照录不误。
+///
+/// 策略：
+/// 1. 配了 `term.first_monday` 且当天不早于它 —— 用
+///    [`TermConfig::is_odd_week`](crate::config::TermConfig::is_odd_week)
+///    算真实周次（学校口径）；
+/// 2. 没配、或日期落在学期开始之前 —— 退回「按自然周序号奇偶」，
+///    与 `is_odd_week` 文档里写明的宽松回退一致；
+/// 3. 拿不准时返回 [`WeekParity::Every`]（不筛），宁可多录也不要漏课；
+///    调用方可据此在日志里提示用户补学期对齐配置。
+pub fn resolve_parity(term: &crate::config::TermConfig, date: LocalDate) -> WeekParity {
+    if let Some(odd) = term.is_odd_week(date) {
+        return if odd {
+            WeekParity::Odd
+        } else {
+            WeekParity::Even
+        };
+    }
+
+    // 回退：按自然周序号奇偶。用「本周周一」相对纪元的天数算，
+    // 保证同一周内任意一天得到同样结果（否则周一与周二可能落进不同的周）。
+    let monday = date.to_days() - i64::from(date.weekday());
+    if monday.div_euclid(7).rem_euclid(2) == 0 {
+        WeekParity::Odd
+    } else {
+        WeekParity::Even
     }
 }
 
@@ -677,5 +712,110 @@ mod tests {
             &plan(vec![entry("Mon", "08:00", "08:45", "x", "t", true)])
         )
         .is_empty());
+    }
+
+    // ---- resolve_parity（评审 R-01）----
+    //
+    // 这一组测试是为了让「单双周写死不生效」这个缺陷不会再回来：
+    // 之前 daemon 固定传 WeekParity::Every，配置里的 term 只被用来打日志。
+
+    /// 配了学期对齐时，按学校口径算周次。
+    #[test]
+    fn parity_uses_term_alignment_when_configured() {
+        // 2026-09-07 是周一（已核对），设为首周且为单周
+        let term = crate::config::TermConfig {
+            first_monday: Some("2026-09-07".to_string()),
+            first_week_parity: "odd".to_string(),
+        };
+        assert_eq!(
+            resolve_parity(&term, LocalDate::new(2026, 9, 7)),
+            WeekParity::Odd
+        );
+        assert_eq!(
+            resolve_parity(&term, LocalDate::new(2026, 9, 14)),
+            WeekParity::Even
+        );
+        assert_eq!(
+            resolve_parity(&term, LocalDate::new(2026, 9, 21)),
+            WeekParity::Odd
+        );
+    }
+
+    /// 首周是双周时，结论整体翻转。
+    #[test]
+    fn parity_respects_even_first_week() {
+        let term = crate::config::TermConfig {
+            first_monday: Some("2026-09-07".to_string()),
+            first_week_parity: "even".to_string(),
+        };
+        assert_eq!(
+            resolve_parity(&term, LocalDate::new(2026, 9, 7)),
+            WeekParity::Even
+        );
+        assert_eq!(
+            resolve_parity(&term, LocalDate::new(2026, 9, 14)),
+            WeekParity::Odd
+        );
+    }
+
+    /// 同一周内任意一天必须给出同样结论（否则周一的课与周二会不一致）。
+    #[test]
+    fn parity_is_stable_within_a_week() {
+        let term = crate::config::TermConfig {
+            first_monday: Some("2026-09-07".to_string()),
+            first_week_parity: "odd".to_string(),
+        };
+        let mon = LocalDate::new(2026, 9, 7); // 第 1 周周一，结论应为 Odd
+        for offset in 0..7 {
+            let d = LocalDate::from_days(mon.to_days() + offset);
+            assert_eq!(
+                resolve_parity(&term, d),
+                WeekParity::Odd,
+                "第 1 周的第 {} 天结论不一致",
+                offset + 1
+            );
+        }
+    }
+
+    /// 没配 term 时退回自然周回退，且不返回 Every。
+    #[test]
+    fn parity_falls_back_when_term_missing() {
+        let term = crate::config::TermConfig::default();
+        let got = resolve_parity(&term, LocalDate::new(2026, 9, 14));
+        assert!(
+            matches!(got, WeekParity::Odd | WeekParity::Even),
+            "无学期配置时应给出确定单双周，实际 {got:?}"
+        );
+    }
+
+    /// 日期早于学期开始时也要有结论（不能因此筛掉全部课程）。
+    #[test]
+    fn parity_handles_date_before_term() {
+        let term = crate::config::TermConfig {
+            first_monday: Some("2026-09-07".to_string()),
+            first_week_parity: "odd".to_string(),
+        };
+        let got = resolve_parity(&term, LocalDate::new(2026, 8, 20));
+        assert!(matches!(got, WeekParity::Odd | WeekParity::Even));
+    }
+
+    /// 单双周真的作用到排课：双周条目在单周不出现。
+    #[test]
+    fn parity_actually_filters_even_only_entries() {
+        let mut e = entry("Mon", "09:00", "09:45", "双周课", "t1", true);
+        e.cycle = Some("双周".to_string());
+        let p = plan(vec![e]);
+
+        let odd = plan_for_date(LocalDate::new(2026, 9, 7), WeekParity::Odd, &p, &[], false);
+        let even = plan_for_date(
+            LocalDate::new(2026, 9, 14),
+            WeekParity::Even,
+            &p,
+            &[],
+            false,
+        );
+
+        assert!(odd.is_empty(), "双周课不该出现在单周，实际 {}", odd.len());
+        assert_eq!(even.len(), 1, "双周课应出现在双周");
     }
 }

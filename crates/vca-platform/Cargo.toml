@@ -11,6 +11,9 @@ vca-core.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+# logbuf 的 MemoryLayer 要实现 tracing_subscriber::Layer，
+# 于是平台层也需要这个依赖（原先只有 CLI 侧用得到）。
+tracing-subscriber.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 ureq = { version = "3.4.2", features = ["json"] }

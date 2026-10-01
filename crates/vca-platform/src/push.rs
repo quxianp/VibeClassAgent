@@ -120,6 +120,13 @@ pub struct PushOutcome {
     pub message_id: Option<String>,
     /// 失败原因。
     pub error: Option<String>,
+    /// 附件上传失败的原因（文本已送达时为 `Some`）。
+    ///
+    /// 与 [`error`](Self::error) 的区别是「部分成功」：正文（含内网预览链接）
+    /// 已经发出，只有附件没上去。这种情况不算整体失败（见 [`PushOutcome::ok`]
+    /// 的说明），但必须让用户看见 —— 否则老师以为推送成功，
+    /// 学生却拿不到文档（评审 R-16）。
+    pub attachment_error: Option<String>,
 }
 
 impl PushOutcome {
@@ -129,6 +136,7 @@ impl PushOutcome {
             success: true,
             message_id: Some(id.into()),
             error: None,
+            attachment_error: None,
         }
     }
     /// 构造失败结果。
@@ -137,6 +145,26 @@ impl PushOutcome {
             success: false,
             message_id: None,
             error: Some(e.into()),
+            attachment_error: None,
+        }
+    }
+
+    /// 附带一句「附件没发上去」的说明，保持 `success` 不变。
+    ///
+    /// 给那些"正文成功、附件失败"的渠道用（目前是 OneBot）。
+    pub fn with_attachment_error(mut self, e: Option<String>) -> Self {
+        self.attachment_error = e;
+        self
+    }
+
+    /// 人类可读的一句话总结，供界面与日志直接显示。
+    ///
+    /// 有部分失败时会明确写出来，不会把「附件没上去」藏成一次普通成功。
+    pub fn summary(&self) -> String {
+        match (&self.error, &self.attachment_error) {
+            (Some(e), _) => e.clone(),
+            (None, Some(a)) => format!("文本已送达，但{a}"),
+            (None, None) => "已推送".to_string(),
         }
     }
 }
@@ -405,8 +433,17 @@ impl Pusher for OneBotPusher {
             .and_then(|d| d.get("message_id"))
             .map(|m| m.to_string());
 
-        // 文件是「尽力而为」：文本已经送达，文件失败不该让整次推送判定为失败，
+        // 文件是「尽力而为」：文本已经送达，文件失败**不该**让整次推送判定为失败，
         // 否则会触发「不删除本地录像」的策略，把磁盘占满。
+        //
+        // 但也不能像以前那样只 warn 一句就当成功（评审 R-16）：
+        // 老师看到的是「已推送」，可学生手里只有一句"课堂纪要已生成"，
+        // 真正想要的 PDF 没到 —— 没人知道该去群里补发。
+        //
+        // 现在的做法：结果里带上 attachment_error，界面提示成
+        // 「文本已送达，附件失败：…」；作业仍算 Pushed（避免占满磁盘），
+        // 但用户看得见缺了什么，能手动补。
+        let mut attachment_error = None;
         if let Some(path) = doc.attachment() {
             let filename = Path::new(path)
                 .file_name()
@@ -421,13 +458,17 @@ impl Pusher for OneBotPusher {
             up[id_key] = self.id_value();
             match self.call(up_action, up) {
                 Ok(_) => {}
-                Err(e) => tracing::warn!("OneBot 文件上传失败（文本已送达）：{e}"),
+                Err(e) => {
+                    tracing::warn!("OneBot 文件上传失败（文本已送达）：{e}");
+                    attachment_error = Some(format!("附件「{filename}」上传失败：{e}"));
+                }
             }
         }
 
-        Ok(PushOutcome::ok(
-            message_id.unwrap_or_else(|| "onebot".into()),
-        ))
+        Ok(
+            PushOutcome::ok(message_id.unwrap_or_else(|| "onebot".into()))
+                .with_attachment_error(attachment_error),
+        )
     }
 }
 
@@ -1178,6 +1219,38 @@ mod tests {
         };
         let out = send_with_retry(&DryRunPusher, &d, 3);
         assert!(out.success);
+    }
+
+    // ---- 部分成功（评审 R-16）----
+
+    /// 「正文成功、附件失败」必须能表达出来，而不是被压成一次普通成功。
+    #[test]
+    fn partial_success_is_representable() {
+        let out = PushOutcome::ok("mid-1").with_attachment_error(Some("附件上传失败：超时".into()));
+        assert!(out.success, "正文已送达，整体不算失败");
+        assert_eq!(out.message_id.as_deref(), Some("mid-1"));
+        // 但总结里必须写明缺了什么
+        let s = out.summary();
+        assert!(s.contains("附件"), "总结应提到附件: {s}");
+        assert!(s.contains("超时"), "总结应保留原始原因: {s}");
+    }
+
+    /// 没有附件问题时不能凭空出现警告。
+    #[test]
+    fn clean_success_has_no_attachment_error() {
+        let out = PushOutcome::ok("mid-2");
+        assert!(out.attachment_error.is_none());
+        assert_eq!(out.summary(), "已推送");
+    }
+
+    /// 整体失败时以失败原因优先，不该被附件信息盖住。
+    #[test]
+    fn failure_summary_prefers_the_fatal_error() {
+        let out = PushOutcome::fail(String::from("渠道拒绝：目标不存在"))
+            .with_attachment_error(Some(String::from("附件失败")));
+        assert!(!out.success);
+        let s = out.summary();
+        assert!(s.contains("渠道拒绝"), "应显示致命原因: {s}");
     }
 
     #[test]

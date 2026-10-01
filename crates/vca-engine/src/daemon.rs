@@ -16,13 +16,14 @@ use std::time::Duration;
 use vca_core::config::{load_schedule_file, load_settings, ScheduleFile, Settings};
 use vca_core::model::{OverlaySettings, Timetable};
 use vca_core::paths::Layout;
-use vca_core::schedule::{self, LessonInstance, OverlayTiming, OverlayWindow, WeekParity};
+use vca_core::schedule::{self, LessonInstance, OverlayTiming, OverlayWindow};
 use vca_core::store::JobStore;
 use vca_core::time::{LocalDate, LocalDateTime};
 use vca_core::windows::{self, WindowSpec};
 use vca_platform::capture::{CaptureParams, CaptureSession};
 use vca_platform::overlay::{self, OverlayStyle};
 use vca_platform::probe::{self, LoadLevel};
+use vca_platform::runtime_state::publish_recording_flag;
 
 use crate::pipeline::Pipeline;
 
@@ -168,16 +169,118 @@ impl Daemon {
         })
     }
 
+    /// 结束当前录制会话：停 ffmpeg → 收尾合并 → 回写作业。
+    ///
+    /// # 为什么必须收敛成一个函数
+    ///
+    /// 停止录制有三个入口：课上完了（时段结束）、用户点托盘「停止录制」、
+    /// 进程退出。旧实现里只有第一个走了 `finalize()`，另外两个只调 `stop()`
+    /// （评审 R-03/R-19）—— 于是：
+    ///
+    /// - 通过托盘或退出停止时，视频与音频**没有被合并**成最终 mp4；
+    /// - 作业的 `end` / `video_path` / `screenshots` 也不会被回写；
+    /// - 下一轮 pipeline 去读那个路径，得到"没有可转写的音视频文件"。
+    ///
+    /// 三个入口各写一遍必然会漂移，所以统一走这里。
+    ///
+    /// # 返回
+    ///
+    /// 收尾得到的截图路径与结束时刻已经写进作业；返回 `true` 表示确实
+    /// 处理了一个会话（调用方据此判断要不要清理 `recording_job`）。
+    fn settle_recording(
+        &self,
+        recorder: &mut Option<vca_platform::capture::CaptureSession>,
+        current_job: &mut Option<String>,
+        now: LocalDateTime,
+    ) -> bool {
+        let Some(mut s) = recorder.take() else {
+            return false;
+        };
+
+        // 1) 先停：让 ffmpeg 写容器索引，音频线程回填 WAV 头
+        match s.stop() {
+            Ok(()) => tracing::info!("录制已安全停止"),
+            // 停止出错不代表素材没了：继续 finalize，能救多少是多少
+            Err(e) => tracing::error!("停止录制出错（继续收尾）: {e}"),
+        }
+
+        // 2) 收尾合并。失败也保留中间产物，用户可以重跑，不必重录一节课。
+        let outcome = match s.finalize() {
+            Ok(o) => {
+                for n in &o.notes {
+                    tracing::info!("录制备注：{n}");
+                }
+                Some(o)
+            }
+            Err(e) => {
+                tracing::warn!("收尾合并失败（素材保留，可重跑）: {e}");
+                None
+            }
+        };
+
+        // 3) 回写作业。**只有这里**决定 video_path，避免录制刚开始就写一个
+        //    还不存在的最终路径（评审 R-03）。
+        let Some(id) = current_job.take() else {
+            tracing::warn!("录制结束但没有对应的作业 id，产物可能无人接管");
+            return true;
+        };
+        let mut j = match self.store.load(&id) {
+            Ok(j) => j,
+            Err(e) => {
+                tracing::error!("读取作业 {id} 失败，无法回写录制结果: {e}");
+                return true;
+            }
+        };
+
+        j.end = now.to_string();
+        match &outcome {
+            Some(o) => {
+                if let Some(v) = &o.video {
+                    j.video_path = Some(v.to_string_lossy().to_string());
+                }
+                if !o.audio.is_empty() {
+                    j.audio_path = Some(o.audio[0].to_string_lossy().to_string());
+                }
+                if !o.screenshots.is_empty() {
+                    j.screenshots = o
+                        .screenshots
+                        .iter()
+                        .map(|p| p.to_string_lossy().to_string())
+                        .collect();
+                }
+                // 录到了视频才算真的「已录制」；没有视频说明编码器没产出，
+                // 那种情况下保持原状态，让下一轮重试或由用户看到失败原因。
+                if o.video.is_none() {
+                    tracing::warn!("[{id}] 收尾后没有视频文件，作业不标记为可处理");
+                }
+            }
+            None => {
+                tracing::warn!("[{id}] 收尾失败，保持无 video_path，等待人工重跑");
+            }
+        }
+
+        if let Err(e) = self.store.save(&j) {
+            tracing::error!("保存录制结束信息失败（作业 {id}）: {e}");
+        } else {
+            tracing::info!(
+                "[{id}] 录制结束：视频={} 截图={}",
+                j.video_path.as_deref().unwrap_or("（无）"),
+                j.screenshots.len()
+            );
+        }
+        true
+    }
+
     /// 今天的课程列表。
+    ///
+    /// 单双周必须按 `settings.term` 算：这里曾写死 `WeekParity::Every`
+    /// （评审 R-01），导致带 `cycle: 单周/双周` 的课程完全不按学期对齐过滤 ——
+    /// 用户在配置里认真地填了 `term.first_monday`，排课时却完全不看。
+    /// 现在由 [`schedule::resolve_parity`] 决定，与启动日志说的是同一件事。
     pub fn lessons_today(&self, date: LocalDate) -> Vec<LessonInstance> {
         let plan = self.schedule.plan_for_weekday(date.weekday());
-        schedule::plan_for_date(
-            date,
-            WeekParity::Every,
-            &plan,
-            &self.schedule.overrides,
-            true,
-        )
+        let parity = schedule::resolve_parity(&self.settings.term, date);
+        schedule::plan_for_date(date, parity, &plan, &self.schedule.overrides, true)
     }
 
     /// 悬浮窗时段。
@@ -407,9 +510,32 @@ impl Daemon {
         }
 
         // 托盘图标：一个小图标 + 右键菜单，无气泡无弹窗
+        //
+        // 状态回调要能反映「此刻是否在录」。主循环里 `recorder` 是个局部
+        // `Option<CaptureSession>`，托盘线程碰不到它，所以用一对原子标志
+        // 做单向通知：主循环改，菜单弹出时读。用原子而不是 Mutex 是因为
+        // 菜单随时可能弹出，读的时候绝不能去和主循环抢锁（会卡住录制循环）。
+        let tray_recording = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        // 把标志挂到进程级，界面那侧的托盘也要读它 —— 界面和守护进程
+        // 在同一个进程里（GUI 模式下守护跑在线程上），但两者各有各的托盘
+        // 代码路径，靠这个全局交换状态比让界面去翻 job.json 准得多。
+        publish_recording_flag(std::sync::Arc::clone(&tray_recording));
         let mut tray: Option<vca_platform::tray::Tray> = None;
         if self.settings.ui.tray_icon && !self.cfg.dry_run {
-            match vca_platform::tray::spawn("VibeClassAgent  课堂录制") {
+            let flag = std::sync::Arc::clone(&tray_recording);
+            let jobs_dir = self.layout.profile_data_dir(&self.cfg.profile).join("jobs");
+            let status: vca_platform::tray::StatusFn = Box::new(move || {
+                let recording = flag.load(std::sync::atomic::Ordering::Relaxed);
+                vca_platform::tray::TrayStatus {
+                    daemon_running: true, // 能走到这里就说明守护循环在跑
+                    recording,
+                    dry_run: false,
+                    pending_jobs: count_pending(&jobs_dir),
+                    uptime: String::new(),
+                    last_error: String::new(),
+                }
+            });
+            match vca_platform::tray::spawn("VibeClassAgent  课堂录制", status) {
                 Ok((t, h)) => {
                     std::mem::forget(h); // 托盘线程随进程结束
                     tracing::info!("托盘图标已创建（右键可停止录制 / 打开目录 / 退出）");
@@ -440,12 +566,20 @@ impl Daemon {
             if let Some(t) = &tray {
                 while let Some(cmd) = t.poll() {
                     match cmd {
+                        vca_platform::tray::TrayCommand::OpenUi => {
+                            // 守护进程模式下没有界面服务在跑，点「打开界面」
+                            // 不该假装成功。如实记一条日志，让用户在日志页看到原因。
+                            tracing::info!(
+                                "托盘：请求打开界面（当前为守护进程模式，未起界面服务）"
+                            );
+                        }
                         vca_platform::tray::TrayCommand::StopRecording => {
                             tracing::info!("托盘：请求立即停止录制");
-                            if let Some(mut s) = recorder.take() {
-                                let _ = s.stop();
-                                current_job = None;
-                            }
+                            // 走统一的收尾事务：旧实现这里只 stop() 不 finalize()，
+                            // 于是托盘停止录出来的课没有合并后的 mp4（评审 R-03/R-19）
+                            let now_tray = vca_platform::clock::now_local();
+                            self.settle_recording(&mut recorder, &mut current_job, now_tray);
+                            recording_engine.clear();
                         }
                         vca_platform::tray::TrayCommand::OpenLogs => {
                             let dir = self.layout.profile_data_dir(&self.cfg.profile).join("logs");
@@ -600,52 +734,11 @@ impl Daemon {
                         }
                     }
                     (None, Some(_)) => {
-                        // 停止录制
-                        if let Some(mut s) = recorder.take() {
-                            let _ = s.stop();
-                            tracing::info!("录制结束（引擎：{recording_engine}）");
-
-                            // 收尾：把视频与 WASAPI 采到的音频合并成最终 mp4。
-                            // 中间产物不会被删除，收尾失败可重跑，不必重录一节课。
-                            let (shots, notes) = match s.finalize() {
-                                Ok(o) => {
-                                    for n in &o.notes {
-                                        tracing::info!("录制备注：{n}");
-                                    }
-                                    if let Some(v) = &o.video {
-                                        tracing::info!("收尾产物：{}", v.display());
-                                    }
-                                    (
-                                        o.screenshots
-                                            .iter()
-                                            .map(|p| p.to_string_lossy().to_string())
-                                            .collect::<Vec<_>>(),
-                                        o.notes,
-                                    )
-                                }
-                                Err(e) => {
-                                    tracing::warn!("收尾合并失败（素材保留，可重跑）: {e}");
-                                    (Vec::new(), Vec::new())
-                                }
-                            };
-                            let _ = notes;
-
-                            if let Some(id) = current_job.take() {
-                                match self.store.load(&id) {
-                                    Ok(mut j) => {
-                                        j.end = now.to_string();
-                                        if !shots.is_empty() {
-                                            j.screenshots.extend(shots.clone());
-                                        }
-                                        if let Err(e) = self.store.save(&j) {
-                                            tracing::error!("保存结束时刻失败: {e}");
-                                        }
-                                    }
-                                    Err(e) => tracing::warn!("读取作业失败: {e}"),
-                                }
-                            }
-                            recording_engine.clear();
-                        }
+                        // 停止录制：走统一的收尾事务（stop + finalize + 回写作业）。
+                        // 这个分支意味着本来就在录，所以必定处理了一个会话。
+                        self.settle_recording(&mut recorder, &mut current_job, now);
+                        tracing::info!("录制结束（引擎：{recording_engine}）");
+                        recording_engine.clear();
                     }
                     _ => {}
                 }
@@ -758,6 +851,12 @@ impl Daemon {
             }
 
             // ---------- 睡眠到下一个事件（分片睡眠以便及时响应退出）----------
+            // 把「是否在录」同步给托盘菜单。放在这里（每轮循环末尾、唯一出口）
+            // 而不是散在每次 recorder 赋值处：那样一旦将来新增一条启动/停止
+            // 路径而忘了同步，菜单就会显示错的状态，而且很难查。
+            // 每轮同步一次，代价是一个 Relaxed 存储，可以忽略。
+            tray_recording.store(recorder.is_some(), std::sync::atomic::Ordering::Relaxed);
+
             let total = self.next_sleep_secs(&lessons, &pws, now);
             let mut slept = 0u64;
             while slept < total && !vca_platform::shutdown::is_shutdown_requested() {
@@ -768,12 +867,16 @@ impl Daemon {
         }
 
         // ---------- 优雅收尾 ----------
-        if let Some(mut s) = recorder.take() {
+        // 退出也必须走统一的收尾事务：旧实现这里只 stop() 不 finalize()，
+        // 于是「下课时顺手关掉程序」得到的是一个没有合并音轨的中间文件，
+        // 作业里也没有 video_path（评审 R-03/R-19）。
+        if recorder.is_some() {
             tracing::info!("正在停止录制并封装文件");
-            match s.stop() {
-                Ok(()) => tracing::info!("录制已安全停止"),
-                Err(e) => tracing::error!("停止录制出错: {e}"),
-            }
+            self.settle_recording(
+                &mut recorder,
+                &mut current_job,
+                vca_platform::clock::now_local(),
+            );
         }
         if let Some(w) = &window {
             w.hide();
@@ -923,6 +1026,32 @@ pub fn style_from(s: &OverlaySettings) -> OverlayStyle {
 /// 供外部（CLI）使用的默认时序。
 pub fn default_timing() -> OverlayTiming {
     OverlayTiming::default()
+}
+
+/// 数一下待处理作业（已录制但还没推送成功），供托盘菜单的状态行使用。
+///
+/// 只读目录、只解析 JSON 里的 state 字段，**不构造 `JobStore`**：
+/// 菜单弹出要快，把每个 job.json 完整反序列化一遍没必要。
+fn count_pending(jobs_dir: &std::path::Path) -> usize {
+    let Ok(rd) = std::fs::read_dir(jobs_dir) else {
+        return 0;
+    };
+    rd.flatten()
+        .filter(|e| {
+            let p = e.path().join("job.json");
+            std::fs::read_to_string(p)
+                .ok()
+                .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+                .and_then(|v| v.get("state").and_then(|s| s.as_str()).map(str::to_string))
+                // 与 JobStore::pending() 同一套口径
+                .is_some_and(|s| {
+                    matches!(
+                        s.as_str(),
+                        "Recorded" | "Transcribed" | "Extracted" | "Linked" | "DocReady" | "Failed"
+                    )
+                })
+        })
+        .count()
 }
 
 /// 用资源管理器打开一个目录（托盘菜单用）。

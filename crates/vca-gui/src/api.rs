@@ -11,18 +11,65 @@ use serde_json::{json, Value};
 
 use crate::server::ServeOptions;
 
+/// 请求体上限（字节）。
+///
+/// 这些接口全是「改配置 / 点按钮」，JSON 再大也就几十 KB。
+/// 旧实现无脑 `read_to_string`，一个几 GB 的 POST 就能把界面进程的内存吃光
+/// （评审 R-20）—— 而且它绑在本机回环上，同机任何程序都能发。
+///
+/// 8 MB 留了很大余量：课表导入（ClassIsland 导出文件）是这里最大的载荷，
+/// 一个几千节课的学期表也远不到这个数。
+const MAX_BODY_BYTES: u64 = 8 * 1024 * 1024;
+
+/// 读请求体，超过上限就拒绝。
+///
+/// 先看 `Content-Length`：能提前拒绝的就不必读进内存。
+/// 没有该头（chunked）时边读边数，超了就停。
+fn read_body_limited(req: &mut tiny_http::Request) -> std::result::Result<String, String> {
+    use std::io::Read;
+
+    if let Some(len) = req.body_length() {
+        if len as u64 > MAX_BODY_BYTES {
+            return Err(format!("请求体过大（{len} 字节，上限 {MAX_BODY_BYTES}）"));
+        }
+    }
+
+    let mut body = String::new();
+    // take 一个字节的多余量：读到 MAX+1 就能判断"超了"，避免无界读取
+    let mut limited = req.as_reader().take(MAX_BODY_BYTES + 1);
+    limited
+        .read_to_string(&mut body)
+        .map_err(|e| format!("读取请求体失败: {e}"))?;
+    if body.len() as u64 > MAX_BODY_BYTES {
+        return Err(format!("请求体过大（上限 {MAX_BODY_BYTES} 字节）"));
+    }
+    Ok(body)
+}
+
 /// 按路径分发。
+///
+/// 用 `query` 参数名（不是 `_query`）：日志接口要用它做增量游标。
 pub fn dispatch(
     mut req: tiny_http::Request,
     path: &str,
-    _query: &str,
+    query: &str,
     opts: &ServeOptions,
 ) -> Result<()> {
     let method = req.method().as_str().to_uppercase();
     let mut body = String::new();
     if method == "POST" {
-        // dyn Read 自带 read_to_string（对象安全方法），不需要额外 use
-        let _ = req.as_reader().read_to_string(&mut body);
+        match read_body_limited(&mut req) {
+            Ok(b) => body = b,
+            Err(e) => {
+                // 413 是给"太大了"用的；客户端（本项目的 app.js）会读出
+                // error 字段显示给人看
+                return crate::server::respond_json(
+                    req,
+                    413,
+                    &json!({"ok": false, "error": e}).to_string(),
+                );
+            }
+        }
     }
 
     let settings_path = settings_path(opts);
@@ -52,7 +99,12 @@ pub fn dispatch(
         ("GET", "/api/daemon/status") => Ok(crate::daemon::status()),
         ("POST", "/api/daemon/start") => daemon_start(opts, &body),
         ("POST", "/api/daemon/stop") => crate::daemon::stop(),
-        ("GET", "/api/logs") => read_logs(opts),
+        ("GET", "/api/deps") => Ok(deps_status(opts)),
+        ("POST", "/api/deps/fetch") => deps_fetch(opts, &body),
+        ("GET", "/api/deps/fetch") => Ok(deps_fetch_json()),
+        ("POST", "/api/deps/dismiss") => Ok(deps_dismiss(opts, &body)),
+        ("GET", "/api/logs") => read_logs(opts, query),
+        ("POST", "/api/logs/clear") => clear_logs(),
         ("GET", "/api/i18n") => i18n(),
         ("POST", "/api/detect-bot") => detect_bot(),
         ("GET", "/api/bot/napcat") => bot_status(&settings_path),
@@ -63,16 +115,37 @@ pub fn dispatch(
         ("POST", "/api/bot/napcat/configure") => bot_configure(opts, &body),
         ("POST", "/api/import/classisland") => import_classisland(opts, &body),
         ("POST", "/api/quit") => quit(),
-        _ => Ok(json!({"ok": false, "error": format!("没有这个接口：{method} {path}")})),
+        _ => {
+            // 路由没匹配上：这是 404，不是"业务失败"
+            return crate::server::respond_json(
+                req,
+                404,
+                &json!({"ok": false, "error": format!("没有这个接口：{method} {path}")})
+                    .to_string(),
+            );
+        }
     };
 
+    // 状态码要分清「接口本身出错」和「业务失败」（评审 R-10）。
+    //
+    // 旧实现无论什么情况都回 200，只在 body 里写 ok:false。后果是：
+    // 浏览器 devtools、任何 HTTP 客户端、将来可能出现的脚本化调用
+    // 全都看不出失败 —— 得先解析 JSON 才知道，而 200 又暗示"一切正常"。
+    //
+    // 这里把 handler 报的 Err 一律当 500（它们都是内部错误：文件读写、
+    // 配置解析、网络调用抛上来的），而**业务上的校验失败由 handler
+    // 自己返回 `{ok:false}` 并保持 200** —— 那类"用户填错了"是正常结果，
+    // 前端按 ok 字段处理。
     match result {
         Ok(v) => crate::server::respond_json(req, 200, &v.to_string()),
-        Err(e) => crate::server::respond_json(
-            req,
-            200,
-            &json!({"ok": false, "error": e.to_string()}).to_string(),
-        ),
+        Err(e) => {
+            tracing::warn!("接口 {method} {path} 出错: {e}");
+            crate::server::respond_json(
+                req,
+                500,
+                &json!({"ok": false, "error": e.to_string()}).to_string(),
+            )
+        }
     }
 }
 
@@ -580,30 +653,25 @@ fn push_test(path: &Path, body: &str) -> Result<Value> {
 
 // ---------------------------------------------------------------- 通用配置
 
-/// 确保有一个预览令牌。
+/// 确保预览令牌存在；返回当前令牌。
 ///
 /// 预览链接要发给群里的人，所以它得**长期有效** —— 不能用界面那种
 /// 每次启动都变的令牌（daemon 根本拿不到它，链接就拼不出来）。
 /// 生成一次就写进配置，之后一直用它。
-fn ensure_preview_token(settings_path: &Path) {
+///
+/// 用 [`vca_core::token`] 的 CSPRNG：这个令牌会出现在 URL、聊天记录和
+/// 浏览器历史里，是三个令牌里最需要抗猜测的一个（评审 R-11）。
+/// 返回 `String` 而不是 `()`，是为了让调用方能确认"现在确实有一个令牌"。
+pub(crate) fn ensure_preview_token(settings_path: &Path) -> String {
     let s = vca_core::config::load_settings(settings_path).unwrap_or_default();
-    if !s.ui.preview_token.trim().is_empty() {
-        return;
+    let existing = s.ui.preview_token.trim().to_string();
+    if !existing.is_empty() {
+        return existing;
     }
-    // 与界面令牌同样的位混合：够随机，且不引 rand 依赖
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = std::process::id() as u128;
-    let mut x = nanos ^ (pid << 64);
-    x ^= x >> 33;
-    x = x.wrapping_mul(0xff51afd7ed558ccd);
-    x ^= x >> 33;
-    let token = format!("{x:032x}");
+    let token = vca_core::token::generate();
     let _ = set(settings_path, "ui.preview_token", &yaml_str(&token));
-    tracing::info!("已生成预览令牌（内网预览链接会带它）");
+    tracing::info!("已生成预览令牌（预览链接会带它）");
+    token
 }
 
 fn get_general(path: &Path) -> Result<Value> {
@@ -622,10 +690,10 @@ fn get_general(path: &Path) -> Result<Value> {
         "ui": {
             "tray_icon": s.ui.tray_icon,
             "tray_badge": s.ui.tray_badge,
-            // 开了之后界面服务绑全网卡，并把 preview_base 写进配置 ——
-            // 同一个校园网里的手机就能打开预览页
-            "allow_lan": s.ui.allow_lan,
-            "preview_token": s.ui.preview_token,
+            // allow_lan / preview_token 不再对界面暴露：
+            // 局域网绑定从未实现（评审 R-08），而预览令牌属于服务端细节，
+            // 回显它只会让 token 多一份泄漏面（评审 R-11）。
+            // 字段仍留在配置里以兼容旧文件，但不参与界面读写。
         },
         // 企业微信：是否先推一张摘要卡片图
         "push": { "image_card": s.push.image_card, "preview_base": s.push.preview_base },
@@ -674,16 +742,8 @@ fn post_general(path: &Path, body: &str) -> Result<Value> {
             wrote.push("tray_icon");
         }
     }
-    // 允许局域网访问：开了之后**必须重启界面服务**才会真的绑全网卡，
-    // 所以界面那边会提示一句 —— 只写配置不改绑定，用户会以为没生效。
-    if let Some(b) = v.get("allow_lan").and_then(|x| x.as_bool()) {
-        if set(path, "ui.allow_lan", if b { "true" } else { "false" }) {
-            wrote.push("allow_lan");
-        }
-        if b {
-            ensure_preview_token(path);
-        }
-    }
+    // allow_lan 已不再由界面写入：服务端从未实现 LAN 绑定（评审 R-08），
+    // 写进去只会让用户以为生效了。字段留在配置里兼容旧文件，但不接受界面修改。
     // 企业微信摘要卡片图
     if let Some(b) = v.get("image_card").and_then(|x| x.as_bool()) {
         if set(path, "push.image_card", if b { "true" } else { "false" }) {
@@ -778,12 +838,54 @@ fn get_schedule(opts: &ServeOptions) -> Result<Value> {
     }))
 }
 
+/// 保存课表。
+///
+/// # 顺序很重要：先校验，再落盘
+///
+/// 旧实现是「写盘 → 回读 → 校验 → 把 issues 放进响应」（评审 R-09）。
+/// 也就是说**校验失败也已经写进去了**：用户看到一排红字，
+/// 以为"没保存成功"，实际磁盘上已经是被改坏的课表 —— 关掉页面再打开，
+/// 坏数据还在，而且下一节课就会按它去录。
+///
+/// 现在的顺序：
+/// 1. 解析提交的 JSON；
+/// 2. normalize + 校验（含时间表绑定）；
+/// 3. **有错就原样返回，一个字节都不写**；
+/// 4. 没问题才原子替换（先写临时文件再 rename）。
+///
+/// 第 4 步用 rename 而不是 `fs::write` 直接覆盖：写到一半断电/崩溃时，
+/// 旧文件要么完整保留、要么被完整的新的替换，不会出现半个 YAML。
 fn post_schedule(opts: &ServeOptions, body: &str) -> Result<Value> {
     let mut f: vca_core::config::ScheduleFile =
         serde_json::from_str(body).map_err(|e| anyhow::anyhow!("提交的课表格式不对：{e}"))?;
     let tts = load_timetables(opts);
     f.normalize(&tts);
+
+    // 用**绑定的**时间表校验，而不是 active：多份作息时两者可能不同（R-02）
+    let bound = vca_core::config::ScheduleFile::resolve_timetable(&f.week_template, &tts);
+    let mut issues = vca_core::schedule::validate(bound, &f.week_template);
+    // 与 ClassIsland 一致：课表必须引用一个存在的时间表。
+    // 时间表一个都没有时不算错 —— 用户可能就是先排课再补作息。
+    if !f.week_template.time_layout_id.is_empty() && bound.is_none() {
+        issues.push(format!(
+            "课表绑定的时间表 {} 不存在",
+            f.week_template.time_layout_id
+        ));
+    }
+
     let p = schedule_file(opts);
+    if !issues.is_empty() {
+        // 只报告，不写盘。文件保持原样，用户改完再提交一次。
+        tracing::info!("课表校验未通过（{} 项），已放弃保存", issues.len());
+        return Ok(json!({
+            "ok": false,
+            "saved": Value::Null,
+            "entries": f.week_template.entries.len(),
+            "issues": issues,
+            "error": "课表没有通过校验，未保存（文件保持原样）",
+        }));
+    }
+
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
     }
@@ -798,32 +900,53 @@ fn post_schedule(opts: &ServeOptions, body: &str) -> Result<Value> {
         let _ = std::fs::copy(&p, &arch);
     }
     let text = serde_yaml::to_string(&f)?;
-    std::fs::write(&p, text)?;
+    write_atomic(&p, &text)?;
 
-    // 回读确认
-    let mut back: vca_core::config::ScheduleFile =
-        serde_yaml::from_str(&std::fs::read_to_string(&p)?)?;
-    back.normalize(&tts);
-    let active = tts.iter().find(|t| t.is_active).or(tts.first());
-    let mut issues = vca_core::schedule::validate(active, &back.week_template);
-    // 与 ClassIsland 一致：课表必须引用一个存在的时间表。
-    // 时间表一个都没有时不算错 —— 用户可能就是先排课再补作息。
-    if !back.week_template.time_layout_id.is_empty()
-        && !tts
-            .iter()
-            .any(|t| t.id == back.week_template.time_layout_id)
-    {
-        issues.push(format!(
-            "课表绑定的时间表 {} 不存在",
-            back.week_template.time_layout_id
-        ));
-    }
     Ok(json!({
         "ok": true,
         "saved": p.display().to_string(),
-        "entries": back.week_template.entries.len(),
-        "issues": issues,
+        "entries": f.week_template.entries.len(),
+        "issues": Vec::<String>::new(),
     }))
+}
+
+/// 原子写文本文件：先写同目录下的临时文件，再 rename 覆盖目标。
+///
+/// 同目录是必须的 —— 跨盘 rename 会退化成复制，也就失去了原子性。
+///
+/// Windows 上 `fs::rename` 覆盖已存在的文件是允许的（用的是
+/// `MoveFileEx` 语义），所以这里不需要先删目标。
+///
+/// 临时文件名带 pid 与纳秒：同一目录下多次写入不会互相踩。
+fn write_atomic(path: &Path, text: &str) -> Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().to_string())
+        .unwrap_or_else(|| "out".into());
+    let tmp = dir.join(format!(
+        ".{name}.tmp{}-{}",
+        std::process::id(),
+        unix_nanos()
+    ));
+    std::fs::write(&tmp, text)?;
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        // rename 失败时别把垃圾留在目录里
+        let _ = std::fs::remove_file(&tmp);
+        return Err(anyhow::anyhow!(
+            "写入 {} 失败（原文件未改动）: {e}",
+            path.display()
+        ));
+    }
+    Ok(())
+}
+
+/// 当前纳秒时间戳，仅用于生成不重复的临时文件名。
+fn unix_nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
 }
 
 fn get_timetable(opts: &ServeOptions) -> Result<Value> {
@@ -1073,33 +1196,61 @@ fn daemon_start(opts: &ServeOptions, body: &str) -> Result<Value> {
     Ok(r)
 }
 
-/// 读日志尾部。
+/// 读日志。
 ///
-/// 只回最后 N 行：日志文件会一直长，整份塞给浏览器既慢又没用 ——
-/// 排查问题时看的就是最近发生了什么。
-fn read_logs(opts: &ServeOptions) -> Result<Value> {
-    let path = opts.data_root.join("logs").join("ui.log");
-    if !path.is_file() {
-        return Ok(json!({
-            "ok": true,
-            "path": path.display().to_string(),
-            "lines": [],
-            "note": "还没有日志文件（程序启动后由界面写入）",
-        }));
-    }
-    let text = std::fs::read_to_string(&path)?;
-    let all: Vec<&str> = text.lines().collect();
-    let take = 300.min(all.len());
-    let tail: Vec<String> = all[all.len() - take..]
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+/// # 为什么改读内存缓冲
+///
+/// 旧实现每次读整个 `logs/ui.log` 再截尾 —— 界面轮询时这是纯浪费，
+/// 而且控制台窗口隐藏后，**文件是唯一来源**（原先还能看黑框）。
+/// 现在改成读 [`vca_platform::logbuf`] 的环形缓冲：
+///
+/// - `since` 参数给游标时只返回新增行，界面轮询的开销与日志总量无关；
+/// - 结构化的级别/时间分离返回，界面能按级别上色和筛选；
+/// - 不依赖文件存在（日志文件写失败时界面仍然有得看）。
+///
+/// `all=1` 时返回当前缓冲的全部内容（用于"清空后重新载入"）。
+fn read_logs(opts: &ServeOptions, query: &str) -> Result<Value> {
+    // 游标：界面上次拿到的最大 seq。缺失表示"给我最新的"
+    let since = query_param(query, "since").and_then(|s| s.trim().parse::<u64>().ok());
+    // 单次最多返回多少行。界面正常轮询时只会拿到几行，
+    // 这个上限是防"界面关了很久再打开"
+    let limit: usize = query_param(query, "limit")
+        .and_then(|s| s.trim().parse::<usize>().ok())
+        .unwrap_or(500)
+        .clamp(1, vca_platform::logbuf::MAX_LINES);
+
+    let (lines, total, cleared) = vca_platform::logbuf::snapshot(since, limit);
+    let log_file = opts.data_root.join("logs").join("ui.log");
+
     Ok(json!({
         "ok": true,
-        "path": path.display().to_string(),
-        "total_lines": all.len(),
-        "lines": tail,
+        // 文件路径仍然返回：排查问题时用户需要知道原始日志在哪
+        "path": log_file.display().to_string(),
+        "file_exists": log_file.is_file(),
+        "lines": lines.iter().map(|l| l.to_json()).collect::<Vec<_>>(),
+        "total_lines": total,
+        // 界面据 cleared 判断"你的游标作废了，请从头拉一次"
+        "cleared": cleared,
+        // 最新游标，界面存下来给下次用
+        "cursor": lines.last().map(|l| l.seq),
     }))
+}
+
+/// 清空内存里的日志缓冲（界面「清空」按钮）。
+///
+/// **不清日志文件** —— 用户点清空是想让界面干净，不是想销毁排查记录。
+/// 这一点在返回里也写清楚，免得用户以为磁盘上也没了。
+fn clear_logs() -> Result<Value> {
+    vca_platform::logbuf::clear();
+    Ok(json!({
+        "ok": true,
+        "note": "界面上的日志已清空；磁盘上的 ui.log 保留，供事后排查",
+    }))
+}
+
+/// 从 URL query 里取一个参数（复用 server 里那份，避免两套解析逻辑漂移）。
+fn query_param(query: &str, key: &str) -> Option<String> {
+    crate::server::query_param(query, key)
 }
 
 /// 从 ClassIsland 导入课表与时间表。
@@ -1515,6 +1666,10 @@ fn quit() -> Result<Value> {
     std::thread::spawn(|| {
         // 留一点时间把响应发出去，否则浏览器那边看到的是连接被重置
         std::thread::sleep(std::time::Duration::from_millis(300));
+        // 摘掉托盘图标再走：直接 exit 会把图标留在任务栏上（shell 不会因为
+        // 进程消失就立刻收回它），表现就是「退出了但图标还在、点它没反应」。
+        // 两个出口（这里的 /api/quit 和托盘菜单的「退出」）必须做同一件事。
+        crate::server::release_tray();
         std::process::exit(0);
     });
     Ok(json!({ "ok": true }))
@@ -1620,4 +1775,202 @@ mod bot_tests {
         set_install(false, "ok", None);
         assert!(!install_state().running);
     }
+}
+
+// ---------------------------------------------------------------- 依赖补齐
+
+/// 依赖补齐的运行状态（进程级单例）。
+///
+/// 与 NapCat 安装那套（[`install_state`]）同构：后台线程干活，
+/// 界面轮询查进度。刻意**不共用**同一份状态 —— 两者可能同时进行
+/// （用户一边装机器人一边补 ffmpeg），共用一个 "running" 会让它们互相挡住。
+#[derive(Default)]
+struct DepsFetchState {
+    /// 是否正在补齐。
+    running: bool,
+    /// 进度行（给界面显示的最后一条）。
+    message: String,
+    /// 失败原因。
+    error: Option<String>,
+}
+
+fn deps_state() -> &'static std::sync::Mutex<DepsFetchState> {
+    static S: std::sync::OnceLock<std::sync::Mutex<DepsFetchState>> = std::sync::OnceLock::new();
+    S.get_or_init(|| std::sync::Mutex::new(DepsFetchState::default()))
+}
+
+/// 当前是否正在补齐。供启动检查判断要不要弹窗。
+pub fn deps_fetching() -> bool {
+    deps_state().lock().map(|s| s.running).unwrap_or(false)
+}
+
+/// `tools/` 目录：以 exe 所在目录为基准，与既有的 ffmpeg / whisper 查找规则一致。
+fn tools_root() -> PathBuf {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."));
+    vca_platform::deps::tools_root(&exe_dir)
+}
+
+/// 检查结果 → JSON（给界面用）。
+fn deps_status(opts: &ServeOptions) -> Value {
+    let root = tools_root();
+    let states = vca_platform::deps::check_all(&root);
+
+    // 「可选项是否已经提醒过」决定这次要不要弹窗。
+    let notified = vca_platform::fetch::notify_state::optional_notified(&opts.config_root);
+    let need = vca_platform::deps::need_notice(&states, notified);
+
+    let items: Vec<Value> = states
+        .iter()
+        .map(|s| {
+            json!({
+                "id": s.id,
+                "label": s.label,
+                "consequence": s.consequence,
+                "required": s.required,
+                "ready": s.ready,
+                "reason": s.reason,
+                "path": s.path.to_string_lossy(),
+            })
+        })
+        .collect();
+
+    json!({
+        "ok": true,
+        "tools_root": root.to_string_lossy(),
+        "items": items,
+        // missing 是「全部缺失项」（界面用来展示清单）；
+        // notice 是「这次该提醒的」（按严重程度过滤过的）。
+        "missing": items.iter().filter(|i| i["ready"] == json!(false)).count(),
+        "need_notice": need.len(),
+        "notice_required": need.iter().any(|s| s.required),
+        "all_auto_fixable": vca_platform::deps::all_auto_fixable(&need),
+        "fetching": deps_fetching(),
+    })
+}
+
+/// 记下「可选项已经提醒过」，此后不再为可选项弹窗。
+fn deps_dismiss(opts: &ServeOptions, body: &str) -> Value {
+    let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
+    // 默认就把可选项标记为已提醒；显式传 all=true 时同样处理
+    // （当前没有"永久忽略必需项"的语义，必需项永远会提醒）。
+    let _ = v;
+    vca_platform::fetch::notify_state::mark_optional_notified(&opts.config_root);
+    tracing::info!("依赖提示：可选项标记为已提醒，后续不再重复弹窗");
+    json!({"ok": true})
+}
+
+/// 查询补齐进度。
+fn deps_fetch_json() -> Value {
+    match deps_state().lock() {
+        Ok(s) => json!({
+            "running": s.running,
+            "message": s.message,
+            "error": s.error,
+        }),
+        Err(_) => json!({"running": false, "message": "", "error": "状态不可读"}),
+    }
+}
+
+/// 开始补齐缺失的依赖。
+fn deps_fetch(opts: &ServeOptions, body: &str) -> Result<Value> {
+    {
+        let s = deps_state()
+            .lock()
+            .map_err(|_| anyhow::anyhow!("状态锁失效"))?;
+        if s.running {
+            return Ok(json!({"ok": false, "error": "上一次补齐还没结束，等它跑完再试"}));
+        }
+    }
+
+    // only：只补指定的 id。留空表示补齐全部缺失项。
+    let v: Value = serde_json::from_str(body).unwrap_or_else(|_| json!({}));
+    let only: Option<Vec<String>> = v.get("only").and_then(|x| x.as_array()).map(|a| {
+        a.iter()
+            .filter_map(|x| x.as_str().map(str::to_string))
+            .collect()
+    });
+
+    let root = tools_root();
+    let config_root = opts.config_root.clone();
+
+    if let Ok(mut s) = deps_state().lock() {
+        s.running = true;
+        s.message = "正在检查…".to_string();
+        s.error = None;
+    }
+
+    tracing::info!("开始补齐依赖（目录 {}）", root.display());
+
+    std::thread::spawn(move || {
+        // 进度回调：把事件翻成人话写进状态，界面轮询就能看到。
+        // 用 move 捕获一个克隆出来的 mpsc？不需要 —— 直接闭包里更新全局状态，
+        // 因为状态本身是进程级单例。
+        let progress: vca_platform::fetch::ProgressFn = Box::new(move |e| {
+            use vca_platform::fetch::FetchEvent as E;
+            // 先把「这次是不是失败、失败原因是什么」摘出来，再构造文案。
+            // 不能先 move 掉 `e` 的字段再回头借用 `e` —— 那样是借用已移出的值。
+            let fail = match &e {
+                E::Failed { error, .. } => Some(error.clone()),
+                _ => None,
+            };
+            let msg = match e {
+                E::Start { label, .. } => format!("开始补齐 {label}"),
+                E::Trying {
+                    url, index, total, ..
+                } => {
+                    format!("下载中（源 {index}/{total}）{url}")
+                }
+                E::Downloaded { bytes, .. } => {
+                    format!("已下载 {} MB，正在处理…", bytes / 1048576)
+                }
+                E::Extracting { .. } => "正在解压…".to_string(),
+                E::Done { path, bytes, .. } => {
+                    format!("完成：{}（{} MB）", path.display(), bytes / 1048576)
+                }
+                E::Failed { id, error } => format!("{id} 补齐失败：{error}"),
+                E::Finished { ok, failed } => {
+                    format!("补齐结束：成功 {ok} 项，失败 {failed} 项")
+                }
+            };
+            tracing::info!("依赖补齐：{msg}");
+            if let Ok(mut s) = deps_state().lock() {
+                s.message = msg;
+                if let Some(error) = fail {
+                    s.error = Some(error);
+                }
+            }
+        });
+
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result = vca_platform::fetch::fetch_missing(
+            &root,
+            only.as_deref(),
+            Some(progress),
+            Some(cancel),
+        );
+
+        // 补完再看一遍：如果可选项现在齐了，顺手把"已提醒"标记写上，
+        // 免得下次启动因为残留的失败项又弹一次。
+        let all_ok = result.iter().filter(|s| !s.required).all(|s| s.ready);
+        if all_ok {
+            vca_platform::fetch::notify_state::mark_optional_notified(&config_root);
+        }
+
+        let bad = result.iter().filter(|s| !s.ready).count();
+        if let Ok(mut s) = deps_state().lock() {
+            s.running = false;
+            if bad == 0 {
+                s.message = "全部依赖已就绪".to_string();
+                s.error = None;
+            } else {
+                s.message = format!("仍有 {bad} 项缺失");
+            }
+        }
+        tracing::info!("依赖补齐结束，仍有 {bad} 项缺失");
+    });
+
+    Ok(json!({"ok": true, "message": "已开始补齐，进度会显示在这里"}))
 }

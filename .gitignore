@@ -14,6 +14,21 @@
 /logs/
 *.log
 
+# ---- 用户的真实配置与课表（**含个人信息，绝不入库**）----
+# config/ 下只有 *.example.yaml 是给人看的模板，应当入库；
+# 其余是程序运行期真正读写的那一份：
+#   profiles/*/settings.yaml  —— 含 preview_token（长期有效的推送链接令牌）
+#   schedule/current.yaml     —— 真实课表，含教师姓名
+#   timetable/current.yaml    —— 真实作息时间表
+#   archive/                  —— 历史版本
+#   .initialized              —— 「已初始化」标记
+# 这些都是**每台机器各不相同**的本机状态，进仓库既没意义、又泄露隐私。
+# 踩坑记录：本轮差点把带教师姓名的课表和 preview_token 一起提交上去。
+config/profiles/
+config/schedule/
+config/timetable/
+config/.initialized
+
 # ---- 凭据与密钥（安全规范：一律环境变量 / secrets.env） ----
 .env
 .env.*

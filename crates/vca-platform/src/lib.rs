@@ -18,9 +18,15 @@
 //! - [`crash`]    崩溃静默退出
 //! - [`shutdown`] 优雅退出（Ctrl+C 时先停 ffmpeg 再退）
 //! - [`tray`]     系统托盘图标（一个小图标 + 右键菜单，无气泡）
+//! - [`single_instance`] 单实例保护（防止重复双击堆出多套后台进程）
+//! - [`runtime_state`] 进程内状态交换（界面与守护循环共享「是否正在录制」）
+//! - [`deps`]     运行时依赖清单与「缺什么」的判定
+//! - [`fetch`]    下载并补齐缺失的依赖（ffmpeg / whisper.cpp / 语音模型）
 //! - [`wecom_aibot`] 企业微信「智能机器人」（WebSocket，只发 markdown）
 //! - [`clock`]    本机时钟
 //! - [`screenshot`] 屏幕截图（GDI，写 BMP）
+//! - [`logbuf`]   日志环形缓冲（GUI 模式下控制台隐藏，改由界面展示）
+//! - [`console`]  控制台窗口的隐藏（GUI 模式不留黑框）
 //!
 //! 本 crate 是全项目**唯一**允许出现 `unsafe` 的地方（Win32 FFI），
 //! 集中在此便于审计；其余 crate 均保持 `#![forbid(unsafe_code)]`。
@@ -34,21 +40,28 @@ pub mod browser_bot;
 pub mod capture;
 pub mod card;
 pub mod clock;
+pub mod console;
 pub mod crash;
+pub mod deps;
 pub mod docgen;
 pub mod doctor;
+pub mod fetch;
 pub mod http;
 pub mod llm;
+pub mod logbuf;
 pub mod md5;
 pub mod napcat;
 pub mod overlay;
 pub mod probe;
 pub mod proc;
 pub mod push;
+pub mod runtime_state;
 pub mod screenshot;
 pub mod session;
 pub mod shots;
 pub mod shutdown;
+pub mod single_instance;
 pub mod stt;
 pub mod tray;
 pub mod wecom_aibot;
+pub mod window;

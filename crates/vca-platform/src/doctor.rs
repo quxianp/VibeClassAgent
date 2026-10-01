@@ -198,6 +198,9 @@ pub fn run_all() -> Vec<CheckItem> {
         "未找到 Edge 或 Chrome。PDF 会退化为保留 HTML，其它功能不受影响",
     ));
 
+    // 控制台窗口的状态：界面模式会把它藏起来，用户需要知道输出去了哪
+    items.push(console_check());
+
     items
 }
 
@@ -209,6 +212,39 @@ pub fn session_check() -> CheckItem {
         ok: !matches!(mode, crate::session::RunMode::Session0),
         detail: mode.label().to_string(),
         optional: false,
+    }
+}
+
+/// 控制台窗口状态检查。
+///
+/// 这一项的存在理由：GUI 模式启动时会把控制台窗口藏掉（[`crate::console`]），
+/// 用户遇到"程序没反应、也看不到任何提示"时，第一个要问的就是
+/// **"输出到底去哪了"**。`doctor` 里明确写出来，省得靠猜。
+///
+/// 判定标准按模式分：
+/// - CLI 模式（`vca doctor` 就是）：**应当**有控制台，没有才奇怪
+///   （输出被重定向时也会显示"无"，那属于正常用法，所以只作提示不报错）；
+/// - GUI 模式：**应当**没有 —— 但 `doctor` 本身是 CLI 子命令，
+///   跑到这里时通常还带着控制台，所以这一项只描述现状，不当失败处理。
+///
+/// 因此它永远是 `optional: true`：有没有控制台都不影响功能，
+/// 日志在界面上（GUI）或文件里（两者都有）都拿得到。
+pub fn console_check() -> CheckItem {
+    let has = crate::console::has_console();
+    let in_gui = std::env::var("VCA_UI").is_ok();
+    let keep = std::env::var("VCA_KEEP_CONSOLE").is_ok();
+
+    let detail = match (has, in_gui, keep) {
+        (true, true, true) => "有（VCA_KEEP_CONSOLE=1 要求保留）".to_string(),
+        (true, true, false) => "有（界面模式下本应隐藏，可能没生效）".to_string(),
+        (true, false, _) => "有（命令行模式，输出直接打印在这里）".to_string(),
+        (false, _, _) => "无（输出见界面「日志」页与 logs/ui.log）".to_string(),
+    };
+    CheckItem {
+        name: "控制台窗口".to_string(),
+        ok: true, // 任何组合都不算故障
+        detail,
+        optional: true,
     }
 }
 

@@ -112,7 +112,14 @@ impl JobStore {
     }
 
     /// 由一节课创建作业（幂等：已存在则直接返回）。
+    ///
+    /// `profile` 会进入作业 id 与目录名，所以这里再过一次
+    /// [`crate::paths::validate_profile_name`]。入口（CLI/GUI）已经校验过，
+    /// 但作业目录一旦被拼错就会写到别的 profile 下，代价太大 ——
+    /// 这类边界值得重复挡一次。
     pub fn ensure_for_lesson(&self, lesson: &LessonInstance, profile: &str) -> Result<Job> {
+        let profile = crate::paths::validate_profile_name(profile)
+            .map_err(|e| CoreError::ProfileNotFound(e.to_string()))?;
         let id = job_id_for(lesson, profile);
         let path = self.path_of(&id);
         if path.exists() {

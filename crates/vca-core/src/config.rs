@@ -319,11 +319,19 @@ pub struct UiSettings {
     pub tray_icon: bool,
     /// 是否显示录制中角标（默认关）。
     pub tray_badge: bool,
-    /// 允许局域网内的其它设备打开预览页（默认关）。
+    /// 是否允许局域网内的其它设备打开预览页。
     ///
-    /// 开了之后界面服务会绑到所有网卡，并自动写入 `push.preview_base`。
-    /// 教室一体机与收件人通常在同一个校园网里，这是「发一个能在线看的链接」
-    /// 唯一不需要公网的做法。默认关是因为它把端口暴露给了整个局域网。
+    /// # 当前状态：未实现，保留字段仅为兼容旧配置
+    ///
+    /// 这个开关曾承诺「绑所有网卡 + 自动写入 `push.preview_base`」，
+    /// 但 `vca_gui::server` 始终只监听 127.0.0.1，绑定逻辑从未接上 ——
+    /// 开了它不会有任何效果（评审 R-08）。
+    ///
+    /// 保留字段而不是删掉，是因为旧配置里已经写进去了：删字段会让 serde
+    /// 直接报错，用户升级后连程序都起不来。界面上该开关已移除。
+    ///
+    /// 真要开放局域网，必须连同「预览令牌强制校验 + 绑定地址显式确认」
+    /// 一起做，不能只翻这一个布尔值。
     #[serde(default)]
     pub allow_lan: bool,
     /// 预览页的长期令牌（与每次启动都变的界面令牌分开）。
@@ -415,24 +423,56 @@ impl ScheduleFile {
         self.week_template.clone()
     }
 
-    /// 把「新旧两套写法」统一成 `entries`，幂等。
+    /// 解析某个课表（ClassPlan）实际应绑定的时间表。
     ///
-    /// 对应 ClassIsland 的加载流程：`Classes` 是按时间点索引的课程格，
-    /// 渲染与调度前会先取出课表绑定的时间表，把索引还原成起止时间。
-    /// VCA 这里做的是同一件事，只是统一摊平进 `entries`，
-    /// 好让排课逻辑（[`crate::schedule`]）对两种数据形状完全无感。
+    /// # 为什么不能只看 is_active
     ///
-    /// 同时兼容旧格式：只写了 `period`（节次）没写 `start`/`end` 的条目由时间表补全，
-    /// 只写了 `start` 没写节次的条目反过来补出节次 —— 两边的信息本来就是一回事。
-    pub fn normalize(&mut self, timetables: &[Timetable]) {
-        let tt = timetables
+    /// 一份课表用 time_layout_id 指明自己的作息（ClassIsland 的
+    /// ClassPlan.TimeLayoutId）。只要用户维护了不止一份时间表，
+    /// "当前激活的那份"和"这份课表绑的那份"就可能是两个不同的东西，
+    /// 旧实现一律取 active（没有则取第一个），于是把所有课表的 period
+    /// 都按另一份时间表换算：09:00 上课的班被排成 08:30（评审 R-02）。
+    ///
+    /// 优先级：
+    /// 1. time_layout_id 非空 —— 必须按 id 找到，找不到返回 None；
+    /// 2. 没写 id —— 退回 active，再退回第一个（兼容单表的老配置）。
+    ///
+    /// 第 1 条找不到时**故意返回 None 而不是 fallback**：拿错误的时间去排课，
+    /// 比明确报"绑定的时间表不存在"危险得多 —— 后者用户一眼看懂，
+    /// 前者会安静地录错课。
+    pub fn resolve_timetable<'a>(
+        plan: &ClassPlan,
+        timetables: &'a [Timetable],
+    ) -> Option<&'a Timetable> {
+        let want = plan.time_layout_id.trim();
+        if !want.is_empty() {
+            return timetables.iter().find(|t| t.id == want);
+        }
+        timetables
             .iter()
             .find(|t| t.is_active)
-            .or(timetables.first());
+            .or_else(|| timetables.first())
+    }
+
+    /// 把「新旧两种数据形状」统一成 `entries`，幂等。
+    ///
+    /// 对应 ClassIsland 的加载流程：`Classes` 是按时间点索引的课程格，
+    /// 渲染与调度前会先读时间表，把索引还原成起止时间。
+    /// VCA 这边只认 `start` / `end`（一件事只有一种表达），
+    /// 好让排课逻辑（[`crate::schedule`]）对两种数据形状完全无感。
+    ///
+    /// 同时兼容旧格式：只写了 `period`（节次）没写 `start`/`end` 的条目
+    /// 由时间表补全，只写了 `start` 没写节次的条目反过来补出节次。
+    ///
+    /// 三处（周中 / 周末 / 覆盖项）各按**自己绑定的时间表**换算（评审 R-02）。
+    pub fn normalize(&mut self, timetables: &[Timetable]) {
         let weekday = plan_weekday(&mut self.week_template);
+        let tt = Self::resolve_timetable(&self.week_template, timetables);
         if let Some(w) = self.weekend_template.as_mut() {
             let mut plan = ClassPlan {
                 entries: std::mem::take(&mut w.entries),
+                // 周末模板自己不带绑定，沿用周中课表的
+                time_layout_id: self.week_template.time_layout_id.clone(),
                 ..ClassPlan::default()
             };
             normalize_plan(&mut plan, tt, weekday);
@@ -443,9 +483,12 @@ impl ScheduleFile {
             if let Some(t) = ov.target.as_mut() {
                 let mut plan = ClassPlan {
                     entries: vec![std::mem::take(t)],
+                    time_layout_id: self.week_template.time_layout_id.clone(),
                     ..ClassPlan::default()
                 };
-                normalize_plan(&mut plan, tt, weekday);
+                // 覆盖项走自己的解析：它带 time_layout_id 时按自己的来
+                let ov_tt = Self::resolve_timetable(&plan, timetables).or(tt);
+                normalize_plan(&mut plan, ov_tt, weekday);
                 if let Some(e) = plan.entries.into_iter().next() {
                     *t = e;
                 }
@@ -885,6 +928,91 @@ mod tests {
         );
         f.normalize(&[tt()]);
         assert_eq!(f.week_template.entries[0].period, Some(1));
+    }
+
+    // ---- resolve_timetable（评审 R-02）----
+    //
+    // 这一组是为了钉住「多份时间表时按绑定选表」这个行为：
+    // 旧实现一律取 active，导致绑了别的表的课表被按错误的时间换算。
+
+    /// 造一份 id 不同、作息不同的时间表（第 1 节 09:00 开始）。
+    fn tt_late() -> Timetable {
+        Timetable {
+            id: "late".into(),
+            name: "晚作息".into(),
+            // 刻意设成非 active：用来验证「绑定优先于 active」
+            is_active: false,
+            source: "manual".into(),
+            group: "global".into(),
+            slots: vec![TimetableSlot {
+                period: Some(1),
+                start: "09:00".into(),
+                end: "09:45".into(),
+                kind: SlotKind::Class,
+                ..TimetableSlot::default()
+            }],
+        }
+    }
+
+    #[test]
+    fn resolve_prefers_bound_layout_over_active() {
+        // active 是 08:00 那份，但课表明确绑了 09:00 那份
+        let tables = vec![tt(), tt_late()];
+        let plan = ClassPlan {
+            time_layout_id: "late".into(),
+            ..ClassPlan::default()
+        };
+        let got = ScheduleFile::resolve_timetable(&plan, &tables).expect("应能按 id 找到");
+        assert_eq!(got.id, "late", "绑定优先于 is_active");
+    }
+
+    #[test]
+    fn resolve_falls_back_to_active_without_binding() {
+        let tables = vec![tt(), tt_late()];
+        let plan = ClassPlan::default(); // 没写 time_layout_id
+        let got = ScheduleFile::resolve_timetable(&plan, &tables).expect("应退回 active");
+        assert_eq!(got.id, "default");
+    }
+
+    #[test]
+    fn resolve_returns_none_for_dangling_binding() {
+        // 绑了一个不存在的时间表：必须返回 None，而不是悄悄用别的表
+        let tables = vec![tt()];
+        let plan = ClassPlan {
+            time_layout_id: "missing".into(),
+            ..ClassPlan::default()
+        };
+        assert!(
+            ScheduleFile::resolve_timetable(&plan, &tables).is_none(),
+            "绑定不存在时不能 fallback 到 active —— 那会安静地排错课"
+        );
+    }
+
+    #[test]
+    fn normalize_uses_bound_layout_times() {
+        // 端到端：绑了 late 的课表，第 1 节应拿到 09:00 而不是 active 的 08:00
+        let mut f = sched(
+            "week_template:\n  timeLayoutId: late\n  entries:\n    - { day: Mon, period: 1, course: 数学, teacherId: t1 }\n",
+        );
+        f.normalize(&[tt(), tt_late()]);
+        let e = &f.week_template.entries[0];
+        assert_eq!(e.start, "09:00", "应按绑定的时间表补时间（评审 R-02）");
+        assert_eq!(e.end, "09:45");
+    }
+
+    #[test]
+    fn normalize_leaves_times_unfilled_when_binding_dangling() {
+        // 绑定悬空时不做换算：宁可留空让校验报出来，也不要按拍脑袋的表填
+        let mut f = sched(
+            "week_template:\n  timeLayoutId: nope\n  entries:\n    - { day: Mon, period: 1, course: 数学, teacherId: t1 }\n",
+        );
+        f.normalize(&[tt(), tt_late()]);
+        let e = &f.week_template.entries[0];
+        assert!(
+            e.start.is_empty(),
+            "绑定不存在时不该用别的表补时间，实际补成了 {}",
+            e.start
+        );
     }
 
     #[test]

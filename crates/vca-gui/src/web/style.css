@@ -220,6 +220,57 @@ label.check input[type=checkbox] {
 .btn:disabled { opacity: .45; cursor: default; }
 .btn.sm { padding: 4px 10px; font-size: 12px; }
 
+/* ---- 依赖缺失弹窗 ----
+   遮罩层要盖住整个窗口：这是「程序缺东西、必须让用户知道」的提示，
+   没有关掉的叉、点遮罩也不关 —— 只能点确定或稍后。 */
+.modal-mask {
+  position: fixed; inset: 0; z-index: 1000;
+  background: rgba(0, 0, 0, .62);
+  display: flex; align-items: center; justify-content: center;
+}
+.modal-box {
+  background: var(--panel); border: 1px solid var(--line);
+  border-radius: 12px; width: 520px; max-width: 92vw;
+  max-height: 86vh; overflow: auto;
+  box-shadow: 0 18px 48px rgba(0, 0, 0, .55);
+}
+.modal-title {
+  font-size: 15px; font-weight: 600; padding: 16px 20px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.modal-body { padding: 16px 20px; }
+.modal-actions {
+  display: flex; gap: 10px; justify-content: flex-end;
+  padding: 12px 20px 16px; border-top: 1px solid var(--line);
+}
+
+.dep-lead { margin: 0 0 12px; color: var(--text-dim); font-size: 13px; line-height: 1.65; }
+.dep-list { list-style: none; margin: 0 0 12px; padding: 0; }
+.dep-row {
+  padding: 9px 11px; margin-bottom: 7px;
+  background: var(--panel-2); border: 1px solid var(--line);
+  border-radius: 8px; border-left: 3px solid var(--line);
+}
+/* 必需项用左侧色条区分：一眼能看出哪条不补就没法用 */
+.dep-row.dep-req { border-left-color: var(--err); }
+.dep-name { font-size: 13px; color: var(--text); font-weight: 500; }
+.dep-tag {
+  font-size: 11px; margin-left: 7px; padding: 1px 6px;
+  border-radius: 4px; background: #1e1e1e; color: var(--text-dim);
+  border: 1px solid var(--line); font-weight: 400;
+}
+.dep-row.dep-req .dep-tag { color: var(--err); border-color: #4a2222; background: #1c1212; }
+.dep-why { font-size: 12px; color: var(--text-dim); margin-top: 3px; line-height: 1.5; }
+.dep-note { font-size: 12px; color: var(--text-dim); line-height: 1.6; }
+/* 进度区等宽字体：下载的 URL 很长，等宽更好读，也避免抖动 */
+.dep-progress {
+  margin-top: 10px; padding: 9px 11px; border-radius: 7px;
+  background: #0a0a0a; border: 1px solid var(--line);
+  font-family: Consolas, "Cascadia Mono", monospace; font-size: 11.5px;
+  color: var(--text-dim); line-height: 1.6;
+  word-break: break-all;
+}
+
 table { width: 100%; border-collapse: collapse; font-size: 13px; }
 th {
   text-align: left; font-weight: 500; font-size: 11.5px; color: var(--text-dim2);
@@ -320,3 +371,101 @@ td.mono-dim { color: var(--text-dim); }
 .sc-sub { display: flex; gap: 4px; align-items: center; }
 .sc-sub input { flex: 1; min-width: 0; font-size: 11.5px; }
 .sc-sub .check { font-size: 11px; }
+
+/* ---------------------------------------------------------------- 日志页 */
+
+/* 工具栏：一行放下筛选、跟随、计数与三个按钮 */
+.log-toolbar {
+  display: flex; align-items: center; gap: 14px;
+  flex-wrap: wrap; margin: 10px 0 12px;
+}
+.log-filter, .log-check {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: var(--text-dim);
+}
+.log-filter select {
+  background: var(--panel-2); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 3px 8px; font-size: 12px; font-family: var(--sans);
+}
+.log-check input { accent-color: var(--accent); }
+.log-count {
+  font-size: 11.5px; color: var(--text-dim2);
+  font-family: var(--mono);
+}
+
+/* 日志视口。
+   固定高度 + 内部滚动是关键：日志会无限增长，如果让它撑开页面，
+   主区域就会越来越长，滚动条跑到整个窗口上，工具栏也跟着滚走。
+   给一个"自己的滚动区"之后，工具栏始终可见，符合看日志的直觉。 */
+.log-view {
+  height: 52vh; min-height: 260px;
+  overflow-y: auto; overflow-x: auto;
+  background: #0b0b0b;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.62;
+  /* 等宽字体下换行要按字符断，但长路径不该被硬切在中间 */
+  white-space: pre-wrap; word-break: break-word;
+  scrollbar-width: thin;
+}
+.log-view::-webkit-scrollbar { width: 10px; height: 10px; }
+.log-view::-webkit-scrollbar-thumb {
+  background: #2c2c2c; border-radius: 5px;
+}
+.log-view::-webkit-scrollbar-thumb:hover { background: #3a3a3a; }
+.log-view::-webkit-scrollbar-track { background: transparent; }
+
+.log-line { display: flex; gap: 10px; }
+.log-line:hover { background: #131313; }
+
+/* 时间与级别定宽：不定宽的话每行正文的起始位置都不一样，很难扫读 */
+.log-time { color: var(--text-dim2); flex: 0 0 auto; }
+.log-lv   { flex: 0 0 46px; font-weight: 600; }
+.log-text { flex: 1 1 auto; min-width: 0; }
+
+.log-line.lv-info  .log-lv { color: var(--accent); }
+.log-line.lv-warn  .log-lv { color: var(--warn); }
+.log-line.lv-error .log-lv { color: var(--err); }
+.log-line.lv-dim   .log-lv { color: var(--text-dim2); }
+
+/* WARN / ERROR 整行也带一点颜色，扫一眼就能定位问题行 */
+.log-line.lv-error .log-text { color: #f0b8b8; }
+.log-line.lv-warn  .log-text { color: #e3cfa4; }
+.log-line.lv-dim   .log-text { color: var(--text-dim2); }
+/* ---------------------------------------------------- 录播批量勾选 */
+
+/* 工具条：一行放下搜索框与三个批量按钮。窄屏会换行，不会挤成一团。 */
+.bulk-bar {
+  display: flex; align-items: center; gap: 10px;
+  flex-wrap: wrap; margin: 0 0 6px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius);
+}
+.bulk-search {
+  flex: 1 1 200px; min-width: 160px;
+  background: var(--bg); color: var(--text);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 5px 10px; font-size: 12.5px;
+  font-family: var(--sans);
+}
+.bulk-search:focus { outline: none; border-color: var(--accent-dim); }
+.bulk-ops { display: flex; gap: 8px; flex-wrap: wrap; }
+
+/* 作用域标注（「（当前 N 项）」）。做小一号、暗一档，
+   它是按钮的补充说明，不该跟按钮本身抢注意力。 */
+.bulk-scope {
+  margin-left: 5px;
+  font-size: 11px;
+  color: var(--text-dim2);
+}
+
+/* 网格里"不在当前筛选范围"的格子。
+   只降透明度、不加边框：它仍然是可编辑的，只是提醒你它不参与批量操作。 */
+.sc-cell.sc-dim { opacity: .32; }
+.sc-cell.sc-dim:focus-within { opacity: .75; }

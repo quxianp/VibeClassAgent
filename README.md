@@ -309,6 +309,42 @@ python scripts/package.py --no-model       # 不带模型，转写走云端
 
 ---
 
+## 六点五、日志在哪看
+
+程序**不再弹出控制台窗口**。双击启动时那个黑框会被自动隐藏，所有原本打印到
+控制台的内容集中显示在界面的 **「日志」页**（左侧导航最后一项）。
+
+| 去处 | 位置 | 用途 |
+|---|---|---|
+| 界面「日志」页 | 左侧导航 → 日志 | 实时查看，支持按级别筛选、自动滚动、复制、清空 |
+| 日志文件 | `<数据目录>/logs/ui.log` | 完整历史，排查问题时用 |
+
+「日志」页的几个细节：
+
+- 按级别筛选（INFO / WARN / ERROR / DEBUG / TRACE）；
+- 「自动滚动」默认开启，且**只在你本来就贴着底部时才跟随** —— 往回翻的时候
+  不会被硬拽到底，可以安心看历史；
+- 「复制」复制的是**当前筛选后的可见内容**，所见即所得；
+- 「清空」只清空界面显示，**磁盘上的 `ui.log` 保留**（想留证据不会被误删）。
+
+### 命令行模式不受影响
+
+隐藏控制台**只针对 GUI 模式**。`vca doctor`、`vca plugin list` 这类子命令
+仍然照常往 stdout 打印，可以直接写进脚本或计划任务。
+
+### 出问题时想把控制台找回来
+
+设环境变量 `VCA_KEEP_CONSOLE=1` 再启动，控制台窗口会保留：
+
+```powershell
+$env:VCA_KEEP_CONSOLE=1; .\vca.exe
+```
+
+`vca doctor` 里也有一项「控制台窗口」会报告当前状态（有 / 无、是否按
+`VCA_KEEP_CONSOLE` 保留）。
+
+---
+
 ## 七、已知限制与待确认项
 
 - **PDF 生成依赖系统 Edge/Chrome**。原理是 HTML → 浏览器无头打印（中文渲染零配置、
@@ -334,7 +370,7 @@ cd D:\VibeClassAgent
 .\scripts\dev.cmd plugin list         # 插件列表
 .\scripts\dev.cmd debug e2e           # 端到端冒烟
 
-cargo test --workspace                # 206 个测试
+cargo test --workspace                # 325 个测试
 cargo clippy --all-targets            # 应当零告警
 cargo fmt --all                       # 应当无差异
 ```

@@ -424,7 +424,8 @@
       "timetable": "时间表",
       "schedule": "课表",
       "record": "录制与文件",
-      "jobs": "作业"
+      "jobs": "作业",
+      "logs": "日志"
     },
     "side": {
       "llm": "模型",
@@ -692,7 +693,22 @@
       "rule_enabled": "默认启用",
       "period_n": "第 {n} 节",
       "cell_ph": "空",
-      "unnamed": "未命名课程"
+      "unnamed": "未命名课程",
+      "bulk_all": "全选",
+      "bulk_none": "取消全选",
+      "bulk_invert": "反选",
+      "bulk_scope_filtered": "（当前 {n} 项）",
+      "bulk_scope_all": "（全部 {n} 项）",
+      "filter_ph": "搜索科目 / 教师…",
+      "filter_clear": "清除",
+      "count_selected": "已选 {n} / 共 {m} 个",
+      "count_none": "没有可选的课程",
+      "empty_no_course": "课表还是空的。先在上面的课程格里填上科目，这里才有能勾选的东西。",
+      "empty_filtered": "没有匹配的课程。换个关键词，或点「清除」看全部。",
+      "need_pick": "一节课都没勾。要么先勾上要录的课，要么点「取消全选」并确认——总之不能提交一个空选择。",
+      "saved_zero": "已保存：这节课表一节都不录。",
+      "select_all_first": "先勾上至少一节课",
+      "count_in_filter": "当前 {m} 项中 {n} 项已选"
     },
     "rc": {
       "title": "录制参数",
@@ -789,6 +805,41 @@
       "log_refresh": "刷新",
       "log_clear": "清空屏幕",
       "log_cleared": "（已清空屏幕显示，日志文件仍在磁盘上）"
+    },
+    "lg": {
+      "title": "运行日志",
+      "hint": "程序运行时的全部输出都在这里。这个程序不再弹出控制台窗口，所以这里是唯一的实时通道 —— 启动、录制、转写、推送的每一步都会写进来。",
+      "level": "级别",
+      "level_all": "全部",
+      "follow": "自动滚动",
+      "reload": "重新载入",
+      "copy": "复制",
+      "clear": "清空",
+      "cleared": "已清空界面上的日志。磁盘上的 ui.log 仍然保留。",
+      "copied": "已复制到剪贴板。",
+      "copy_failed": "复制失败，可以手动选中后按 Ctrl+C。",
+      "empty": "还没有日志。程序启动、录制或处理作业时这里就会有内容。",
+      "filter_empty": "当前级别下没有日志。换成「全部」看看。",
+      "count": "共 {n} 行",
+      "count_filtered": "{n} / {m} 行",
+      "file": "完整日志文件：",
+      "file_missing": "日志文件（尚未创建）："
+    },
+    "deps": {
+      "title": "缺少必要的组件",
+      "lead": "程序需要几个外部组件才能完整工作，下面是当前缺少的。点「确定」会自动下载补齐，不需要你手动去找。",
+      "tag_required": "必需",
+      "tag_optional": "可选",
+      "download_note": "需要联网下载，总共约 125 MB，视网速可能要几分钟。下载过程中请保持这个窗口打开。",
+      "ok": "确定，自动补齐",
+      "later": "稍后再说",
+      "fetching": "正在补齐…",
+      "starting": "正在检查…",
+      "failed": "启动补齐失败",
+      "retry": "重试",
+      "done": "全部补齐完成",
+      "done_note": "组件已就绪，可以正常使用了。",
+      "still_missing": "仍有组件缺失，可以检查网络后重试；也可以设置代理后重启程序。"
     }
   }
 }

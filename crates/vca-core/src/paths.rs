@@ -225,6 +225,9 @@ impl Layout {
     }
 
     /// 指定 profile 的数据目录：`data/profiles/{profile}/`。
+    ///
+    /// `profile` 必须已通过 [`validate_profile_name`]；这是内部目录拼接，
+    /// 不做二次校验（调用方在入口处统一把关，避免每条路径各写一套规则）。
     pub fn profile_data_dir(&self, profile: &str) -> PathBuf {
         self.data_root.join("profiles").join(profile)
     }
@@ -306,4 +309,120 @@ pub fn schedule_archive_name(week: &str, version: u32) -> String {
 /// 判断路径是否位于给定的软删除区内（用于安全校验）。
 pub fn is_in_trash(path: &Path, trash: &Path) -> bool {
     path.starts_with(trash)
+}
+
+/// profile 名非法时返回的错误说明。
+pub const PROFILE_RULE: &str =
+    "profile 只能用字母、数字、下划线、短横线和点（如 default / teacher-1），且不能是 . 或 ..";
+
+/// Windows 保留设备名（大小写不敏感）。用它们当目录名会失败或行为诡异。
+const WINDOWS_RESERVED: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8",
+    "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+/// 校验 profile 名是否可安全用作目录名。
+///
+/// # 为什么必须有这道关
+///
+/// profile 会被直接拼进 `data/profiles/<profile>/...` 与
+/// `config/profiles/<profile>/...`。它来自命令行 `--profile` 与配置，
+/// 两者都是外部输入：一个 `..` 就能把作业目录写到 data 根之外，
+/// 一个 `C:\` 就能覆盖任意可写路径下的 `job.json`。
+///
+/// 多教师共用正是这个功能的卖点，所以这层隔离必须真的成立 ——
+/// 宁可拒绝一个奇怪的名字，也不要放它进文件系统。
+///
+/// 允许的字符刻意收得很紧（ASCII 字母数字 + `_` `-` `.`）：
+/// profile 是目录名而不是显示名，中文显示名请另设字段。
+pub fn validate_profile_name(profile: &str) -> Result<&str, String> {
+    let p = profile.trim();
+
+    if p.is_empty() {
+        return Err("profile 不能为空".to_string());
+    }
+    // 只有 "." / ".." 是纯粹的路径穿越；"." 开头的普通名字（如 .hidden）也一并拒绝，
+    // 因为它们在 Windows 资源管理器里会被隐藏，用户排障时看不见。
+    if p == "." || p == ".." || p.starts_with('.') {
+        return Err(format!("profile「{p}」不能以点开头，{PROFILE_RULE}"));
+    }
+    if p.len() > 64 {
+        return Err(format!("profile 太长（{} 字符，上限 64）", p.len()));
+    }
+    // 必须逐个字符白名单：只挡 `..` 挡不住 `a/b`、`a\b`、`C:` 这类写法
+    if let Some(bad) = p
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || *c == '_' || *c == '-' || *c == '.'))
+    {
+        return Err(format!(
+            "profile「{p}」含不允许的字符「{bad}」，{PROFILE_RULE}"
+        ));
+    }
+    // 含 "." 时额外拒绝 ".." 出现在中间的写法（上面已挡纯 ..，这里防 a..b 之外的分段穿越）
+    if p.contains("..") {
+        return Err(format!(
+            "profile「{p}」不能包含连续的「..」，{PROFILE_RULE}"
+        ));
+    }
+    // Windows 保留名：即使带扩展名（CON.txt）也是保留的，所以按第一个 "." 之前的部分判断
+    let stem = p.split('.').next().unwrap_or(p);
+    if WINDOWS_RESERVED
+        .iter()
+        .any(|r| r.eq_ignore_ascii_case(stem))
+    {
+        return Err(format!(
+            "profile「{p}」是 Windows 保留设备名（如 CON/NUL/COM1），换一个名字"
+        ));
+    }
+    // 结尾是点或空格时 Windows 会静默吃掉，导致"我明明建了目录却找不到"
+    if p.ends_with('.') || p.ends_with(' ') {
+        return Err(format!("profile「{p}」不能以点或空格结尾"));
+    }
+
+    Ok(p)
+}
+
+#[cfg(test)]
+mod profile_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_ordinary_names() {
+        for ok in ["default", "teacher1", "teacher-1", "class_A", "a.b"] {
+            assert!(validate_profile_name(ok).is_ok(), "{ok} 应该被接受");
+        }
+    }
+
+    #[test]
+    fn rejects_traversal_and_separators() {
+        // 这几条是本次评审的重点：它们都能把路径写出 data 根之外
+        for bad in [
+            "..",
+            ".",
+            "../../etc",
+            "..\\..\\windows",
+            "a/b",
+            "a\\b",
+            "C:\\tmp",
+            "..hidden",
+            "a..b",
+            ".hidden",
+        ] {
+            assert!(validate_profile_name(bad).is_err(), "{bad} 应该被拒绝");
+        }
+    }
+
+    #[test]
+    fn rejects_windows_reserved_and_odd_edges() {
+        for bad in ["CON", "nul", "COM1", "con.txt", "trailing.", "has space"] {
+            assert!(validate_profile_name(bad).is_err(), "{bad} 应该被拒绝");
+        }
+        assert!(validate_profile_name("").is_err());
+        assert!(validate_profile_name(&"x".repeat(65)).is_err());
+    }
+
+    #[test]
+    fn trims_surrounding_whitespace() {
+        assert_eq!(validate_profile_name("  default  ").unwrap(), "default");
+    }
 }

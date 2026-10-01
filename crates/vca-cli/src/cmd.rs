@@ -746,8 +746,54 @@ fn resolve_plugins_dir(layout: &Layout) -> std::path::PathBuf {
     config_sibling
 }
 
-/// 插件命令（`list` / `info` / `install` / `remove` 已实现）。
-pub fn plugin(layout: &Layout, action: &str, target: Option<&str>) -> Result<()> {
+/// 插件命令。
+///
+/// # 为什么整体挡在「不可用」后面
+///
+/// `list` / `info` / `install` 这些实现是完整的（也有测试），但**装进去也没用**：
+/// 运行时还有两个硬伤 —— stdout 读取会阻塞导致超时失效（R-05），
+/// 权限声明不构成沙箱（R-06）。让用户成功装上一个用不了、还以为是"隔离好了"
+/// 的插件，比直接说"不可用"更糟。
+///
+/// 所以这里统一返回不可用说明，代码保留供将来启用。
+pub fn plugin(layout: &Layout, action: &str, _target: Option<&str>) -> Result<()> {
+    // 唯一例外：告诉他插件该放哪儿，方便自己看 —— 这不涉及加载或信任
+    if action == "where" {
+        let dir = resolve_plugins_dir(layout);
+        println!(
+            "{}",
+            vca_core::i18n::tf(
+                "cmd.out.插件目录：{p1}",
+                &[("p1", &(dir.display()).to_string())]
+            )
+        );
+        return Ok(());
+    }
+    print_plugins_unavailable(action);
+    Ok(())
+}
+
+/// 打印「插件功能不可用」的统一说明。
+fn print_plugins_unavailable(action: &str) {
+    println!(
+        "{}",
+        vca_core::i18n::tf("cmd.out.[不可用] 插件 {action}", &[("action", action)])
+    );
+    println!("{}", vca_plugin_host::PLUGINS_UNAVAILABLE_REASON);
+    println!(
+        "{}",
+        vca_core::i18n::tf(
+            "cmd.out.  设计依据：{reference}",
+            &[("reference", "策划书 4.2 插件机制（v1 未启用）")]
+        )
+    );
+}
+
+/// 旧实现（保留待启用）：`list` / `info` / `install` / `remove`。
+///
+/// 启用时把它接回 [`plugin`]，并先解决模块文档里列出的两个缺陷。
+#[allow(dead_code)]
+fn plugin_impl(layout: &Layout, action: &str, target: Option<&str>) -> Result<()> {
     let dir = resolve_plugins_dir(layout);
     match action {
         "list" | "discover" => {
@@ -974,9 +1020,10 @@ pub fn plugin(layout: &Layout, action: &str, target: Option<&str>) -> Result<()>
     }
 }
 
-/// 市场命令（预留；v1 仅支持本地目录安装）。
+/// 市场命令。同样挡在「不可用」后面（装进去也用不了，见 [`plugin`]）。
 pub fn market(_layout: &Layout, action: &str) -> Result<()> {
-    not_implemented("market", action, "策划书 4.2 本地插件市场")
+    print_plugins_unavailable(action);
+    Ok(())
 }
 
 /// 日志命令（预留；日志见数据目录 logs/）。

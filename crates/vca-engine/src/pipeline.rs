@@ -215,8 +215,15 @@ impl<'a> Pipeline<'a> {
         // ---- 5) 推送 ----
         if job.state == JobState::DocReady {
             match self.push_document(job) {
-                Ok(id) => {
-                    steps.push(format!("推送成功（{id}）"));
+                Ok(report) => {
+                    steps.push(format!("推送成功（{}）", report.message_id));
+                    // 附件没上去时**不算失败**（正文与预览链接都到了，
+                    // 录像也确实发出了），但必须让用户看见 —— 否则老师以为
+                    // 文档也发全了，实际上群里只有一句话（评审 R-16）。
+                    if let Some(w) = report.attachment_error {
+                        steps.push(format!("⚠ {w}（正文已送达，可手动补发）"));
+                        warnings.push(w);
+                    }
                     let now = vca_platform::clock::now_local();
                     job.push_succeeded_at = Some(now.to_string());
                     // 72 小时倒计时，从**推送成功时刻**起算
@@ -493,7 +500,11 @@ impl<'a> Pipeline<'a> {
     ///
     /// 插件协议见 `plugins/README.md`：拉起进程后走 JSON-RPC over stdio，
     /// 调用 `run` 并传入文档路径与摘要，插件需返回 `{success, messageId}`。
-    fn push_via_plugin(&self, job: &Job, plugin_id: &str) -> Result<String, String> {
+    /// 插件推送：拉起进程后走 JSON-RPC over stdio，把文档路径与摘要传给插件。
+    ///
+    /// 插件需返回 `{success, messageId}`；可选的 `attachmentError` 会被透传
+    /// 给 [`PushReport`]，与内置渠道保持同一套"部分成功"语义。
+    fn push_via_plugin(&self, job: &Job, plugin_id: &str) -> Result<PushReport, String> {
         use vca_plugin_host::host::PluginHost;
         use vca_plugin_host::runner::PluginProcess;
 
@@ -537,12 +548,19 @@ impl<'a> Pipeline<'a> {
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
         {
-            Ok(res
-                .get("messageId")
-                .or_else(|| res.get("message_id"))
-                .and_then(|v| v.as_str())
-                .unwrap_or(plugin_id)
-                .to_string())
+            Ok(PushReport {
+                message_id: res
+                    .get("messageId")
+                    .or_else(|| res.get("message_id"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or(plugin_id)
+                    .to_string(),
+                attachment_error: res
+                    .get("attachmentError")
+                    .or_else(|| res.get("attachment_error"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+            })
         } else {
             Err(res
                 .get("error")
@@ -553,7 +571,11 @@ impl<'a> Pipeline<'a> {
     }
 
     /// 推送文档。若 `settings.plugins.push` 指定了插件，则改走插件。
-    fn push_document(&self, job: &Job) -> Result<String, String> {
+    ///
+    /// 返回 [`PushReport`] 而不是裸的 id：正文成功但附件失败的情况需要
+    /// 单独表达（评审 R-16），否则调用方只能二选一——要么谎报成功，
+    /// 要么把"文本已送达"也当成失败从而留住本地录像。
+    fn push_document(&self, job: &Job) -> Result<PushReport, String> {
         // 插件优先：配置了就用插件，否则用内置推送
         let routed = self.settings.plugins.push.trim();
         if !routed.is_empty() && !self.dry_run {
@@ -583,7 +605,10 @@ impl<'a> Pipeline<'a> {
             };
             use vca_platform::push::Pusher;
             let out = p.send(&doc).map_err(|e| e.to_string())?;
-            return Ok(out.message_id.unwrap_or_else(|| "dry-run".into()));
+            return Ok(PushReport {
+                message_id: out.message_id.unwrap_or_else(|| "dry-run".into()),
+                attachment_error: out.attachment_error,
+            });
         }
 
         let p = &self.settings.push;
@@ -619,12 +644,28 @@ impl<'a> Pipeline<'a> {
         // 带重试；只有全部失败才返回失败 ——
         // 调用方据此决定「保留本地录像」，所以这里的判定必须严格。
         let out = push_mod::send_with_retry(pusher.as_ref(), &doc, p.max_retries);
-        if out.success {
-            Ok(out.message_id.unwrap_or_else(|| "ok".into()))
-        } else {
-            Err(out.error.unwrap_or_else(|| "推送失败".into()))
+        if !out.success {
+            return Err(out.error.unwrap_or_else(|| "推送失败".into()));
         }
+        // 正文成功、附件失败：不算整体失败（够不上"没推送就删录像"那条红线），
+        // 但必须带上去让用户看见 —— 旧实现只写一行日志，界面照样显示"已推送"，
+        // 老师以为发全了，学生手里只有一句话（评审 R-16）。
+        Ok(PushReport {
+            message_id: out.message_id.unwrap_or_else(|| "ok".into()),
+            attachment_error: out.attachment_error,
+        })
     }
+}
+
+/// 一次推送的结果。
+///
+/// 分开返回消息 id 与附件问题，是为了让流水线把后者写成 `warnings`
+/// 而不是失败 —— 语义上确实不是失败，但用户必须知道缺了什么。
+struct PushReport {
+    /// 渠道返回的消息 id。
+    message_id: String,
+    /// 附件没发上去时的原因。
+    attachment_error: Option<String>,
 }
 
 /// 从 `start` / `end` 时刻算出课时长（秒）。

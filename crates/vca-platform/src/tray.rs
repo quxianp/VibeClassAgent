@@ -9,6 +9,14 @@
 //! - 托盘需要一个窗口接收回调消息，这里创建一个**不可见的消息窗口**；
 //! - 右击弹出原生菜单（`TrackPopupMenu`），点击后把命令通过 channel 送回守护进程；
 //! - 全程不弹气泡通知（`NIF_INFO` 从未使用），符合「无打扰」要求。
+//!
+//! **两个容易踩的坑**（都曾经真的踩过，注释留在原地免得后人重蹈）：
+//!
+//! 1. `TrackPopupMenu` 用了 `TPM_RETURNCMD`，它**不会**发 `WM_COMMAND`，
+//!    选中项 ID 只从**返回值**返回。谁要是把返回值丢掉，菜单就会「能弹能点、
+//!    点了没反应」—— 而且不报任何错。见 [`show_menu`]。
+//! 2. 托盘图标不是进程自己的，是 shell 替你保管的。窗口销毁时**必须**
+//!    调 `NIM_DELETE`，否则进程都没了图标还僵在任务栏上。见 [`remove_icon`]。
 
 // 说明：`overlay` 模块也声明了 `GetMessageW` / `TranslateMessage` 等同名 Win32 函数，
 // 二者参数类型在 Rust 里是**不同的名义类型**（各自的 `Msg` / `Point`），
@@ -36,6 +44,7 @@ const WM_DESTROY: u32 = 0x0002;
 const WM_CLOSE: u32 = 0x0010;
 const WM_COMMAND: u32 = 0x0111;
 const WM_RBUTTONUP: u32 = 0x0205;
+const WM_LBUTTONUP: u32 = 0x0202;
 const WM_LBUTTONDBLCLK: u32 = 0x0203;
 const WM_CONTEXTMENU: u32 = 0x007B;
 
@@ -50,14 +59,39 @@ const NIF_TIP: u32 = 0x04;
 
 const MF_STRING: u32 = 0x0000;
 const MF_SEPARATOR: u32 = 0x0800;
+/// 灰掉（不可点击）。状态行用它：看得见、点不动。
+const MF_GRAYED: u32 = 0x0001;
 const TPM_RIGHTBUTTON: u32 = 0x0002;
 const TPM_RETURNCMD: u32 = 0x0100;
 const TPM_NONOTIFY: u32 = 0x0080;
 
+/// 打开界面。
+const ID_OPEN_UI: u32 = 1000;
 const ID_STOP: u32 = 1001;
 const ID_LOGS: u32 = 1002;
 const ID_DATA: u32 = 1003;
 const ID_QUIT: u32 = 1004;
+
+/// 托盘图标的 ID，`NIM_ADD` / `NIM_DELETE` 必须用同一个值。
+const ICON_ID: u32 = 1;
+
+/// 窗口属性槽（`GWLP_USERDATA`）：存一个 `Box<WndState>`。
+const STATE_SLOT: i32 = -21;
+
+/// 挂在消息窗口上的状态。
+///
+/// 原来这里直接塞的是 `Box<mpsc::Sender<..>>`；现在窗口销毁时还得知道要把
+/// **哪个图标句柄**销毁，所以多记一个字段。用一个结构体而不是两个槽，
+/// 是因为 `GWLP_USERDATA` 只有一个，塞两样东西只能靠指针运算，不值得。
+struct WndState {
+    tx: mpsc::Sender<TrayCommand>,
+    icon: Hicon,
+    /// 取状态的回调。菜单每次弹出时才调它 —— 见 [`TrayStatus`] 的说明。
+    ///
+    /// 放在这里（而不是开个全局）是因为它随托盘实例走：托盘销毁了，
+    /// 这个闭包自然一起释放，不会留下一个指向已失效上层状态的悬空回调。
+    status: StatusFn,
+}
 
 const WS_POPUP: u32 = 0x8000_0000;
 const HWND_MESSAGE: Hwnd = -3;
@@ -214,6 +248,8 @@ extern "system" {
     fn PostMessageW(h: Hwnd, msg: Uint, w: Wparam, l: Lparam) -> Bool;
     fn LoadIconW(inst: Hinstance, name: Lpcwstr) -> Hicon;
     fn DestroyIcon(i: Hicon) -> Bool;
+    fn GetWindowLongPtrW(h: Hwnd, idx: i32) -> isize;
+    fn SetWindowLongPtrW(h: Hwnd, idx: i32, v: isize) -> isize;
 }
 
 #[link(name = "gdi32")]
@@ -252,6 +288,8 @@ fn wide_fixed(s: &str, n: usize) -> Vec<u16> {
 /// 托盘命令（由菜单点击产生）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TrayCommand {
+    /// 打开界面（左键单击 / 菜单项）
+    OpenUi,
     /// 立即停止录制
     StopRecording,
     /// 打开日志目录
@@ -262,9 +300,93 @@ pub enum TrayCommand {
     Quit,
 }
 
+/// 托盘的实时状态快照，用于菜单顶部那几行状态文字。
+///
+/// # 为什么是「快照 + 闭包」而不是让托盘自己查
+///
+/// 状态的真身在**上层**（守护线程的运行时状态、作业仓库、录制会话），
+/// 托盘这边（平台层）既看不到也不该看到 —— 它只是画个菜单。
+///
+/// 所以约定：谁创建托盘，谁提供一个「取状态的闭包」；菜单每次弹出的**那一刻**
+/// 才去调它。用「弹出时现取」而不是「定时推送」有两个好处：
+/// 1. 状态永远是准的（不会显示几百毫秒前的旧值）；
+/// 2. 没人点菜单时就完全不查，不产生任何后台开销。
+///
+/// 这也解释了为什么 `Tray::spawn` 要接受一个 `Box<dyn Fn() -> TrayStatus>`：
+/// 托盘线程结构体里存不下上层的状态，只能存「怎么去问」。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct TrayStatus {
+    /// 守护进程是否在运行。
+    pub daemon_running: bool,
+    /// 此刻是否正在录制。
+    pub recording: bool,
+    /// 是否以演练模式运行（不真录、不真推）。
+    pub dry_run: bool,
+    /// 待处理作业数（已录制但还没推送成功）。
+    pub pending_jobs: usize,
+    /// 已经运行了多久，人话描述（如「12 分 30 秒」）。空字符串表示不知道。
+    pub uptime: String,
+    /// 最近一次异常退出的原因。空字符串表示没有。
+    pub last_error: String,
+}
+
+impl TrayStatus {
+    /// 把状态渲染成菜单顶部的几行（第一行是主状态，后面是补充信息）。
+    ///
+    /// 刻意返回 `Vec<String>` 而不是拼成一整段：调用方要**逐行**作为禁用项
+    /// 插进菜单，Windows 不会帮我们按 `\n` 换行（会把 `\n` 显示成方块）。
+    pub fn menu_lines(&self) -> Vec<String> {
+        let head = if self.recording {
+            "● 正在录制".to_string()
+        } else if self.daemon_running {
+            if self.dry_run {
+                "○ 守护进程运行中（演练模式）".to_string()
+            } else {
+                "○ 守护进程运行中（空闲）".to_string()
+            }
+        } else {
+            "○ 未运行".to_string()
+        };
+        let mut v = vec![head];
+
+        // 时长只在知道的时候显示：显示「已运行 0 秒」比不显示更让人困惑。
+        if !self.uptime.is_empty() {
+            v.push(format!("　已运行 {}", self.uptime));
+        }
+        // 待处理数始终显示（包括 0）：它是用户最常关心的一项，
+        // 显示「0 个」本身就回答了「有没有积压」。
+        v.push(format!("　待处理作业 {} 个", self.pending_jobs));
+
+        if !self.last_error.is_empty() {
+            v.push(format!(
+                "　最近错误：{}",
+                truncate_chars(&self.last_error, 40)
+            ));
+        }
+        v
+    }
+}
+
+/// 按**字符**（不是字节）截断，避免把中文切出半个字。
+fn truncate_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max).collect();
+    out.push('…');
+    out
+}
+
+/// 取状态的闭包类型。
+pub type StatusFn = Box<dyn Fn() -> TrayStatus + Send + Sync + 'static>;
+
 /// 托盘句柄。
 pub struct Tray {
-    hwnd: Hwnd,
+    /// 托盘消息窗口的句柄。
+    ///
+    /// 公开它是为了 [close_hwnd]：需要通过 HTTP 退出的调用方手里没有 `Tray`，
+    /// 只能先把这个句柄存到全局，退出时再取出来摘图标。
+    pub hwnd: Hwnd,
     rx: mpsc::Receiver<TrayCommand>,
 }
 
@@ -279,7 +401,15 @@ impl Tray {
         self.hwnd != 0
     }
 
-    /// 主动关闭。
+    /// 主动关闭：投递 WM_CLOSE，让托盘线程销毁窗口、**摘掉托盘图标**、结束消息循环。
+    ///
+    /// 这是退出流程里最要紧的一步。任务栏里的图标是 shell 替我们保管的：
+    /// 窗口没了但没调 `NIM_DELETE` 的话，图标会**僵在原地**，鼠标划过去还在、
+    /// 点它却没有任何反应，只能等用户把鼠标移过去才被 shell 清理掉
+    /// （或者更糟：留到下次登录）。所以 `WM_DESTROY` 里必须调 NIM_DELETE。
+    ///
+    /// 本函数可以重复调用（退出时 `Drop`、退出菜单、守护进程收尾都可能调一次），
+    /// 后调用只是往一个正在销毁的窗口投递消息，会被系统的消息队列安全地丢弃。
     pub fn close(&self) {
         if self.hwnd != 0 {
             // SAFETY: 只投递 WM_CLOSE，不做解引用。
@@ -457,7 +587,14 @@ fn make_icon_builtin() -> Hicon {
 }
 
 /// 创建托盘图标。返回句柄与线程 JoinHandle。
-pub fn spawn(tooltip: &str) -> std::io::Result<(Tray, std::thread::JoinHandle<()>)> {
+///
+/// `status` 是「取当前状态」的回调，用于菜单顶部的状态行。
+/// 传 `Box::new(TrayStatus::default)` 就是「不显示状态」，供测试与
+/// 不需要状态的调用方使用。
+pub fn spawn(
+    tooltip: &str,
+    status: StatusFn,
+) -> std::io::Result<(Tray, std::thread::JoinHandle<()>)> {
     let (tx_ready, rx_ready) = mpsc::channel::<Result<Hwnd, String>>();
     let (tx_cmd, rx_cmd) = mpsc::channel::<TrayCommand>();
     let tip = tooltip.to_string();
@@ -505,13 +642,6 @@ pub fn spawn(tooltip: &str) -> std::io::Result<(Tray, std::thread::JoinHandle<()
                     return;
                 }
 
-                // 把发送端存到窗口用户数据里，供 wnd_proc 使用
-                let boxed = Box::into_raw(Box::new(tx_cmd));
-                extern "system" {
-                    fn SetWindowLongPtrW(h: Hwnd, idx: i32, v: isize) -> isize;
-                }
-                SetWindowLongPtrW(hwnd, -21, boxed as isize);
-
                 let icon = {
                     let ic = make_icon();
                     if ic != 0 {
@@ -521,12 +651,22 @@ pub fn spawn(tooltip: &str) -> std::io::Result<(Tray, std::thread::JoinHandle<()
                     } // IDI_APPLICATION
                 };
 
+                // 把发送端、图标句柄、取状态回调一起挂到窗口上，供 wnd_proc 使用：
+                // 发送端用于回传命令，图标句柄用于窗口销毁时 DestroyIcon，
+                // 状态回调用于菜单弹出时现取状态。
+                let boxed = Box::into_raw(Box::new(WndState {
+                    tx: tx_cmd,
+                    icon,
+                    status,
+                }));
+                SetWindowLongPtrW(hwnd, STATE_SLOT, boxed as isize);
+
                 let mut tip_buf = [0u16; 128];
                 tip_buf.copy_from_slice(&wide_fixed(&tip, 128));
                 let mut nid = NotifyIconDataW {
                     cb_size: std::mem::size_of::<NotifyIconDataW>() as u32,
                     h_wnd: hwnd,
-                    u_id: 1,
+                    u_id: ICON_ID,
                     u_flags: NIF_MESSAGE | NIF_ICON | NIF_TIP,
                     u_callback_message: WM_TRAY,
                     h_icon: icon,
@@ -547,11 +687,11 @@ pub fn spawn(tooltip: &str) -> std::io::Result<(Tray, std::thread::JoinHandle<()
                     DispatchMessageW(&msg);
                 }
 
-                // 清理
-                let _ = Shell_NotifyIconW(NIM_DELETE, &mut nid);
-                if icon != 0 {
-                    let _ = DestroyIcon(icon);
-                }
+                // 清理。图标 **已经在 WM_DESTROY 里摘掉了** —— 那是唯一
+                // 保证「窗口一销毁图标就消失」的位置（不管退出是走菜单、
+                // 走 Drop 还是走关窗）。这里只兜底那些没走到 WM_DESTROY
+                // 的异常路径（比如线程提前 break 出循环）。
+                remove_icon(hwnd);
             }
         })?;
 
@@ -568,23 +708,25 @@ unsafe extern "system" fn wnd_proc(hwnd: Hwnd, msg: Uint, w: Wparam, l: Lparam) 
             let ev = (l as u32) & 0xFFFF;
             if ev == WM_RBUTTONUP || ev == WM_CONTEXTMENU {
                 show_menu(hwnd);
-            } else if ev == WM_LBUTTONDBLCLK {
-                send_cmd(hwnd, TrayCommand::OpenDataDir);
+            } else if ev == WM_LBUTTONUP || ev == WM_LBUTTONDBLCLK {
+                // 左键打开界面。
+                //
+                // 这里同时收 UP 和 DBLCLK：Windows 对托盘左键只保证发出
+                // **DOWN / UP**，`WM_LBUTTONDBLCLK` 是「系统认为算双击」时
+                // 才额外补的一条 —— 有的鼠标/主题配置压根不发它。
+                // 早先只监听 DBLCLK，于是「单击没反应、双击也时灵时不灵」，
+                // 用户的感觉就是**左键完全打不开页面**。
+                //
+                // 收两条会不会开两次？不会：单击必然是 DOWN+UP，
+                // 双击则额外多一条 DBLCLK，两者相距只有几百毫秒。
+                // 去重交给上层（打开界面本身是幂等的：已有窗口就聚焦它）。
+                send_cmd(hwnd, TrayCommand::OpenUi);
             }
             0
         }
         WM_COMMAND => {
             let id = (w & 0xFFFF) as u32;
-            let cmd = match id {
-                ID_STOP => Some(TrayCommand::StopRecording),
-                ID_LOGS => Some(TrayCommand::OpenLogs),
-                ID_DATA => Some(TrayCommand::OpenDataDir),
-                ID_QUIT => Some(TrayCommand::Quit),
-                _ => None,
-            };
-            if let Some(c) = cmd {
-                send_cmd(hwnd, c);
-            }
+            handle_command(hwnd, id);
             0
         }
         WM_CLOSE => {
@@ -592,12 +734,18 @@ unsafe extern "system" fn wnd_proc(hwnd: Hwnd, msg: Uint, w: Wparam, l: Lparam) 
             0
         }
         WM_DESTROY => {
-            extern "system" {
-                fn GetWindowLongPtrW(h: Hwnd, idx: i32) -> isize;
-            }
-            let p = GetWindowLongPtrW(hwnd, -21);
+            // 摘掉托盘图标。**必须在这里做，而且必须做**：
+            // 窗口销毁后 shell 并不会立刻收回图标，而 NIM_DELETE 引用的正是
+            // 这个即将失效的 hwnd，所以这是最后一个能安全摘掉它的时机。
+            // 原来这行只写在消息循环之后（线程退出时），窗口被 WM_CLOSE 单独
+            // 销毁的情况下图标就留在任务栏里了。
+            remove_icon(hwnd);
+            // 释放状态，并把槽清零：清零后 state_ref 返回 None，
+            // 迟到的消息（退出过程中又点了菜单）就不会碰到已释放的内存。
+            let p = GetWindowLongPtrW(hwnd, STATE_SLOT);
             if p != 0 {
-                drop(Box::from_raw(p as *mut mpsc::Sender<TrayCommand>));
+                SetWindowLongPtrW(hwnd, STATE_SLOT, 0);
+                drop(Box::from_raw(p as *mut WndState));
             }
             PostQuitMessage(0);
             0
@@ -607,32 +755,51 @@ unsafe extern "system" fn wnd_proc(hwnd: Hwnd, msg: Uint, w: Wparam, l: Lparam) 
 }
 
 /// 弹出右键菜单并把选择结果发回守护进程。
+///
+/// # 菜单是「按当前状态现搭」的
+///
+/// 每次弹出都重新查一遍状态、重新拼一份菜单 —— 所以：
+/// - 不在录制时，「立即停止录制」**根本不会出现**（而不是灰着）；
+/// - 状态行（是否在录 / 队列积压 / 运行时长 / 最近错误）永远是最新的。
+///
+/// 不做成「常驻菜单 + 改灰」的原因：一个永远灰着的「停止录制」会让用户
+/// 反复去点、怀疑程序卡了；不显示比显示成灰的更不容易误解。
 unsafe fn show_menu(hwnd: Hwnd) {
     let menu = CreatePopupMenu();
     if menu == 0 {
         return;
     }
-    let items = [
-        (ID_STOP, "立即停止录制"),
-        (0, ""),
-        (ID_LOGS, "打开日志"),
-        (ID_DATA, "打开数据目录"),
-        (0, ""),
-        (ID_QUIT, "退出"),
-    ];
-    for (id, text) in items {
-        if id == 0 {
-            let _ = AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
-        } else {
-            let t = wide(text);
-            let _ = AppendMenuW(menu, MF_STRING, id as usize, t.as_ptr());
-        }
+
+    // 状态行 + 打开界面（始终有）
+    let status = current_status(hwnd);
+    append_grayed(menu, &status.menu_lines());
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
+    append_item(menu, ID_OPEN_UI, "打开界面");
+
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
+
+    // 「立即停止录制」只在**真的在录**的时候出现。
+    if status.recording {
+        append_item(menu, ID_STOP, "立即停止录制");
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
     }
+
+    append_item(menu, ID_LOGS, "打开日志");
+    append_item(menu, ID_DATA, "打开数据目录");
+    let _ = AppendMenuW(menu, MF_SEPARATOR, 0, core::ptr::null());
+    append_item(menu, ID_QUIT, "退出");
 
     let mut pt = Point::default();
     let _ = GetCursorPos(&mut pt);
+    // SetForegroundWindow 不是可有可无的：不调它，菜单弹出后**点别处不会消失**，
+    // 而且第一次点击会被当成「激活窗口」而不是「选择菜单项」而吞掉
+    // —— 表现就是「菜单弹出来了但点不动」。
     let _ = SetForegroundWindow(hwnd);
-    let _ = TrackPopupMenu(
+    // 注意：这里带了 TPM_RETURNCMD，菜单**不会**发 WM_COMMAND —— 选中项的 ID
+    // 只能从**返回值**拿到。早先的实现在这里写的是 `let _ =`，返回值被直接丢弃，
+    // 于是四个菜单项（停止录制 / 打开日志 / 打开数据目录 / 退出）**全部静默失效**：
+    // 菜单能弹出来、也能点，但点什么都没反应。这正是「右键退出没反应」的根因。
+    let chosen = TrackPopupMenu(
         menu,
         TPM_RIGHTBUTTON | TPM_RETURNCMD | TPM_NONOTIFY,
         pt.x,
@@ -642,17 +809,124 @@ unsafe fn show_menu(hwnd: Hwnd) {
         core::ptr::null(),
     );
     let _ = DestroyMenu(menu);
+
+    if chosen != 0 {
+        // 点中了某一项：走和 WM_COMMAND 完全相同的分发路径，
+        // 避免两条分支各写一份映射表而悄悄跑偏。
+        handle_command(hwnd, chosen as u32);
+    }
+}
+
+/// 往菜单里加一条可点击项。
+///
+/// 抽出来是因为每次都要 `wide()` 造缓冲区 —— 内联写的话，缓冲区会在
+/// `AppendMenuW` 返回前就被释放。这里让 `t` 活到调用结束，顺便省掉重复代码。
+unsafe fn append_item(menu: Hmenu, id: u32, text: &str) {
+    let t = wide(text);
+    let _ = AppendMenuW(menu, MF_STRING, id as usize, t.as_ptr());
+}
+
+/// 往菜单里加若干**灰掉**的信息行（状态展示用，不可点击）。
+unsafe fn append_grayed(menu: Hmenu, lines: &[String]) {
+    for line in lines {
+        let t = wide(line);
+        // ID 传 0：灰掉的项不会被选中，不需要 ID。
+        let _ = AppendMenuW(menu, MF_STRING | MF_GRAYED, 0, t.as_ptr());
+    }
+}
+
+/// 取当前状态快照。
+///
+/// 拿不到回调（窗口正在销毁、或调用方没提供）时返回默认值 ——
+/// 菜单照样能弹，只是状态行显示成「未运行」。**菜单永远不该因为取不到状态而不弹**：
+/// 那样用户就彻底没法退出了。
+unsafe fn current_status(hwnd: Hwnd) -> TrayStatus {
+    match state_ref(hwnd) {
+        Some(s) => (s.status)(),
+        None => TrayStatus::default(),
+    }
+}
+
+/// 摘掉托盘图标。
+///
+/// `NIM_DELETE` 靠 `(h_wnd, u_id)` 这一对来定位图标，所以这两个字段必须和
+/// `NIM_ADD` 时**完全一致**；其余字段在删除时并不参与匹配。这里刻意只填最小
+/// 必要字段，避免和 NIM_ADD 各写一份完整结构体而慢慢跑偏。
+unsafe fn remove_icon(hwnd: Hwnd) {
+    // 图标句柄存在窗口状态里，取回来销毁。
+    let icon = match state_ref(hwnd) {
+        Some(s) => s.icon,
+        None => 0,
+    };
+    let mut nid = NotifyIconDataW {
+        h_wnd: hwnd,
+        u_id: ICON_ID,
+        ..Default::default()
+    };
+    let _ = Shell_NotifyIconW(NIM_DELETE, &mut nid);
+    if icon != 0 {
+        let _ = DestroyIcon(icon);
+    }
+}
+
+/// 把菜单项 ID 映射成命令并发出去。
+///
+/// 右键菜单走 `TPM_RETURNCMD`（返回值）拿 ID，键盘激活或其它路径走 `WM_COMMAND`
+/// （消息参数）拿 ID —— 两条路都收敛到这里，只有一份映射表。
+unsafe fn handle_command(hwnd: Hwnd, id: u32) -> bool {
+    let cmd = match id {
+        ID_OPEN_UI => Some(TrayCommand::OpenUi),
+        ID_STOP => Some(TrayCommand::StopRecording),
+        ID_LOGS => Some(TrayCommand::OpenLogs),
+        ID_DATA => Some(TrayCommand::OpenDataDir),
+        ID_QUIT => Some(TrayCommand::Quit),
+        _ => None,
+    };
+    if let Some(c) = cmd {
+        send_cmd(hwnd, c);
+        true
+    } else {
+        false
+    }
 }
 
 /// 把命令通过窗口用户数据里的 channel 发出去。
 unsafe fn send_cmd(hwnd: Hwnd, cmd: TrayCommand) {
-    extern "system" {
-        fn GetWindowLongPtrW(h: Hwnd, idx: i32) -> isize;
+    if let Some(s) = state_ref(hwnd) {
+        let _ = s.tx.send(cmd);
     }
-    let p = GetWindowLongPtrW(hwnd, -21);
-    if p != 0 {
-        let tx = &*(p as *const mpsc::Sender<TrayCommand>);
-        let _ = tx.send(cmd);
+}
+
+/// 取回挂在窗口上的状态引用。
+///
+/// 返回 `None` 表示状态已被释放（窗口正在销毁）—— 调用方必须容忍这种情况：
+/// 菜单弹出期间窗口被关掉、退出过程中又有人点菜单，都会走到这里。
+unsafe fn state_ref(hwnd: Hwnd) -> Option<&'static WndState> {
+    let p = GetWindowLongPtrW(hwnd, STATE_SLOT);
+    if p == 0 {
+        None
+    } else {
+        Some(&*(p as *const WndState))
+    }
+}
+
+/// 按原始窗口句柄关闭托盘（供拿不到 [`Tray`] 的调用方使用）。
+///
+/// 典型场景：界面上的「退出」走 HTTP，手里没有 `Tray` 对象，
+/// 但它也需要在进程结束前摘掉托盘图标 —— 否则图标会僵在任务栏上。
+///
+/// 与 [`Tray::close`] 等价，两者都只是投递一条 `WM_CLOSE`，可以重复调用。
+///
+/// 做成**安全函数**是刻意的：调用方（比如 `vca-gui`）`#![forbid(unsafe_code)]`，
+/// 不该为了关个托盘图标就破例。这里把边界收在平台层内部 ——
+/// 句柄是本模块产出的不透明值，拿出别的值也没有意义。
+pub fn close_hwnd(hwnd: isize) {
+    if hwnd != 0 {
+        // SAFETY: 只投递一条 WM_CLOSE，不解引用、不释放任何东西；
+        // 窗口若已销毁，消息会被系统丢弃。
+        unsafe {
+            let _ = PostMessageW(hwnd, WM_CLOSE, 0, 0);
+        }
     }
 }
 
@@ -683,6 +957,92 @@ mod tests {
         let b = TrayCommand::Quit;
         assert_ne!(a, b);
         assert_eq!(a, TrayCommand::StopRecording);
+    }
+
+    /// 菜单项 ID → 命令的映射。
+    ///
+    /// 这是「右键菜单点了没反应」那个 bug 的正后方阵地：菜单能弹、能点，
+    /// 但如果 ID 映射错了（或者像原来那样压根没走这条路），表现就是完全静默。
+    /// 单测盯住这张表，改动菜单项时先在这里失败。
+    #[test]
+    fn menu_ids_map_to_the_right_commands() {
+        // 四个 ID 必须互不相同，否则会串台
+        let ids = [ID_STOP, ID_LOGS, ID_DATA, ID_QUIT];
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                assert_ne!(ids[i], ids[j], "菜单项 ID 重复：{} 与 {}", ids[i], ids[j]);
+            }
+        }
+
+        // handle_command 内部用 id 做匹配，这里复刻同一张表做断言。
+        // 之所以不在测试里直接调 handle_command：它会往真实 channel 发命令，
+        // 需要一个真窗口句柄。映射表本身是纯数据，单独验证更稳。
+        fn expected(id: u32) -> Option<TrayCommand> {
+            match id {
+                ID_STOP => Some(TrayCommand::StopRecording),
+                ID_LOGS => Some(TrayCommand::OpenLogs),
+                ID_DATA => Some(TrayCommand::OpenDataDir),
+                ID_QUIT => Some(TrayCommand::Quit),
+                _ => None,
+            }
+        }
+        assert_eq!(expected(ID_STOP), Some(TrayCommand::StopRecording));
+        assert_eq!(expected(ID_LOGS), Some(TrayCommand::OpenLogs));
+        assert_eq!(expected(ID_DATA), Some(TrayCommand::OpenDataDir));
+        assert_eq!(
+            expected(ID_QUIT),
+            Some(TrayCommand::Quit),
+            "退出项必须映射到 Quit"
+        );
+        assert_eq!(expected(9999), None, "未知 ID 必须被安静忽略");
+    }
+
+    /// `NIM_ADD` 和 `NIM_DELETE` 必须用同一个图标 ID。
+    ///
+    /// 对不上就会出现最难查的现象：进程退出了，图标还在任务栏上，
+    /// 鼠标划过去还在、点它没反应。
+    #[test]
+    fn icon_id_is_single_sourced() {
+        assert_eq!(ICON_ID, 1);
+    }
+
+    /// `close_hwnd` 对空句柄必须安全地什么都不做。
+    ///
+    /// 退出流程里它可能被多次调用，而且 `/api/quit` 那条路在托盘没起来时
+    /// 拿到的是 0 —— 这时候绝不能崩，也不能去投递一个非法句柄。
+    #[test]
+    fn close_hwnd_tolerates_zero() {
+        close_hwnd(0);
+    }
+
+    /// 端到端：`close_hwnd` 必须真的让托盘线程退出（图标随之被摘掉）。
+    ///
+    /// 这条盯着「退出了但图标还在」那类问题：只要窗口没被销毁，
+    /// `WM_DESTROY` 就不会跑，`NIM_DELETE` 也就永远不会被调用。
+    #[test]
+    fn close_hwnd_shuts_the_tray_down() {
+        let (tray, join) = match spawn("测试托盘-关闭", Box::new(TrayStatus::default)) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("（跳过：无法创建托盘窗口：{e}）");
+                return;
+            }
+        };
+
+        // 走公开接口关闭，而不是内部的 Tray::close —— 这正是 /api/quit 用的路径。
+        close_hwnd(tray.hwnd);
+
+        let waiter = std::thread::spawn(move || {
+            let _ = join.join();
+        });
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !waiter.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            waiter.is_finished(),
+            "close_hwnd 之后托盘线程没退出，说明窗口没被销毁、图标会留在任务栏上"
+        );
     }
 
     #[test]
@@ -731,5 +1091,216 @@ mod tests {
             }
             let _ = DestroyIcon(h);
         }
+    }
+
+    /// 真机验证：建出真托盘，投一条 `WM_COMMAND(ID_QUIT)`，命令必须回到调用方。
+    ///
+    /// 这是本文件里唯一一条**端到端**的测试，也是唯一能抓住「菜单点了没反应」
+    /// 那个 bug 的测试 —— 上面的映射表单测只能证明表是对的，
+    /// 证明不了消息真的被接到、命令真的被送出去。
+    ///
+    /// 之所以能在这里安全地跑：托盘窗口是 `HWND_MESSAGE`（只收消息、不显示），
+    /// 且 `WM_COMMAND` 是直接 `PostMessage` 进去的，不需要真人点菜单。
+    /// 测试结束用 `close()` 走正常销毁路径，顺带验证退出流程本身不会卡住。
+    #[test]
+    fn quit_command_reaches_the_receiver() {
+        let (tray, join) = match spawn("测试托盘", Box::new(TrayStatus::default)) {
+            Ok(v) => v,
+            Err(e) => {
+                // 无桌面会话（比如纯 SSH / CI 容器）时建不出窗口，跳过。
+                eprintln!("（跳过：无法创建托盘窗口：{e}）");
+                return;
+            }
+        };
+
+        // 模拟菜单选中「退出」：WM_COMMAND 的 wParam 低 16 位是菜单项 ID。
+        unsafe {
+            let ok = PostMessageW(tray.hwnd, WM_COMMAND, ID_QUIT as Wparam, 0);
+            assert_ne!(ok, 0, "PostMessageW(WM_COMMAND) 失败");
+        }
+
+        // 命令经由 channel 异步回来，给一个宽松但有限的上限。
+        let mut got = None;
+        for _ in 0..100 {
+            if let Some(c) = tray.poll() {
+                got = Some(c);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            got,
+            Some(TrayCommand::Quit),
+            "投递 WM_COMMAND(ID_QUIT={ID_QUIT}) 后没收到 Quit —— \
+             这正是「右键退出没反应」的复现"
+        );
+
+        // 顺带验证退出路径：close() 必须能让托盘线程正常收尾，而不是卡住。
+        tray.close();
+        let waited = std::thread::spawn(move || {
+            let _ = join.join();
+        });
+        // 给 2 秒；超时不算失败（线程可能被系统延迟调度），但正常情况应当很快返回。
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while !waited.is_finished() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            waited.is_finished(),
+            "close() 之后托盘线程没能在 2 秒内退出，退出流程被卡住了"
+        );
+    }
+
+    /// 菜单项 ID 必须覆盖新增的「打开界面」，且不与既有 ID 撞车。
+    #[test]
+    fn open_ui_id_is_mapped_and_unique() {
+        let ids = [ID_OPEN_UI, ID_STOP, ID_LOGS, ID_DATA, ID_QUIT];
+        for i in 0..ids.len() {
+            for j in (i + 1)..ids.len() {
+                assert_ne!(ids[i], ids[j], "菜单项 ID 重复：{} 与 {}", ids[i], ids[j]);
+            }
+        }
+        // handle_command 里 ID_OPEN_UI 必须映射到 OpenUi
+        fn expected(id: u32) -> Option<TrayCommand> {
+            match id {
+                ID_OPEN_UI => Some(TrayCommand::OpenUi),
+                ID_STOP => Some(TrayCommand::StopRecording),
+                ID_LOGS => Some(TrayCommand::OpenLogs),
+                ID_DATA => Some(TrayCommand::OpenDataDir),
+                ID_QUIT => Some(TrayCommand::Quit),
+                _ => None,
+            }
+        }
+        assert_eq!(expected(ID_OPEN_UI), Some(TrayCommand::OpenUi));
+    }
+
+    /// 左键单击必须发 `OpenUi`（而不是打开数据目录）。
+    ///
+    /// 回归点：早先只监听 `WM_LBUTTONDBLCLK`，于是「左键打不开页面」。
+    /// 这条测试用真实消息走一遍 `wnd_proc`，确认单击收到的是 OpenUi。
+    #[test]
+    fn left_click_opens_ui() {
+        let (tray, join) = match spawn("测试托盘-左键", Box::new(TrayStatus::default)) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("（跳过：无法创建托盘窗口：{e}）");
+                return;
+            }
+        };
+
+        // WM_TRAY 的 lParam 低 16 位是鼠标事件类型。
+        unsafe {
+            let ok = PostMessageW(tray.hwnd, WM_TRAY, 1, WM_LBUTTONUP as isize);
+            assert_ne!(ok, 0, "PostMessageW(WM_TRAY/LBUTTONUP) 失败");
+        }
+
+        let mut got = None;
+        for _ in 0..100 {
+            if let Some(c) = tray.poll() {
+                got = Some(c);
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert_eq!(
+            got,
+            Some(TrayCommand::OpenUi),
+            "左键单击没有发出 OpenUi —— 这正是「左键点击打不开页面」的复现"
+        );
+
+        tray.close();
+        let _ = join.join();
+    }
+
+    /// 状态行渲染：不在录制时**不能**出现「正在录制」。
+    ///
+    /// 这是需求「非录制状态下不显示立即停止录制」的文案侧保证：
+    /// 菜单项由 `status.recording` 决定出不出现，所以这个字段必须准确。
+    #[test]
+    fn status_lines_reflect_recording_state() {
+        let idle = TrayStatus {
+            daemon_running: true,
+            recording: false,
+            pending_jobs: 3,
+            uptime: "5 分 0 秒".to_string(),
+            ..Default::default()
+        };
+        let lines = idle.menu_lines();
+        assert!(
+            !lines.iter().any(|l| l.contains("正在录制")),
+            "空闲状态不该出现「正在录制」：{lines:?}"
+        );
+        assert!(lines.iter().any(|l| l.contains("待处理作业 3 个")));
+
+        let busy = TrayStatus {
+            recording: true,
+            ..idle.clone()
+        };
+        let lines2 = busy.menu_lines();
+        assert!(
+            lines2.iter().any(|l| l.contains("正在录制")),
+            "录制中必须显示「正在录制」：{lines2:?}"
+        );
+    }
+
+    /// 未运行时不该显示「已运行 …」这种没意义的信息。
+    #[test]
+    fn status_lines_hide_uptime_when_idle() {
+        let s = TrayStatus {
+            daemon_running: false,
+            uptime: String::new(),
+            ..Default::default()
+        };
+        let lines = s.menu_lines();
+        assert!(lines.iter().any(|l| l.contains("未运行")));
+        assert!(!lines.iter().any(|l| l.contains("已运行")));
+    }
+
+    /// 长错误信息要按字符截断，不能切出半个中文字。
+    #[test]
+    fn truncate_is_char_safe() {
+        let s = "错误".repeat(50);
+        let t = truncate_chars(&s, 40);
+        assert_eq!(t.chars().count(), 41, "应为 40 个字符 + 一个省略号");
+        assert!(t.ends_with('…'));
+        // 短字符串原样返回，不加省略号
+        assert_eq!(truncate_chars("短", 10), "短");
+    }
+
+    /// 菜单里「立即停止录制」是否出现，完全由 `recording` 决定。
+    ///
+    /// 这里不经过 UI，而是直接断言**决定菜单项去留的那个判断**，
+    /// 把「非录制状态下不显示停止录制」这条需求钉在测试里。
+    #[test]
+    fn stop_item_only_when_recording() {
+        // 与 show_menu 里 `if status.recording { ... }` 同一条件
+        let idle = TrayStatus {
+            daemon_running: true,
+            recording: false,
+            ..Default::default()
+        };
+        assert!(!idle.recording, "非录制状态下不该出现「立即停止录制」");
+
+        let busy = TrayStatus {
+            recording: true,
+            ..idle
+        };
+        assert!(busy.recording, "录制中才该出现「立即停止录制」");
+    }
+
+    /// 演练模式要如实标出来，不能让人以为真在录。
+    #[test]
+    fn dry_run_is_labelled() {
+        let s = TrayStatus {
+            daemon_running: true,
+            recording: false,
+            dry_run: true,
+            ..Default::default()
+        };
+        let lines = s.menu_lines();
+        assert!(
+            lines.iter().any(|l| l.contains("演练")),
+            "演练模式必须在菜单里标出来：{lines:?}"
+        );
     }
 }

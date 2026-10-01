@@ -424,7 +424,8 @@
       "timetable": "Timetable",
       "schedule": "Class plan",
       "record": "Recording",
-      "jobs": "Jobs"
+      "jobs": "Jobs",
+      "logs": "Logs"
     },
     "side": {
       "llm": "Model",
@@ -692,7 +693,22 @@
       "rule_enabled": "Enabled by default",
       "period_n": "Period {n}",
       "cell_ph": "—",
-      "unnamed": "Untitled"
+      "unnamed": "Untitled",
+      "bulk_all": "Select all",
+      "bulk_none": "Clear all",
+      "bulk_invert": "Invert",
+      "bulk_scope_filtered": "({n} shown)",
+      "bulk_scope_all": "(all {n})",
+      "filter_ph": "Filter by course / teacher...",
+      "filter_clear": "Clear",
+      "count_selected": "{n} of {m} selected",
+      "count_none": "Nothing to select",
+      "empty_no_course": "The timetable is empty. Fill in some course cells above first.",
+      "empty_filtered": "No match. Try another keyword, or clear the filter.",
+      "need_pick": "Nothing selected. Tick at least one lesson first - an empty selection is not saved.",
+      "saved_zero": "Saved: no lesson will be recorded.",
+      "select_all_first": "Select at least one lesson first",
+      "count_in_filter": "{n} of {m} shown selected"
     },
     "rc": {
       "title": "Recording",
@@ -789,6 +805,41 @@
       "log_refresh": "Refresh",
       "log_clear": "Clear view",
       "log_cleared": "(view cleared; the log file is still on disk)"
+    },
+    "lg": {
+      "title": "Runtime log",
+      "hint": "Everything the program prints is collected here. The console window is no longer shown, so this is the only live channel - startup, recording, transcription and pushing all write into it.",
+      "level": "Level",
+      "level_all": "All",
+      "follow": "Follow",
+      "reload": "Reload",
+      "copy": "Copy",
+      "clear": "Clear",
+      "cleared": "Cleared the on-screen log. The ui.log file on disk was kept.",
+      "copied": "Copied to clipboard.",
+      "copy_failed": "Copy failed - select the text and press Ctrl+C.",
+      "empty": "No log yet. Entries appear once the program starts, records, or processes a job.",
+      "filter_empty": "Nothing at this level. Switch to All to see everything.",
+      "count": "{n} lines",
+      "count_filtered": "{n} / {m} lines",
+      "file": "Full log file:",
+      "file_missing": "Log file (not created yet):"
+    },
+    "deps": {
+      "title": "Missing components",
+      "lead": "The app needs a few external components to work fully. The ones missing are listed below. Click OK and it will download them automatically — no manual setup needed.",
+      "tag_required": "Required",
+      "tag_optional": "Optional",
+      "download_note": "This needs a network connection and about 125 MB in total. Keep this window open while it downloads.",
+      "ok": "OK, fix it",
+      "later": "Later",
+      "fetching": "Downloading…",
+      "starting": "Checking…",
+      "failed": "Could not start",
+      "retry": "Retry",
+      "done": "All components ready",
+      "done_note": "Everything is in place now.",
+      "still_missing": "Some components are still missing. Check your connection and retry, or set a proxy and restart."
     }
   }
 }

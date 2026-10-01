@@ -552,15 +552,47 @@ pub fn http_server_port(cfg: &serde_json::Value) -> Option<u16> {
         })
 }
 
-/// 在配置里确保有一个开着的 HTTP 服务端，返回（配置文件路径, 端口, 是否改动了）。
+/// OneBot HTTP 服务端绑定的地址。
+///
+/// **固定回环**。这个接口能发消息、能读会话、能上传文件，等于一个不要密码的
+/// QQ 遥控器；而 VCA 的推送与调用都发生在同一台机器上，没有任何理由对外监听。
+/// 早先这里写的是 `0.0.0.0`，那会让同一校园网里的任意设备直接调用
+/// `/send_group_msg` —— 校园网不是可信边界，默认值不能这么定。
+pub const ONEBOT_BIND_HOST: &str = "127.0.0.1";
+
+/// OneBot HTTP 服务端的令牌最小长度。
+///
+/// OneBot 的 `token` 只有「有 / 没有」两态，没有别的认证手段，
+/// 空 token 等于完全不校验。所以这里直接拒绝，而不是「尽力而为」地放行。
+pub const MIN_ONEBOT_TOKEN_LEN: usize = 16;
+
+/// 在配置里确保有一个开着的 HTTP 服务端，返回（配置路径, 是否改动了）。
 ///
 /// 只在 `network.httpServers` 里认领 `name == HTTP_SERVER_NAME` 的那一条：
 /// 已经有就改它，没有就追加。别的条目一律不动。
+///
+/// # 安全约定（强制，不是默认值）
+///
+/// - `host` 固定为 [ONEBOT_BIND_HOST]（回环），不接受调用方指定；
+/// - `token` 必须达到 [MIN_ONEBOT_TOKEN_LEN]，否则直接报错。
+///
+/// 这两条一旦放松，等于把 QQ 号交给整个网段。
 pub fn ensure_http_server(
     root: &Path,
     port: u16,
     token: &str,
 ) -> Result<(PathBuf, bool), anyhow::Error> {
+    let token = token.trim();
+    if token.len() < MIN_ONEBOT_TOKEN_LEN {
+        return Err(anyhow!(
+            "OneBot 令牌太短（当前 {} 位，至少 {} 位）。\n\
+             这个 HTTP 接口能直接发消息，没有令牌就等于没有锁 —— \
+             请在界面上点「生成令牌」，或自己填一串足够长的随机字符。",
+            token.len(),
+            MIN_ONEBOT_TOKEN_LEN
+        ));
+    }
+
     let path = find_onebot_config(root).ok_or_else(|| {
         anyhow!(
             "没找到 NapCat 的 OneBot 配置文件（应该在 {} 下的 config/onebot11_<QQ>.json）。\n\
@@ -580,7 +612,7 @@ pub fn ensure_http_server(
     let entry = serde_json::json!({
         "enable": true,
         "name": HTTP_SERVER_NAME,
-        "host": "0.0.0.0",
+        "host": ONEBOT_BIND_HOST,
         "port": port,
         "enableCors": true,
         // array 是 OneBot 11 的默认消息格式，绝大多数对接方都吃这个

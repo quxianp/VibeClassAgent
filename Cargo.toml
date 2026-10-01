@@ -50,7 +50,16 @@ thiserror = "1"
 # 在 GNU 工具链下需要 dlltool 生成 raw-dylib 导入库。守护进程不需要彩色终端。
 clap = { version = "4", default-features = false, features = ["std", "derive", "help", "usage", "error-context", "suggestions"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter"] }
+# registry：Layer 组合（内存日志缓冲 + fmt 同时挂）需要它。
+# fmt 特性本身已经依赖 registry，这里显式写出来是因为
+# `tracing_subscriber::registry()` 这个入口要它自己开着才可见。
+tracing-subscriber = { version = "0.3", default-features = false, features = ["std", "fmt", "env-filter", "registry"] }
+
+# rand：只用来生成各类令牌（界面会话令牌 / 预览令牌 / OneBot HTTP 令牌）。
+# 之前用「时间戳 ^ pid + 位混合」凑随机，看着够乱但**没有熵来源** ——
+# 时间戳可猜，同一毫秒的候选空间极小，长期有效的令牌尤其危险（评审 R-11）。
+# 版本与锁文件里已有的那份保持一致，避免多拉一个 rand_core。
+rand = "0.10"
 
 # --- Windows 平台 API ---
 # WASAPI 音频采集需要 IMMDevice / IAudioClient；IMMDevice::Activate<T> 的

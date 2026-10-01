@@ -34,6 +34,7 @@ pub mod secrets;
 pub mod setup;
 pub mod store;
 pub mod time;
+pub mod token;
 pub mod windows;
 
 /// 项目版本号（取自 Cargo.toml）。

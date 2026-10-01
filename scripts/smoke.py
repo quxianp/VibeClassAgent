@@ -165,7 +165,13 @@ class Api:
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 return r.status, json.loads(r.read().decode())
         except urllib.error.HTTPError as e:
-            return e.code, None
+            # 后端在 4xx/5xx 时也会回 {"ok":false,"error":"…"}。
+            # 以前这里直接丢掉响应体，只留状态码 —— 断言失败时看到的是空 {}，
+            # 完全不知道后端说了什么。现在把原文读出来。
+            try:
+                return e.code, json.loads(e.read().decode())
+            except Exception:  # noqa: BLE001
+                return e.code, {"_error": "响应体不是 JSON"}
         except Exception as e:  # noqa: BLE001
             return 0, {"_err": str(e)}
 
@@ -640,7 +646,7 @@ def run_checks(api: Api, base: str, mock: MockOneBot, cfg: Path) -> None:
             "cfg": r.get("onebot_config"), "port": r.get("onebot_http_port"),
             "qq": r.get("onebot_qq")}, ensure_ascii=False)[:200])
 
-    r = api.call("/api/bot/napcat/configure", {"port": 3123, "token": "smoke-token"})[1] or {}
+    r = api.call("/api/bot/napcat/configure", {"port": 3123, "token": "smoke-napcat-token-0001"})[1] or {}
     if r.get("ok") and r.get("changed") is True and r.get("port") == 3123:
         ok("一键配置写入成功", f"QQ {r.get('qq')} / 端口 {r.get('port')}")
     else:
@@ -652,7 +658,7 @@ def run_checks(api: Api, base: str, mock: MockOneBot, cfg: Path) -> None:
     mine = [x for x in servers if x.get("name") == "vibeclassagent"]
     others = written.get("network", {}).get("websocketClients", [])
     if (len(mine) == 1 and mine[0].get("enable") is True
-            and mine[0].get("port") == 3123 and mine[0].get("token") == "smoke-token"):
+            and mine[0].get("port") == 3123 and mine[0].get("token") == "smoke-napcat-token-0001"):
         ok("配置内容正确", f"enable/port/token 都对，条目数 {len(servers)}")
     else:
         bad("配置内容", json.dumps(servers, ensure_ascii=False)[:200])
@@ -668,7 +674,7 @@ def run_checks(api: Api, base: str, mock: MockOneBot, cfg: Path) -> None:
         bad("没有备份", "改坏了就没法回滚")
 
     # 幂等：再点一次不该重复追加
-    r = api.call("/api/bot/napcat/configure", {"port": 3123, "token": "smoke-token"})[1] or {}
+    r = api.call("/api/bot/napcat/configure", {"port": 3123, "token": "smoke-napcat-token-0001"})[1] or {}
     again = json.loads(onebot.read_text(encoding="utf-8"))
     n2 = len([x for x in again["network"]["httpServers"] if x.get("name") == "vibeclassagent"])
     if r.get("ok") and n2 == 1:
@@ -814,11 +820,14 @@ def run_checks(api: Api, base: str, mock: MockOneBot, cfg: Path) -> None:
         ok("占位符如实回读（不会被当成已配置）")
     else:
         bad("占位符回读", str(g))
-    st, _ = api.call("/api/not-exist")
-    if st == 200:
-        ok("未知接口返回结构化错误（HTTP 200 + ok:false）")
+    # 未知接口必须回 404，而不是 200 + ok:false。
+    # 旧实现一律 200，于是浏览器 devtools、任何 HTTP 客户端、
+    # 以及脚本化调用都看不出失败（评审 R-10）。
+    st, body = api.call("/api/not-exist")
+    if st == 404:
+        ok("未知接口返回 HTTP 404")
     else:
-        bad("未知接口", f"HTTP {st}")
+        bad("未知接口", f"HTTP {st}（应为 404）")
 
     print("\n[10] 退出", flush=True)
     r = api.call("/api/quit", {}, timeout=5)[1] or {}

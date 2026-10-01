@@ -6,6 +6,19 @@
 //!
 //! 已实现：doctor / config / overlay / run / clean / plugin / import / debug。
 //! 预留：timetable / schedule / record / task / market / log / profile。
+//!
+//! # 为什么没有 `#![windows_subsystem = "windows"]`
+//!
+//! 那个属性会把 exe 编成 GUI 子系统，双击确实不会弹控制台 —— 但它是
+//! **编译期**的，而这个程序同时要当命令行工具（`vca doctor`、`vca plugin list`
+//! 都是靠 stdout 干活的，要能重定向进脚本和计划任务）。
+//! 编成 GUI 子系统后 stdout 就没有接收端了，`vca doctor > out.txt` 会得到空文件，
+//! `| Select-String` 也拿不到东西 —— 拿"少一个窗口"换掉整个 CLI 用法不划算。
+//!
+//! 所以改成**运行期**判断：GUI 模式下调 [`vca_platform::console::hide()`] 把
+//! 窗口藏掉，CLI 模式完全不碰。同一个二进制两种行为，两边都不牺牲。
+//!
+//! 相关的取舍细节见 `hide_console_for_gui` 与 `vca_platform::console`。
 
 #![forbid(unsafe_code)]
 
@@ -166,7 +179,9 @@ enum Command {
 }
 
 fn main() -> Result<()> {
-    // 先把控制台切到 UTF-8，否则中文在简中 Windows 上是乱码
+    // 先把控制台切到 UTF-8，否则中文在简中 Windows 上是乱码。
+    // **必须在 hide_console_for_gui 之前**：一旦 FreeConsole，
+    // 这个调用就无效了（而 CLI 模式下我们仍然需要它）。
     vca_platform::session::ensure_utf8_console();
 
     // 双击 exe 时用户的控制台里没有任何父进程，输出会一闪而过、
@@ -177,7 +192,13 @@ fn main() -> Result<()> {
         let (layout, _) = build_layout(&cli);
         // 界面模式：日志额外落一份文件，界面上才看得到守护进程在干什么
         std::env::set_var("VCA_UI", "1");
+        // 隐藏控制台窗口：GUI 模式下那个黑框纯属碍眼。
+        // 顺序很关键 —— 必须在 init_tracing **之前**做完，否则第一条日志
+        // 会先写进一个马上要被藏掉的控制台里，用户瞥见半行字就没了。
+        // 结果说明留到 tracing 就绪之后再记（见该函数的文档）。
+        let console_note = hide_console_for_gui();
         init_tracing(&layout);
+        tracing::info!("{console_note}");
         return run_gui(
             &layout,
             cli.profile.as_deref().unwrap_or("default"),
@@ -190,15 +211,32 @@ fn main() -> Result<()> {
     let (layout, path_source) = build_layout(&cli);
 
     // 界面模式（不带子命令或显式 gui）下日志要落文件 —— 让 init_tracing 知道
-    if matches!(cli.command, None | Some(Command::Gui { .. })) {
+    let is_gui = matches!(cli.command, None | Some(Command::Gui { .. }));
+    let console_note = if is_gui {
         std::env::set_var("VCA_UI", "1");
-    }
+        // 同上：先藏窗口，后起日志
+        Some(hide_console_for_gui())
+    } else {
+        None
+    };
     init_tracing(&layout);
+    if let Some(n) = console_note {
+        tracing::info!("{n}");
+    }
 
     // 载入本地凭据文件（secrets.env）。放在这里、且在任何命令之前：
     // 后面所有模块读的都是环境变量，少一处加载就会有一个功能悄悄降级。
     // 只补缺失的键，真环境变量优先级更高。
     let _ = vca_core::secrets::load_into_env(&vca_core::secrets::default_path(&layout.config_root));
+
+    // profile 是外部输入（--profile），而它会被直接拼进 data/config 的目录路径。
+    // 在这里统一把关：放一个 `..` 或 `C:\` 进去，作业目录就能写到根之外。
+    // 校验点放在 main 而不是各子命令 —— 每个命令都要用它，分散校验必然漏掉某条路径。
+    if let Some(p) = cli.profile.as_deref() {
+        if let Err(e) = vca_core::paths::validate_profile_name(p) {
+            anyhow::bail!("{e}");
+        }
+    }
 
     // 只在「不是便携模式」时提醒一次位置，避免每次启动都刷屏；
     // 用户需要知道自己的录像到底躺哪儿。
@@ -275,13 +313,56 @@ fn run_gui(
     })
 }
 
+/// 隐藏控制台窗口（仅 GUI 模式调用），返回一句可记录的结果说明。
+///
+/// # 为什么返回说明而不是自己记日志
+///
+/// 调用点在 `init_tracing` **之前** —— 必须在第一条日志写出之前就把控制台
+/// 藏掉，否则用户会看到黑框里闪半行字再消失。但那样一来，这个函数里的
+/// `tracing::info!` 就没有订阅者，日志会被静默丢弃（实测过：日志页里
+/// 找不到这一条，"到底隐藏成功没有"反而查不到了）。
+///
+/// 所以：这里只做事、返回描述，由调用方在 tracing 就绪之后再写。
+///
+/// # 为什么要有 `VCA_KEEP_CONSOLE` 这个后门
+///
+/// 隐藏控制台会让 `println!` 的输出无处可去。当用户报告
+/// "启动就闪退、什么提示都没有"时，需要一个办法把控制台找回来。
+fn hide_console_for_gui() -> String {
+    // 用了这个开关的场景本身就是"我要看输出"，所以要明确说一句
+    // "控制台是你要的，不是我们忘了隐藏"
+    if std::env::var("VCA_KEEP_CONSOLE").is_ok() {
+        eprintln!("[VCA] VCA_KEEP_CONSOLE=1，保留控制台窗口（仅用于排查问题）");
+        return "控制台窗口：按 VCA_KEEP_CONSOLE=1 的要求保留".to_string();
+    }
+
+    let had = vca_platform::console::has_console();
+    let hidden = vca_platform::console::hide();
+    match (hidden, had) {
+        (true, _) => "控制台窗口已隐藏（输出见本页日志）".to_string(),
+        (false, true) => "控制台窗口隐藏失败，窗口仍在".to_string(),
+        (false, false) => "启动时就没有控制台窗口".to_string(),
+    }
+}
+
 /// 初始化日志。`RUST_LOG` 控制级别，默认 `info`。
 ///
-/// 界面模式（`VCA_UI=1`）下额外写一份 `<数据目录>/logs/ui.log`：
-/// 守护进程跑在后台线程里，它的输出如果只走 stdout，用户在界面上
-/// 就完全看不到"它到底在干什么" —— 而看不到的东西最容易让人以为坏了。
+/// # 三个去处
+///
+/// 1. **内存环形缓冲**（[`vca_platform::logbuf`]）—— 界面「日志」页读它。
+///    这是 GUI 模式下最主要的去处，因为控制台窗口被隐藏了。
+/// 2. **`<数据目录>/logs/ui.log`** —— 界面模式额外写一份。
+///    守护进程跑在后台线程里，出问题时用户在界面上可能已经翻过了，
+///    文件能留着事后查。
+/// 3. **stdout** —— CLI 模式保留（`vca doctor`、`vca plugin list`
+///    这些就是靠 stdout 干活的），GUI 模式下由于控制台已经隐藏，
+///    这一路实际不可见，但没有副作用。
+///
+/// 三路是叠加的，任何一个都不是"替代"关系 —— 所以隐藏控制台不会丢日志。
 fn init_tracing(layout: &vca_core::paths::Layout) {
+    use tracing_subscriber::prelude::*;
     use tracing_subscriber::{fmt, EnvFilter};
+
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
     if std::env::var("VCA_UI").is_ok() {
@@ -294,17 +375,35 @@ fn init_tracing(layout: &vca_core::paths::Layout) {
             .append(true)
             .open(&path)
         {
-            let _ = fmt()
-                .with_env_filter(filter)
-                .with_target(false)
-                .with_ansi(false) // 文件里不需要颜色转义
-                .with_writer(std::sync::Mutex::new(f))
+            // 文件 layer + 内存 layer 同时挂上。
+            //
+            // 用 fmt::layer() 而不是 fmt().finish()：
+            // 后者产出的是 Subscriber（完整订阅者），不能当 Layer 再叠一个；
+            // 前者才是可组合的 Layer。这两个混用会报
+            // "FmtSubscriber: Layer<...> is not satisfied" —— 名字很像，
+            // 但一个能叠一个不能。
+            let _ = tracing_subscriber::registry()
+                .with(filter)
+                .with(
+                    fmt::layer()
+                        .with_target(false)
+                        .with_ansi(false) // 文件里不需要颜色转义
+                        .with_writer(std::sync::Mutex::new(f)),
+                )
+                .with(vca_platform::logbuf::layer())
                 .try_init();
             return;
         }
     }
 
-    let _ = fmt().with_env_filter(filter).with_target(false).try_init();
+    // 非界面模式（CLI）：stdout + 内存缓冲。
+    // 内存缓冲在这里看着多余，但 CLI 与界面可能同在一个进程里跑
+    // （`vca gui` 启动的守护线程就属于这种情况），挂上它没有代价。
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(fmt::layer().with_target(false))
+        .with(vca_platform::logbuf::layer())
+        .try_init();
 }
 
 /// 依据命令行与环境变量覆盖目录布局，并说明最终位置的来源。

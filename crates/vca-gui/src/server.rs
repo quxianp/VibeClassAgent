@@ -116,7 +116,17 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
             Ok(how) => tracing::info!("已用「{how}」打开界面"),
             Err(e) => {
                 // 打不开浏览器不该让程序退出：地址已经打出来了，用户手动点开也能用。
-                tracing::warn!("自动打开浏览器失败（{e}），请手动访问上面的地址");
+                // 但**不能只写日志** —— 用户看到的会是「双击了没反应，只有托盘图标」，
+                // 完全不知道发生了什么。所以必须通过托盘气泡把地址告诉他。
+                tracing::warn!("自动打开浏览器失败（{e}），已把地址放进托盘提示");
+                // 托盘句柄可能还没就绪（比如托盘被用户在配置里关了），
+                // 那种情况下拿不到气泡可用 —— 但地址仍然写在日志里。
+                match TRAY_HWND.get() {
+                    Some(h) => {
+                        vca_platform::tray::notify_fallback_url(*h, &url);
+                    }
+                    None => tracing::warn!("托盘不可用，只能手动访问：{url}"),
+                }
             }
         }
         clock.mark("已拉起浏览器（之后的耗时都在浏览器侧）");
@@ -196,11 +206,22 @@ fn warm_up_profile() {
                 return;
             };
             let started = std::time::Instant::now();
-            // 用 `--headless` 起一个最小实例：不画窗口、不进任务栏，
-            // 但照样会把 profile 目录建出来 —— 这正是我们要的副作用。
+            // ⚠️⚠️ 这里的 profile 目录**必须**和正式窗口用的那个不同。
             //
-            // 注意这里**不能**带 `--user-data-dir` 以外的业务参数，
-            // 尤其是不能带 `--app=`：那会真的开出一个窗口。
+            // 血泪教训（本轮真实故障：双击后只有托盘、没有窗口）：
+            // 最初这里传的是 `vca_temp_dir()` —— 和 `open_app_window` 用**同一个**目录。
+            // 而 Chromium/Edge 的规则是「一个 user-data-dir 只能有一个浏览器进程」：
+            // 预热进程先起来占了那个 profile，紧接着正式启动 `--app=` 时，
+            // Edge 不会开新窗口，而是把这个请求**交给已经在跑的那个进程** ——
+            // 那个进程是 `--headless`，于是**永远不会有窗口出现**。
+            // 从外面看就是"托盘有图标、页面没出来"，而且日志里一切正常
+            // （因为 spawn 确实成功了），极难排查。
+            //
+            // 所以预热改用旁边一个独立的 `-warm` 目录：
+            // 它照样能让 Edge 把资源解压/缓存到磁盘层（那部分是跨 profile 共享的），
+            // 但**绝不占用**正式窗口要用的那个 profile。
+            let warm_profile = profile.with_file_name("ui-profile-warm");
+
             let child = Command::new(exe)
                 .args([
                     "--headless",
@@ -211,7 +232,7 @@ fn warm_up_profile() {
                     "--disable-background-networking",
                     "--disable-features=msEdgeBackgroundPreload,Translate,msEdgeTranslate",
                 ])
-                .arg(format!("--user-data-dir={}", profile.display()))
+                .arg(format!("--user-data-dir={}", warm_profile.display()))
                 .arg("about:blank")
                 .spawn();
 
@@ -692,10 +713,27 @@ fn make_token() -> String {
 fn open_app_window(url: &str) -> Result<&'static str> {
     for cand in edge_candidates() {
         if cand.is_file() {
-            Command::new(cand)
+            let mut child = Command::new(&cand)
                 .args(edge_args(url, &vca_temp_dir()))
                 .spawn()
                 .context("启动 Edge 失败")?;
+
+            // ⚠️ 光看 spawn 成功是不够的 —— 它只说明"进程创建了"，
+            // 不说明"窗口出来了"。Edge 完全可能起来 200ms 后就崩
+            // （缺 DLL、profile 被占、被安全软件拦），
+            // 而用户看到的是"双击了没反应，只有托盘图标"。
+            //
+            // 真实故障（本轮）：预热进程占着同一个 profile，正式启动会把
+            // 请求交给那个 headless 进程，于是**窗口永远不出现，而日志全绿**。
+            // 所以这里必须**实际观察一会儿**：进程若在极短时间内自己退出，
+            // 就说明它没成功撑起窗口，应当报告失败并继续尝试下一个候选。
+            if let Some(code) = died_immediately(&mut child) {
+                tracing::warn!(
+                    "Edge 启动后立刻退出（exit={code:?}），换下一个方式试试：{}",
+                    cand.display()
+                );
+                continue;
+            }
             return Ok("Edge 应用模式");
         }
     }
@@ -711,6 +749,40 @@ fn open_app_window(url: &str) -> Result<&'static str> {
     #[cfg(not(windows))]
     {
         anyhow::bail!("当前平台没有可用的浏览器启动方式")
+    }
+}
+
+/// 观察一小会儿：如果子进程已经退出了，返回它的退出码。
+///
+/// 返回 `None` 表示"还活着"（正常，说明它撑住并开了窗口）。
+///
+/// # 为什么需要这个
+///
+/// `spawn()` 成功 ≠ 窗口出现。Edge 可以在 200 毫秒内崩掉
+/// （profile 被别的实例占着、缺 VC++ 运行库、被安全软件拦），
+/// 而 `spawn` 照样返回 `Ok`。不检查的话，程序会认为"界面已经打开了"，
+/// 用户那边却是"双击没反应，只有托盘图标"，且日志里没有任何异常 ——
+/// 这是最难查的一类故障。
+///
+/// # 为什么是 1.2 秒
+///
+/// 太短抓不住真实崩溃（Edge 起进程到报错通常要几百毫秒），
+/// 太长会把正常启动也拖慢。1.2 秒足够覆盖"起不来"的情况，
+/// 而正常启动时这几百毫秒落在用户按下列 alt-tab 之前，感知不到。
+fn died_immediately(child: &mut std::process::Child) -> Option<Option<i32>> {
+    let deadline = std::time::Duration::from_millis(1200);
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(status.code()),
+            Ok(None) => {}
+            // 查询失败（比如进程已被回收）：当作没崩，不误报
+            Err(_) => return None,
+        }
+        if start.elapsed() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(80));
     }
 }
 
@@ -908,6 +980,67 @@ mod tests {
         assert!(
             took < std::time::Duration::from_millis(1500),
             "warm_up_profile 阻塞了 {took:?} —— 它必须是后端异步的"
+        );
+    }
+
+    /// 预热用的 profile 目录**必须**和正式窗口用的不同。
+    ///
+    /// 守的是一个真实故障（用户报「双击后只有托盘图标、没有界面」）：
+    /// 两者共用同一个 `--user-data-dir` 时，Chromium/Edge 的
+    /// 「一个 profile 只能有一个浏览器进程」规则会让正式启动的 `--app=`
+    /// 把请求**交给已经在跑的 headless 预热进程** —— 于是窗口永远不出现，
+    /// 而日志里一切正常（`spawn` 确实成功了）。这是最难查的一类故障。
+    #[test]
+    fn warmup_profile_differs_from_window_profile() {
+        let window_profile = vca_temp_dir();
+        let warm_profile = window_profile.with_file_name("ui-profile-warm");
+
+        assert_ne!(
+            window_profile, warm_profile,
+            "预热 profile 和窗口 profile 是同一个目录 —— 正式窗口会被预热进程吞掉，\
+             表现为「只有托盘图标、没有界面」"
+        );
+        assert!(
+            !window_profile.starts_with(&warm_profile)
+                && !warm_profile.starts_with(&window_profile),
+            "两个 profile 存在包含关系，仍会互相干扰"
+        );
+    }
+
+    /// `died_immediately` 必须能识别「起来就死」的进程。
+    ///
+    /// 这是「spawn 成功 ≠ 窗口出现」那半个 bug 的守门测试：
+    /// 不检查的话，Edge 秒退时程序会以为界面已经开好了。
+    #[test]
+    #[cfg(windows)]
+    fn died_immediately_detects_a_process_that_exits() {
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "exit 3"])
+            .spawn()
+            .expect("起 cmd 失败");
+        let got = died_immediately(&mut child);
+        assert!(
+            got.is_some(),
+            "没识别出已经退出的进程 —— Edge 秒退时程序会以为界面开好了，用户却在干等"
+        );
+    }
+
+    /// 活着的进程不能被误判成「崩了」，否则每次启动都白等 1.2 秒
+    /// 并且错误地放弃 Edge 方式。
+    #[test]
+    #[cfg(windows)]
+    fn died_immediately_lets_a_live_process_through() {
+        // ping 本机跑约 2 秒，比 1.2 秒的观察窗口长
+        let mut child = std::process::Command::new("cmd")
+            .args(["/C", "ping 127.0.0.1 -n 3 > NUL"])
+            .spawn()
+            .expect("起 ping 失败");
+        let got = died_immediately(&mut child);
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(
+            got.is_none(),
+            "把一个还活着的进程误判成崩溃了（返回 {got:?}）"
         );
     }
 

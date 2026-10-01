@@ -53,9 +53,15 @@ const WM_TRAY: u32 = 0x8000 + 100;
 
 const NIM_ADD: u32 = 0;
 const NIM_DELETE: u32 = 2;
+/// 修改已有图标（用于弹气泡）。
+const NIM_MODIFY: u32 = 1;
 const NIF_MESSAGE: u32 = 0x01;
 const NIF_ICON: u32 = 0x02;
 const NIF_TIP: u32 = 0x04;
+/// 这次调用要弹一个气泡通知（配合 `sz_info` / `sz_info_title`）。
+const NIF_INFO: u32 = 0x10;
+/// 气泡样式：普通信息（不是警告/错误图标，不带声音）。
+const NIIF_INFO: u32 = 0x01;
 
 const MF_STRING: u32 = 0x0000;
 const MF_SEPARATOR: u32 = 0x0800;
@@ -928,6 +934,51 @@ pub fn close_hwnd(hwnd: isize) {
             let _ = PostMessageW(hwnd, WM_CLOSE, 0, 0);
         }
     }
+}
+
+/// 界面窗口没打开成功时，**用托盘气泡把地址告诉用户**。
+///
+/// # 为什么必须做这个
+///
+/// 真实故障：双击程序后只有托盘图标、没有界面。此时程序其实**是好的** ——
+/// HTTP 服务已经在跑，地址也生成好了，只是"拉起浏览器"这一步失败了
+/// （Edge 崩了、被安全软件拦了、profile 被占……）。
+///
+/// 但原来的代码只写了一句 `tracing::warn!` 就完事了。用户看不到日志，
+/// 看到的是"双击了没反应" —— 他不知道程序活着，更不知道手动打开地址就能用。
+///
+/// 所以这里补上最后一段：**用托盘气泡把地址送到用户眼前**。
+/// 这是"程序没坏但用户以为坏了"和"用户知道怎么办"之间的差别。
+///
+/// 气泡里放得下地址就行，不放长说明文字 —— Windows 气泡本身会截断。
+///
+/// # 失败时静默
+///
+/// 气泡只是锦上添花。托盘图标不在（用户关了）或系统不让弹（专注助手），
+/// 都不该让程序出问题 —— 所以返回 `bool` 但调用方可以不看。
+pub fn notify_fallback_url(hwnd: isize, url: &str) -> bool {
+    if hwnd == 0 {
+        return false;
+    }
+    let mut nid = NotifyIconDataW {
+        cb_size: std::mem::size_of::<NotifyIconDataW>() as u32,
+        ..Default::default()
+    };
+    nid.h_wnd = hwnd;
+    nid.u_id = ICON_ID;
+    nid.u_flags = NIF_INFO;
+    // 标题短一点，内容放地址 —— 用户一眼能照着手输
+    let title = wide("界面没有自动打开");
+    let body = wide(url);
+    let n = title.len().min(nid.sz_info_title.len());
+    nid.sz_info_title[..n].copy_from_slice(&title[..n]);
+    let n = body.len().min(nid.sz_info.len());
+    nid.sz_info[..n].copy_from_slice(&body[..n]);
+    nid.dw_info_flags = NIIF_INFO;
+
+    // SAFETY: nid 已按 cbSize 正确初始化，句柄是本模块产出的；
+    // Shell_NotifyIconW 只读取该结构体，不持有引用。
+    unsafe { Shell_NotifyIconW(NIM_MODIFY, &mut nid) != 0 }
 }
 
 #[cfg(test)]

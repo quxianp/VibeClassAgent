@@ -1,7 +1,18 @@
 # 前端接手指南（给负责界面重构的 agent）
 
-> 这份文档回答一个问题：**怎么在不读 Rust 的前提下把界面改好。**
-> 架构层面的分工理由见 `HANDOFF.md` §4.10；接口细节见 `CONTRACT.md`。
+> ��`HANDOFF.md` 的 §4.10 讲**为什么**这么分；
+> 接口细节看 `web/CONTRACT.md`。
+
+你负责**界面**，我负责后端。边界很干净：**你只改 `web/`，不碰 `crates/`。**
+
+> **界面跑在程序自己的窗口里**（WebView2），不再套一层浏览器。
+> 窗口标题、任务栏图标、alt-tab 条目都是 VibeClassAgent 自己的。
+> 对你来说是好消息：
+>
+> 1. **就是一个 Chromium。** 你写的 HTML/CSS/JS 照旧跑，还能用新语法。
+> 2. **默认右键菜单和浏览器快捷键已被后端挡掉**（窗口的注入脚本）。
+>    界面自己需要的右键菜单**不受影响** —— 那个脚本只拦默认行为，
+>    你照常在元素上监听 `contextmenu` 即可。
 
 你负责**界面**，我负责后端。边界很干净：**你只改 `web/`，不碰 `crates/`。**
 
@@ -29,34 +40,37 @@
 
 ## 3. 怎么跑起来看效果
 
-```powershell
-# 1) 起服务（不开浏览器）
-cd D:\VibeClassAgent
-target\release\vca.exe gui --no-open --port 4970
+**日常开发一条命令就够**（会直接弹出程序自己的窗口）：
 
-# 2) 从日志里取令牌
+```powershell
+cd D:\VibeClassAgent
+target\release\vca.exe gui
+```
+
+改完 `web/` 里的东西，**关掉窗口再跑一次**就能看到新效果 ——
+不用编译、不用等后端。实测从起进程到窗口出现约 1 秒。
+
+> F5 刷新被挡掉了（那是浏览器习惯，一个原生程序按 F5 整页重载很怪）。
+> 如果你开发时觉得反复开关窗口麻烦，跟我说，我给你加一个
+> 「允许 F5」的开发开关。
+
+想用浏览器调试（原生窗口里开不了 DevTools）：
+
+```powershell
+target\release\vca.exe gui --no-open --port 4970
+# 从日志里取令牌
 Select-String -Path data\logs\ui.log -Pattern '\?t='
 
-# 3) 浏览器打开（把 <TOKEN> 换成上面取到的）
-#    http://127.0.0.1:4970/?t=<TOKEN>
+# 浏览器打开（<TOKEN> 换成上面取到的）
+#   http://127.0.0.1:4970/?t=<TOKEN>
 ```
 
-**改完直接刷新页面就生效，不用重启服务、不用编译、不用等我。**
-已实测：服务运行中改 `web/style.css`，下一次请求就是新内容。
-
-想换端口或前端目录：
+换端口或指定外部前端目录（默认就用仓库根的 `web/`）：
 
 ```powershell
-$env:VCA_WEB_DIR = 'D:\VibeClassAgent\web'   # 可选，默认就找仓库根的 web/
+$env:VCA_WEB_DIR = 'D:\somewhere\else\web'   # 可选
 target\release\vca.exe gui --port 4971
 ```
-
-> ⚠️ 这台开发机上**浏览器可能起不来**（沙箱限制，
-> `FATAL:mojo platform_channel: Check failed (0x5 拒绝访问)`）。
-> 服务本身正常。`--no-open` 就是为了这种情况：
-> 服务和接口都能测，界面你在能开浏览器的机器上看。
-
----
 
 ## 4. 三条硬约束
 

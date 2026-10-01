@@ -3,6 +3,9 @@
 你在 **VibeClassAgent** 项目里负责**界面**。后端是 Rust，由另一个 agent 维护。
 边界很干净：**只改 `web/`，不碰 `crates/`。**
 
+界面跑在**程序自己的窗口**里（WebView2），不是套壳浏览器。
+对你来说是好消息：就是一个 Chromium，HTML/CSS/JS 照旧写。
+
 ---
 
 ## 先读这两份，然后就能动手
@@ -36,13 +39,15 @@
 
 ```powershell
 cd D:\VibeClassAgent
-target\release\vca.exe gui --no-open --port 4970
-# 从 data\logs\ui.log 里取 ?t= 后面的令牌
-# 浏览器打开 http://127.0.0.1:4970/?t=<令牌>
+target\release\vca.exe gui          # 直接弹出程序自己的窗口
 ```
 
-**改完刷新页面就生效** —— 不用重启服务、不用编译、不用通知任何人。
-（已实测：服务运行中改 `web/style.css`，下一次请求就是新内容。）
+改完关掉窗口再跑一次就能看到新效果 —— 不用编译、不用等后端。
+
+要用浏览器调试（原生窗口里没有 DevTools）：加 `--no-open`，
+再从 `data\logs\ui.log` 里取 `?t=` 后面的令牌。详见 README。
+
+
 
 ---
 

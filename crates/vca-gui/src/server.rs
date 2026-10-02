@@ -7,6 +7,7 @@
 
 use std::net::TcpListener;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
 use anyhow::{Context, Result};
@@ -40,15 +41,58 @@ static TRAY_HWND: OnceLock<isize> = OnceLock::new();
 ///
 /// # 为什么能放进 `static`
 ///
-/// `WindowHandle` 内部只有两个 channel 端点，全是 `Send + Sync` 的；
-/// 它**不持有任何窗口指针** —— 真正的窗口对象在窗口线程里，
+/// `WindowControl` 内部只有一个 channel 发送端，是 `Send + Sync` 的；
+/// 它**不持有任何窗口指针** —— 真正的窗口对象在主线程事件循环里，
 /// 跨线程只靠 channel 传命令。所以这里天然是线程安全的，
 /// 不需要 `unsafe`、也不需要自己 `impl Send`。
 static WINDOW: OnceLock<crate::window::WindowControl> = OnceLock::new();
 
+/// 全进程退出意图。
+///
+/// `/api/quit` 可能早于 WebView 初始化完成到达，也可能运行在 `--no-open`
+/// 模式（根本没有窗口）。HTTP 循环和窗口发布逻辑都观察同一标志，确保两种
+/// 模式都能在响应发出后正常结束，而不是退回 `process::exit`。
+static SHUTDOWN_REQUESTED: AtomicBool = AtomicBool::new(false);
+
 /// 取原生窗口的控制端（没有则 `None`）。
 fn window_handle() -> Option<&'static crate::window::WindowControl> {
     WINDOW.get()
+}
+
+/// 请求整个 GUI 服务正常退出。
+///
+/// 返回 `true` 表示窗口控制端已收到关闭命令；`false` 表示当前没有窗口，
+/// 但退出标志仍已生效，`--no-open` HTTP 循环也会自行结束。
+pub fn request_shutdown() -> bool {
+    SHUTDOWN_REQUESTED.store(true, Ordering::SeqCst);
+    if let Some(window) = window_handle() {
+        window.close();
+        true
+    } else {
+        // 窗口尚未发布时由 `publish_window_control` 补发；无窗口模式由 HTTP
+        // 循环观察同一标志并正常返回。
+        false
+    }
+}
+
+fn shutdown_requested() -> bool {
+    SHUTDOWN_REQUESTED.load(Ordering::SeqCst)
+}
+
+/// 发布窗口控制端，并执行此前登记的退出意图。
+///
+/// 该函数只应在窗口创建成功、进入事件循环前调用一次；`OnceLock` 保证
+/// 控制端不会被替换，避免旧窗口与新窗口并存时命令发错对象。
+pub fn publish_window_control(window: crate::window::WindowControl) {
+    if WINDOW.set(window).is_err() {
+        tracing::warn!("原生窗口控制端重复发布，忽略后续控制端");
+        return;
+    }
+    if shutdown_requested() {
+        if let Some(window) = window_handle() {
+            window.close();
+        }
+    }
 }
 
 /// 启动选项。
@@ -66,6 +110,28 @@ pub struct ServeOptions {
     pub port: u16,
     /// 外部 web 资源目录（开发时用，留空则全用内置资源）。
     pub web_dir: Option<PathBuf>,
+}
+
+/// 运行可协作停止的 HTTP 循环。
+///
+/// `incoming_requests()` 会永久阻塞在 accept，导致 `--no-open` 模式收到
+/// `/api/quit` 后无法正常返回。短超时只用于观察退出标志；空闲时每 250ms
+/// 唤醒一次，CPU 开销可忽略，也不需要额外常驻线程。
+fn serve_requests(server: Server, opts: &ServeOptions, token: &str) {
+    while !shutdown_requested() {
+        match server.recv_timeout(std::time::Duration::from_millis(250)) {
+            Ok(Some(req)) => {
+                if let Err(e) = handle(req, opts, token) {
+                    tracing::warn!("处理请求出错：{e}");
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::warn!("HTTP 服务接收请求失败：{e}");
+                break;
+            }
+        }
+    }
 }
 
 /// 启动服务并阻塞（直到进程退出）。
@@ -147,13 +213,7 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
         Some(
             std::thread::Builder::new()
                 .name("vca-http".into())
-                .spawn(move || {
-                    for req in s.incoming_requests() {
-                        if let Err(e) = handle(req, &serve_opts, &serve_token) {
-                            tracing::warn!("处理请求出错：{e}");
-                        }
-                    }
-                })
+                .spawn(move || serve_requests(s, &serve_opts, &serve_token))
                 .map_err(|e| anyhow::anyhow!("启动 HTTP 线程失败：{e}"))?,
         )
     } else {
@@ -164,23 +224,30 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
         // 起**自己的原生窗口**（WebView2）。窗口、任务栏图标、alt-tab
         // 条目全是 VibeClassAgent 自己的，观感就是原生程序。
         //
-        // ⚠️ 这行会阻塞到窗口被关闭 —— 主线程交给窗口事件循环。
-        let outcome = crate::window::run(url.clone());
+        // ⚠️ 这行会阻塞到收到显式关闭命令 —— 主线程交给窗口事件循环。
+        // 控制端必须在进入事件循环前发布；若等 `run()` 返回才设置，Focus 和
+        // `/api/quit` 在窗口存活期间都拿不到它。
+        let outcome = crate::window::run(url.clone(), |win| {
+            publish_window_control(win);
+            clock.mark("原生窗口已起");
+            tracing::info!("已用「原生窗口」打开界面");
+        });
         match outcome {
-            Ok(win) => {
-                clock.mark("原生窗口已起");
-                let _ = WINDOW.set(win.control_only());
-                tracing::info!("已用「原生窗口」打开界面");
-            }
+            Ok(()) => {}
             Err(e) => {
                 // 原生窗口起不来（多半是系统没装 WebView2）。
                 // **不能让程序退出** —— 退回系统浏览器，至少用户能用上。
                 tracing::warn!("原生窗口起不来（{e}），退回系统浏览器");
                 open_in_system_browser(&url);
+                // `window::run` 已返回，但系统浏览器仍依赖 HTTP 服务。主线程
+                // 在这里等待统一退出标志，不能直接落到下面把服务一起关掉。
+                while !shutdown_requested() {
+                    std::thread::sleep(std::time::Duration::from_millis(250));
+                }
             }
         }
         clock.mark("界面已关闭");
-        // 窗口关掉 = 用户要退出。主动关掉托盘，否则图标会僵在任务栏上。
+        // 显式退出后主动摘托盘，否则图标会短暂僵在任务栏上。
         release_tray();
         // HTTP 线程阻塞在 accept 上，进程退出时由操作系统回收，
         // 这里不 join（join 会挂住）。
@@ -188,13 +255,10 @@ pub fn serve(opts: ServeOptions) -> Result<()> {
         return Ok(());
     }
 
-    // 不开窗口的模式：就在当前线程伺服请求。
+    // 不开窗口的模式：就在当前线程伺服请求，并在 /api/quit 后正常返回。
     let server = server.expect("非窗口模式下 server 应当还在");
-    for req in server.incoming_requests() {
-        if let Err(e) = handle(req, &opts, &token) {
-            tracing::warn!("处理请求出错：{e}");
-        }
-    }
+    serve_requests(server, &opts, &token);
+    release_tray();
     Ok(())
 }
 
@@ -405,17 +469,12 @@ fn start_tray(opts: &ServeOptions) {
                 match tray.poll() {
                     Some(TrayCommand::Quit) => {
                         tracing::info!("托盘菜单：退出");
-                        // 先摘掉托盘图标再结束进程：直接 exit 的话图标会僵在
-                        // 任务栏里，鼠标划过去还在、点它没反应（shell 要等一段时间
-                        // 才发现进程没了，或者干脆留到下次登录）。
-                        release_tray();
-                        // 给托盘线程一点时间跑完 WM_DESTROY 里的 NIM_DELETE。
-                        std::thread::sleep(std::time::Duration::from_millis(120));
-                        // 这里必须用 exit 而不是走优雅收尾：GUI 进程的收尾逻辑
-                        // 在 daemon 那边（见 daemon.rs），而 server 是纯 HTTP 层，
-                        // 没有录制会话可收。exit 会跳过析构，但不影响录像完整性 ——
-                        // 录制由 daemon 子进程负责，本进程退出不会带走它。
-                        std::process::exit(0);
+                        // 托盘与 Web GUI 共用同一条显式退出路径：只向窗口事件循环
+                        // 发送 Close。窗口循环结束后由 `serve()` 统一摘托盘并返回，
+                        // 不再用 process::exit 绕过 WebView 与本进程 daemon 的析构。
+                        if !request_shutdown() {
+                            tracing::info!("窗口尚未就绪或未启用，已登记退出意图");
+                        }
                     }
                     Some(TrayCommand::StopRecording) => {
                         tracing::info!("托盘菜单：请求立即停止录制");

@@ -32,6 +32,63 @@ const state = {
   timetable: null, schedule: null,
 };
 
+/** 页面级生命周期：切页时统一释放定时器与全局监听。 */
+let pageLife = null;
+let pageEpoch = 0;
+const appLife = createPageLife('app');
+
+function createPageLife(page) {
+  const timers = new Set();
+  const listeners = [];
+  let disposed = false;
+  return {
+    page,
+    get disposed() { return disposed; },
+    timeout(fn, ms) {
+      if (disposed) return null;
+      const id = setTimeout(() => {
+        timers.delete(id);
+        if (!disposed) fn();
+      }, ms);
+      timers.add(id);
+      return id;
+    },
+    interval(fn, ms) {
+      if (disposed) return null;
+      const id = setInterval(() => { if (!disposed) fn(); }, ms);
+      timers.add(id);
+      return id;
+    },
+    listen(target, type, fn, options) {
+      target.addEventListener(type, fn, options);
+      listeners.push([target, type, fn, options]);
+    },
+    cancel(id) {
+      if (id == null) return;
+      clearTimeout(id);
+      clearInterval(id);
+      timers.delete(id);
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      timers.forEach(id => { clearTimeout(id); clearInterval(id); });
+      timers.clear();
+      listeners.forEach(([target, type, fn, options]) =>
+        target.removeEventListener(type, fn, options));
+      listeners.length = 0;
+    },
+  };
+}
+
+function pageTimeout(fn, ms) {
+  return pageLife ? pageLife.timeout(fn, ms) : setTimeout(fn, ms);
+}
+
+function pageInterval(fn, ms) {
+  return pageLife ? pageLife.interval(fn, ms) : setInterval(fn, ms);
+}
+
 /* ------------------------------------------------------------------ 工具 */
 
 async function api(path, body) {
@@ -72,6 +129,17 @@ function applyStatic() {
   document.querySelectorAll('[data-i18n]').forEach(n => {
     const v = t(n.dataset.i18n);
     if (v !== n.dataset.i18n) n.textContent = v;
+  });
+  document.querySelectorAll('[data-i18n-title]').forEach(n => {
+    const v = t(n.dataset.i18nTitle);
+    if (v !== n.dataset.i18nTitle) {
+      n.title = v;
+      n.setAttribute('aria-label', v);
+    }
+  });
+  document.querySelectorAll('[data-i18n-aria]').forEach(n => {
+    const v = t(n.dataset.i18nAria);
+    if (v !== n.dataset.i18nAria) n.setAttribute('aria-label', v);
   });
 }
 
@@ -147,8 +215,6 @@ async function renderOverview() {
 }
 
 function paintDots(s) {
-  const pill = document.getElementById('pill-profile');
-  if (pill) pill.textContent = s.profile || 'default';
   const set = (id, on) => {
     const d = document.getElementById(id);
     if (d) d.className = 'dot ' + (on ? 'on' : 'off');
@@ -226,7 +292,7 @@ async function renderRun() {
       show(`<b style="color:#7fd3ba">${esc(t(dry ? 'run.started_dry' : 'run.started'))}</b>` +
         (w.length ? `<br>${esc(t('run.also_note'))}<br>· ` + w.map(esc).join('<br>· ') : '') +
         `<br><br>${esc(t('run.auto_refresh'))}`);
-      setTimeout(renderRun, 1200);
+      pageTimeout(renderRun, 1200);
     } else {
       show(`<b style="color:#e05c5c">${esc(t('run.start_failed'))}</b><br><code>${esc(r.error || '')}</code>`, 'err');
     }
@@ -239,7 +305,7 @@ async function renderRun() {
     if (r.ok) {
       show(esc(t('run.stop_requested')) + (r.note ? '<br>' + esc(r.note) : '') +
         '<br>' + esc(t('run.stop_wait')));
-      setTimeout(renderRun, 2500);
+      pageTimeout(renderRun, 2500);
     } else {
       show(esc(r.error || ''), 'err');
     }
@@ -259,7 +325,7 @@ async function renderRun() {
     show(`<b style="color:#e05c5c">${esc(t('run.last_error'))}</b><br><code>${esc(d.last_error)}</code>`, 'err');
   }
   if (d.running) {
-    setTimeout(() => { if (current === 'run') renderRun(); }, 5000);
+    pageTimeout(() => { if (current === 'run') renderRun(); }, 5000);
   }
 }
 
@@ -584,7 +650,8 @@ async function renderPush() {
       return;
     }
     for (let i = 0; i < 40; i++) {
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(resolve => pageTimeout(resolve, 1500));
+      if (!pageLife || pageLife.disposed || current !== 'push') return;
       const st = await api('/api/push/discover');
       if (st.running) {
         note.textContent = `${start.message || ''}（${i + 1}）`;
@@ -780,7 +847,7 @@ async function renderPush() {
     botHost.innerHTML = botHtml(b);
 
     // 装完/配完之后把日志区恢复成「跟着看」的状态
-    if (b.installing) setTimeout(paintBot, 2000);
+    if (b.installing) pageTimeout(paintBot, 2000);
     // 启动之后自动刷几次日志，让用户马上看到扫码信息
     if (b.running && follow) scheduleLogPoll();
 
@@ -854,7 +921,7 @@ async function renderPush() {
   const scheduleLogPoll = () => {
     if (logPolls >= 10) return;
     logPolls += 1;
-    setTimeout(() => { if (current === 'push') paintBot(); }, 2500);
+    pageTimeout(() => { if (current === 'push') paintBot(); }, 2500);
   };
 
   await paintBot();
@@ -1035,11 +1102,11 @@ async function renderTimetable() {
     ev.preventDefault();
   };
 
-  window.addEventListener('mousemove', (ev) => {
+  pageLife.listen(window, 'mousemove', (ev) => {
     if (!tlDrag.on) return;
     syncTimelineDrag(ev.clientX);
   });
-  window.addEventListener('mouseup', () => {
+  pageLife.listen(window, 'mouseup', () => {
     if (!tlDrag.on) return;
     const moved = tlDrag.moved;
     tlDrag.on = false;
@@ -1292,7 +1359,7 @@ async function renderTimetable() {
       n2.innerHTML = `<b>${esc(t('st.imported'))}</b> · ${esc(r.timetable_name || '')} ` +
         `<span style="color:var(--text-dim2)">${r.slots} / ${r.entries}</span><br>${esc(t('st.import_hint'))}`;
     }
-    setTimeout(() => go('schedule'), 1200);
+    pageTimeout(() => go('schedule'), 1200);
   });
 
   paintAll();
@@ -1805,8 +1872,205 @@ async function renderSchedule() {
 
 /* ---------------------------------------------------------- 录制与文件 */
 
+/**
+ * 下载源设置只消费 CONTRACT.md 中声明的字段：
+ * mirrors 是依赖专属的完整文件地址，prefix 是拼到内置地址前的全局前缀。
+ * 两者故意分开渲染，避免用户把「完整地址」误填到「前缀」里。
+ */
+function mirrorRows(depId, urls) {
+  const values = urls && urls.length ? urls : [''];
+  return values.map(url => `
+    <div class="mirror-url-row">
+      <input type="text" data-mirror-dep="${esc(depId)}" value="${esc(url)}"
+             placeholder="${esc(t('deps.mirror_url_ph'))}">
+      <button class="btn sm" type="button" data-mirror-test>${esc(t('deps.mirror_test'))}</button>
+      <span class="mirror-test-result" aria-live="polite"></span>
+    </div>`).join('');
+}
+
+function mirrorBuiltinList(urls) {
+  if (!urls || !urls.length) return '';
+  return `<ul class="mirror-builtin-list">${urls.map(url =>
+    `<li><code>${esc(url)}</code></li>`).join('')}</ul>`;
+}
+
+function paintMirrorSettings(initial) {
+  const root = document.getElementById('mirror-settings');
+  if (!root) return;
+  if (!initial || !initial.ok) {
+    root.innerHTML = `<div class="card"><h2>${esc(t('deps.mirror_title'))}</h2>` +
+      `<p class="hint">${esc((initial && initial.error) || t('common.unknown'))}</p></div>`;
+    return;
+  }
+
+  let cfg = initial;
+  const deps = Array.isArray(cfg.deps) ? cfg.deps : [];
+  const prefix = Array.isArray(cfg.prefix) ? cfg.prefix : [];
+  const mirrors = cfg.mirrors && typeof cfg.mirrors === 'object' ? cfg.mirrors : {};
+  const builtin = cfg.builtin && typeof cfg.builtin === 'object' ? cfg.builtin : {};
+  const mirrorDeps = deps.filter(dep => dep && dep.id);
+
+  root.innerHTML = `
+  <div class="card mirror-card">
+    <h2>${esc(t('deps.mirror_title'))}</h2>
+    <p class="hint">${esc(t('deps.mirror_lead'))}</p>
+    <details class="mirror-advanced">
+      <summary>${esc(t('deps.mirror_adv'))}</summary>
+      <label class="field mirror-prefix-field">
+        <span>${esc(t('deps.mirror_prefix'))}</span>
+        <textarea id="mirror-prefix" rows="2" placeholder="${esc(t('deps.mirror_prefix_ph'))}">${esc(prefix.join('\n'))}</textarea>
+        <p class="hint mirror-note">${esc(t('deps.mirror_prefix_note'))}</p>
+      </label>
+      <label class="check mirror-only">
+        <input type="checkbox" id="mirror-only" ${cfg.only_custom ? 'checked' : ''}>
+        <span>${esc(t('deps.mirror_only'))}</span>
+      </label>
+      <p class="hint mirror-note">${esc(t('deps.mirror_only_note'))}</p>
+    </details>
+
+    <div class="mirror-deps">
+      ${mirrorDeps.map(dep => `
+        <section class="mirror-dep" data-mirror-section="${esc(dep.id)}">
+          <div class="mirror-dep-title">${esc(dep.label || dep.id)}
+            ${dep.required ? `<span class="tag bad">${esc(t('deps.tag_required'))}</span>` : ''}
+          </div>
+          <div class="hint mirror-item-label">${esc(t('deps.mirror_item'))}</div>
+          <div class="mirror-url-list">${mirrorRows(dep.id, mirrors[dep.id])}</div>
+          <div class="mirror-builtin">
+            <div class="hint mirror-item-label">${esc(t('deps.mirror_builtin'))}</div>
+            ${mirrorBuiltinList(builtin[dep.id]) || `<span class="mirror-empty">${esc(t('deps.mirror_builtin_note'))}</span>`}
+          </div>
+        </section>`).join('')}
+    </div>
+
+    <div class="row wrap mirror-actions">
+      <button class="btn primary" type="button" id="btn-mirror-save">${esc(t('deps.mirror_save'))}</button>
+      <button class="btn" type="button" id="btn-mirror-reset">${esc(t('deps.mirror_reset'))}</button>
+      <span class="spacer"></span>
+      <span class="mirror-save-note" id="mirror-save-note" aria-live="polite"></span>
+    </div>
+  </div>`;
+
+  const note = document.getElementById('mirror-save-note');
+  const collect = () => {
+    const nextMirrors = {};
+    root.querySelectorAll('[data-mirror-dep]').forEach(input => {
+      const value = input.value.trim();
+      if (!value) return;
+      const id = input.dataset.mirrorDep;
+      (nextMirrors[id] || (nextMirrors[id] = [])).push(value);
+    });
+    const prefixInput = document.getElementById('mirror-prefix');
+    return {
+      prefix: (prefixInput ? prefixInput.value : '').split(/\r?\n/).map(s => s.trim()).filter(Boolean),
+      mirrors: nextMirrors,
+      only_custom: !!document.getElementById('mirror-only')?.checked,
+    };
+  };
+
+  const addMirrorRow = section => {
+    const list = section.querySelector('.mirror-url-list');
+    const row = document.createElement('div');
+    row.className = 'mirror-url-row';
+    row.innerHTML = `<input type="text" data-mirror-dep="${esc(section.dataset.mirrorSection)}"` +
+      ` placeholder="${esc(t('deps.mirror_url_ph'))}">` +
+      `<button class="btn sm" type="button" data-mirror-test>${esc(t('deps.mirror_test'))}</button>` +
+      `<span class="mirror-test-result" aria-live="polite"></span>`;
+    list.appendChild(row);
+    row.querySelector('input').focus();
+  };
+
+  root.oninput = event => {
+    const input = event.target.closest('[data-mirror-dep]');
+    if (!input || !input.value.trim()) return;
+    const list = input.closest('.mirror-url-list');
+    const last = list && list.querySelector('.mirror-url-row:last-child input');
+    if (last === input) addMirrorRow(input.closest('.mirror-dep'));
+  };
+
+  root.onkeydown = event => {
+    const input = event.target.closest('[data-mirror-dep]');
+    if (!input || event.key !== 'Enter') return;
+    event.preventDefault();
+    const section = input.closest('.mirror-dep');
+    const last = section && section.querySelector('.mirror-url-list .mirror-url-row:last-child input');
+    if (last === input) addMirrorRow(section);
+  };
+
+  root.onclick = async event => {
+    const testButton = event.target.closest('[data-mirror-test]');
+    if (testButton) {
+      const input = testButton.parentElement.querySelector('[data-mirror-dep]');
+      const result = testButton.parentElement.querySelector('.mirror-test-result');
+      const url = input && input.value.trim();
+      if (!url) { result.textContent = t('deps.mirror_need_url'); result.className = 'mirror-test-result bad'; return; }
+      testButton.disabled = true;
+      testButton.textContent = t('deps.mirror_testing');
+      result.textContent = '';
+      result.className = 'mirror-test-result';
+      const controller = new AbortController();
+      const timer = pageTimeout(() => controller.abort(), 8000);
+      try {
+        const response = await fetch(`/api/deps/mirrors/test?t=${TOKEN}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url }), signal: controller.signal,
+        });
+        const tested = await response.json();
+        result.textContent = tested.ok
+          ? `${t('deps.mirror_test_ok')}${tested.message ? ` · ${tested.message}` : ''}`
+          : `${t('deps.mirror_test_fail')}${tested.error ? ` · ${tested.error}` : ''}`;
+        result.className = 'mirror-test-result ' + (tested.ok ? 'ok' : 'bad');
+      } catch {
+        result.textContent = t('deps.mirror_test_fail');
+        result.className = 'mirror-test-result bad';
+      } finally {
+        clearTimeout(timer);
+        testButton.disabled = false;
+        testButton.textContent = t('deps.mirror_test');
+      }
+      return;
+    }
+
+    const saveButton = event.target.closest('#btn-mirror-save, #btn-mirror-reset');
+    if (!saveButton) return;
+    const reset = saveButton.id === 'btn-mirror-reset';
+    const payload = reset ? { prefix: [], mirrors: {}, only_custom: false } : collect();
+    const hasCustomSource = payload.prefix.length > 0 ||
+      Object.values(payload.mirrors).some(list => list.length > 0);
+    if (!reset && payload.only_custom && !hasCustomSource) {
+      note.textContent = t('deps.mirror_only_bad') || t('deps.mirror_need_url');
+      note.className = 'mirror-save-note bad';
+      return;
+    }
+    saveButton.disabled = true;
+    note.textContent = '';
+    note.className = 'mirror-save-note';
+    try {
+      const saved = await api('/api/deps/mirrors', payload);
+      if (!saved.ok) {
+        note.textContent = `${t('deps.mirror_save_failed')}${saved.error ? ` · ${saved.error}` : ''}`;
+        note.className = 'mirror-save-note bad';
+        return;
+      }
+      cfg = Object.assign({}, cfg, saved);
+      paintMirrorSettings(cfg);
+      const savedNote = document.getElementById('mirror-save-note');
+      if (savedNote) {
+        savedNote.textContent = t('deps.mirror_saved');
+        savedNote.className = 'mirror-save-note ok';
+      }
+    } catch {
+      note.textContent = t('deps.mirror_save_failed');
+      note.className = 'mirror-save-note bad';
+    } finally {
+      const button = document.getElementById(saveButton.id);
+      if (button) button.disabled = false;
+    }
+  };
+}
+
 async function renderRecord() {
-  const d = await api('/api/config/general');
+  const [d, mirrors] = await Promise.all([api('/api/config/general'), api('/api/deps/mirrors')]);
   if (!d.ok) { view.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
 
   view.innerHTML = `
@@ -1879,7 +2143,11 @@ async function renderRecord() {
       <span class="spacer"></span>
     </div>
     <div class="note" id="clean-note" style="display:none"></div>
-  </div>`;
+  </div>
+
+  <section id="mirror-settings" aria-live="polite"></section>`;
+
+  paintMirrorSettings(mirrors);
 
   document.getElementById('btn-save').addEventListener('click', async () => {
     const payload = {
@@ -1962,7 +2230,7 @@ async function renderJobs() {
     if (st.running) {
       note.style.display = 'block';
       note.textContent = t('jb.running');
-      setTimeout(poll, 2000);
+      pageTimeout(poll, 2000);
       return;
     }
     if (st.error) {
@@ -1975,7 +2243,7 @@ async function renderJobs() {
       note.style.display = 'block';
       note.innerHTML = `<b style="color:#7fd3ba">${esc(st.message)}</b>`;
       // 跑完刷新一次列表，状态就变了
-      setTimeout(() => { if (current === 'jobs') renderJobs(); }, 800);
+      pageTimeout(() => { if (current === 'jobs') renderJobs(); }, 800);
     }
   };
   if (run.running) poll();
@@ -2158,7 +2426,7 @@ async function pollLogs() {
 function scheduleLogsPoll() {
   if (logsState.timer) clearTimeout(logsState.timer);
   // 1 秒一次：日志要"实时"，但也没必要更密。开销很小（通常返回 0 行）。
-  logsState.timer = setTimeout(pollLogs, 1000);
+  logsState.timer = pageTimeout(pollLogs, 1000);
 }
 
 function stopLogsPoll() {
@@ -2220,22 +2488,35 @@ const PAGES = {
 let current = 'overview';
 
 async function go(page) {
-  // 离开日志页就停掉轮询：否则它会一直在后台拉，
-  // 而且 current 已经变了，白费力气
-  if (current === 'logs' && page !== 'logs') stopLogsPoll();
+  const requested = PAGES[page] ? page : 'overview';
 
-  current = page;
-  const [titleKey, fn] = PAGES[page] || PAGES.overview;
+  // 每次导航（包含同页刷新）都先销毁上一份页面资源，避免定时器、轮询与
+  // window 监听在重绘后继续持有已经脱离 DOM 的闭包。
+  if (pageLife) pageLife.dispose();
+  stopLogsPoll();
+  pageLife = createPageLife(requested);
+  const epoch = ++pageEpoch;
+
+  current = requested;
+  const [titleKey, fn] = PAGES[requested];
   titleEl.textContent = t(titleKey);
   document.querySelectorAll('.nav-item').forEach(b =>
-    b.classList.toggle('active', b.dataset.page === page));
+    b.classList.toggle('active', b.dataset.page === requested));
+  document.querySelector('.app-shell')?.classList.remove('nav-open');
+  document.getElementById('btn-menu')?.setAttribute('aria-expanded', 'false');
+  view.setAttribute('aria-busy', 'true');
   view.innerHTML = `<div class="empty">${esc(t('common.loading'))}</div>`;
   try {
     await fn();
-    // 日志页的工具栏在 renderLogs 里生成，绑定放在渲染之后
-    if (page === 'logs') bindLogToolbar();
+    // 异步请求返回时页面可能已经切走；旧渲染不得覆盖新页面或重绑事件。
+    if (epoch !== pageEpoch || pageLife.disposed) return;
+    if (requested === 'logs') bindLogToolbar();
   } catch (e) {
-    view.innerHTML = `<div class="empty">${esc(t('common.error_prefix'))}${esc(e.message)}</div>`;
+    if (epoch === pageEpoch && !pageLife.disposed) {
+      view.innerHTML = `<div class="empty">${esc(t('common.error_prefix'))}${esc(e.message)}</div>`;
+    }
+  } finally {
+    if (epoch === pageEpoch) view.setAttribute('aria-busy', 'false');
   }
 }
 
@@ -2246,14 +2527,30 @@ async function refreshDots() {
   } catch { /* 状态刷不出来不影响主流程 */ }
 }
 
+const appShell = document.querySelector('.app-shell');
+const menuButton = document.getElementById('btn-menu');
+const menuScrim = document.getElementById('sidebar-scrim');
+const closeMenu = () => {
+  appShell.classList.remove('nav-open');
+  menuButton.setAttribute('aria-expanded', 'false');
+};
+
 document.getElementById('nav').addEventListener('click', e => {
   const btn = e.target.closest('.nav-item');
-  if (btn) go(btn.dataset.page);
+  if (btn) { closeMenu(); go(btn.dataset.page); }
+});
+menuButton.addEventListener('click', () => {
+  const open = appShell.classList.toggle('nav-open');
+  menuButton.setAttribute('aria-expanded', String(open));
+});
+menuScrim.addEventListener('click', closeMenu);
+window.addEventListener('keydown', event => {
+  if (event.key === 'Escape') closeMenu();
 });
 document.getElementById('btn-refresh').addEventListener('click', () => go(current));
 
-// 退出：关窗口 ≠ 退程序（窗口是 --app 拉起的独立进程，后台服务还在跑），
-// 所以必须给一个明确的出口，并且把这件事说清楚。
+// 退出：点原生窗口 X 只会隐藏窗口，后台服务与托盘继续运行；
+// 所以必须给一个明确的完整退出入口，并且把这件事说清楚。
 document.getElementById('btn-quit').addEventListener('click', async () => {
   if (!confirm(t('common.quit_body') + '\n\n' + t('common.quit_note'))) return;
   await api('/api/quit', {});
@@ -2410,12 +2707,16 @@ function showDepsModal(st, missing) {
     }
 
     // 轮询进度。800ms 一次：下载是分钟级的事，查太勤没必要。
-    const timer = setInterval(async () => {
+    const timer = appLife.interval(async () => {
+      if (!box.isConnected) {
+        appLife.cancel(timer);
+        return;
+      }
       let p;
       try { p = await api('/api/deps/fetch'); } catch { return; }
       if (p && p.message) progEl.textContent = p.message;
       if (p && !p.running) {
-        clearInterval(timer);
+        appLife.cancel(timer);
         // 补完复查一遍：真的齐了才允许关窗，免得用户以为补上了其实还缺
         let after;
         try { after = await api('/api/deps'); } catch { after = null; }
@@ -2440,6 +2741,12 @@ function showDepsModal(st, missing) {
 }
 
 /* ---------------------------------------------------------------- 启动 */
+
+// WebView 真正销毁或页面导航时主动解绑全局监听与剩余轮询；正常切页则由 go() 处理。
+appLife.listen(window, 'pagehide', () => {
+  if (pageLife) pageLife.dispose();
+  appLife.dispose();
+}, { once: true });
 
 (async function boot() {
   try {

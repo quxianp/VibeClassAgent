@@ -32,6 +32,63 @@ const state = {
   timetable: null, schedule: null,
 };
 
+/** 页面级生命周期：切页时统一释放定时器与全局监听。 */
+let pageLife = null;
+let pageEpoch = 0;
+const appLife = createPageLife('app');
+
+function createPageLife(page) {
+  const timers = new Set();
+  const listeners = [];
+  let disposed = false;
+  return {
+    page,
+    get disposed() { return disposed; },
+    timeout(fn, ms) {
+      if (disposed) return null;
+      const id = setTimeout(() => {
+        timers.delete(id);
+        if (!disposed) fn();
+      }, ms);
+      timers.add(id);
+      return id;
+    },
+    interval(fn, ms) {
+      if (disposed) return null;
+      const id = setInterval(() => { if (!disposed) fn(); }, ms);
+      timers.add(id);
+      return id;
+    },
+    listen(target, type, fn, options) {
+      target.addEventListener(type, fn, options);
+      listeners.push([target, type, fn, options]);
+    },
+    cancel(id) {
+      if (id == null) return;
+      clearTimeout(id);
+      clearInterval(id);
+      timers.delete(id);
+    },
+    dispose() {
+      if (disposed) return;
+      disposed = true;
+      timers.forEach(id => { clearTimeout(id); clearInterval(id); });
+      timers.clear();
+      listeners.forEach(([target, type, fn, options]) =>
+        target.removeEventListener(type, fn, options));
+      listeners.length = 0;
+    },
+  };
+}
+
+function pageTimeout(fn, ms) {
+  return pageLife ? pageLife.timeout(fn, ms) : setTimeout(fn, ms);
+}
+
+function pageInterval(fn, ms) {
+  return pageLife ? pageLife.interval(fn, ms) : setInterval(fn, ms);
+}
+
 /* ------------------------------------------------------------------ 工具 */
 
 async function api(path, body) {
@@ -72,6 +129,17 @@ function applyStatic() {
   document.querySelectorAll('[data-i18n]').forEach(n => {
     const v = t(n.dataset.i18n);
     if (v !== n.dataset.i18n) n.textContent = v;
+  });
+  document.querySelectorAll('[data-i18n-title]').forEach(n => {
+    const v = t(n.dataset.i18nTitle);
+    if (v !== n.dataset.i18nTitle) {
+      n.title = v;
+      n.setAttribute('aria-label', v);
+    }
+  });
+  document.querySelectorAll('[data-i18n-aria]').forEach(n => {
+    const v = t(n.dataset.i18nAria);
+    if (v !== n.dataset.i18nAria) n.setAttribute('aria-label', v);
   });
 }
 
@@ -147,8 +215,6 @@ async function renderOverview() {
 }
 
 function paintDots(s) {
-  const pill = document.getElementById('pill-profile');
-  if (pill) pill.textContent = s.profile || 'default';
   const set = (id, on) => {
     const d = document.getElementById(id);
     if (d) d.className = 'dot ' + (on ? 'on' : 'off');
@@ -226,7 +292,7 @@ async function renderRun() {
       show(`<b style="color:#7fd3ba">${esc(t(dry ? 'run.started_dry' : 'run.started'))}</b>` +
         (w.length ? `<br>${esc(t('run.also_note'))}<br>· ` + w.map(esc).join('<br>· ') : '') +
         `<br><br>${esc(t('run.auto_refresh'))}`);
-      setTimeout(renderRun, 1200);
+      pageTimeout(renderRun, 1200);
     } else {
       show(`<b style="color:#e05c5c">${esc(t('run.start_failed'))}</b><br><code>${esc(r.error || '')}</code>`, 'err');
     }
@@ -239,7 +305,7 @@ async function renderRun() {
     if (r.ok) {
       show(esc(t('run.stop_requested')) + (r.note ? '<br>' + esc(r.note) : '') +
         '<br>' + esc(t('run.stop_wait')));
-      setTimeout(renderRun, 2500);
+      pageTimeout(renderRun, 2500);
     } else {
       show(esc(r.error || ''), 'err');
     }
@@ -259,7 +325,7 @@ async function renderRun() {
     show(`<b style="color:#e05c5c">${esc(t('run.last_error'))}</b><br><code>${esc(d.last_error)}</code>`, 'err');
   }
   if (d.running) {
-    setTimeout(() => { if (current === 'run') renderRun(); }, 5000);
+    pageTimeout(() => { if (current === 'run') renderRun(); }, 5000);
   }
 }
 
@@ -584,7 +650,8 @@ async function renderPush() {
       return;
     }
     for (let i = 0; i < 40; i++) {
-      await new Promise(r => setTimeout(r, 1500));
+      await new Promise(resolve => pageTimeout(resolve, 1500));
+      if (!pageLife || pageLife.disposed || current !== 'push') return;
       const st = await api('/api/push/discover');
       if (st.running) {
         note.textContent = `${start.message || ''}（${i + 1}）`;
@@ -780,7 +847,7 @@ async function renderPush() {
     botHost.innerHTML = botHtml(b);
 
     // 装完/配完之后把日志区恢复成「跟着看」的状态
-    if (b.installing) setTimeout(paintBot, 2000);
+    if (b.installing) pageTimeout(paintBot, 2000);
     // 启动之后自动刷几次日志，让用户马上看到扫码信息
     if (b.running && follow) scheduleLogPoll();
 
@@ -854,7 +921,7 @@ async function renderPush() {
   const scheduleLogPoll = () => {
     if (logPolls >= 10) return;
     logPolls += 1;
-    setTimeout(() => { if (current === 'push') paintBot(); }, 2500);
+    pageTimeout(() => { if (current === 'push') paintBot(); }, 2500);
   };
 
   await paintBot();
@@ -1035,11 +1102,11 @@ async function renderTimetable() {
     ev.preventDefault();
   };
 
-  window.addEventListener('mousemove', (ev) => {
+  pageLife.listen(window, 'mousemove', (ev) => {
     if (!tlDrag.on) return;
     syncTimelineDrag(ev.clientX);
   });
-  window.addEventListener('mouseup', () => {
+  pageLife.listen(window, 'mouseup', () => {
     if (!tlDrag.on) return;
     const moved = tlDrag.moved;
     tlDrag.on = false;
@@ -1292,7 +1359,7 @@ async function renderTimetable() {
       n2.innerHTML = `<b>${esc(t('st.imported'))}</b> · ${esc(r.timetable_name || '')} ` +
         `<span style="color:var(--text-dim2)">${r.slots} / ${r.entries}</span><br>${esc(t('st.import_hint'))}`;
     }
-    setTimeout(() => go('schedule'), 1200);
+    pageTimeout(() => go('schedule'), 1200);
   });
 
   paintAll();
@@ -1942,7 +2009,7 @@ function paintMirrorSettings(initial) {
       result.textContent = '';
       result.className = 'mirror-test-result';
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), 8000);
+      const timer = pageTimeout(() => controller.abort(), 8000);
       try {
         const response = await fetch(`/api/deps/mirrors/test?t=${TOKEN}`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2163,7 +2230,7 @@ async function renderJobs() {
     if (st.running) {
       note.style.display = 'block';
       note.textContent = t('jb.running');
-      setTimeout(poll, 2000);
+      pageTimeout(poll, 2000);
       return;
     }
     if (st.error) {
@@ -2176,7 +2243,7 @@ async function renderJobs() {
       note.style.display = 'block';
       note.innerHTML = `<b style="color:#7fd3ba">${esc(st.message)}</b>`;
       // 跑完刷新一次列表，状态就变了
-      setTimeout(() => { if (current === 'jobs') renderJobs(); }, 800);
+      pageTimeout(() => { if (current === 'jobs') renderJobs(); }, 800);
     }
   };
   if (run.running) poll();
@@ -2359,7 +2426,7 @@ async function pollLogs() {
 function scheduleLogsPoll() {
   if (logsState.timer) clearTimeout(logsState.timer);
   // 1 秒一次：日志要"实时"，但也没必要更密。开销很小（通常返回 0 行）。
-  logsState.timer = setTimeout(pollLogs, 1000);
+  logsState.timer = pageTimeout(pollLogs, 1000);
 }
 
 function stopLogsPoll() {
@@ -2421,22 +2488,35 @@ const PAGES = {
 let current = 'overview';
 
 async function go(page) {
-  // 离开日志页就停掉轮询：否则它会一直在后台拉，
-  // 而且 current 已经变了，白费力气
-  if (current === 'logs' && page !== 'logs') stopLogsPoll();
+  const requested = PAGES[page] ? page : 'overview';
 
-  current = page;
-  const [titleKey, fn] = PAGES[page] || PAGES.overview;
+  // 每次导航（包含同页刷新）都先销毁上一份页面资源，避免定时器、轮询与
+  // window 监听在重绘后继续持有已经脱离 DOM 的闭包。
+  if (pageLife) pageLife.dispose();
+  stopLogsPoll();
+  pageLife = createPageLife(requested);
+  const epoch = ++pageEpoch;
+
+  current = requested;
+  const [titleKey, fn] = PAGES[requested];
   titleEl.textContent = t(titleKey);
   document.querySelectorAll('.nav-item').forEach(b =>
-    b.classList.toggle('active', b.dataset.page === page));
+    b.classList.toggle('active', b.dataset.page === requested));
+  document.querySelector('.app-shell')?.classList.remove('nav-open');
+  document.getElementById('btn-menu')?.setAttribute('aria-expanded', 'false');
+  view.setAttribute('aria-busy', 'true');
   view.innerHTML = `<div class="empty">${esc(t('common.loading'))}</div>`;
   try {
     await fn();
-    // 日志页的工具栏在 renderLogs 里生成，绑定放在渲染之后
-    if (page === 'logs') bindLogToolbar();
+    // 异步请求返回时页面可能已经切走；旧渲染不得覆盖新页面或重绑事件。
+    if (epoch !== pageEpoch || pageLife.disposed) return;
+    if (requested === 'logs') bindLogToolbar();
   } catch (e) {
-    view.innerHTML = `<div class="empty">${esc(t('common.error_prefix'))}${esc(e.message)}</div>`;
+    if (epoch === pageEpoch && !pageLife.disposed) {
+      view.innerHTML = `<div class="empty">${esc(t('common.error_prefix'))}${esc(e.message)}</div>`;
+    }
+  } finally {
+    if (epoch === pageEpoch) view.setAttribute('aria-busy', 'false');
   }
 }
 
@@ -2447,14 +2527,30 @@ async function refreshDots() {
   } catch { /* 状态刷不出来不影响主流程 */ }
 }
 
+const appShell = document.querySelector('.app-shell');
+const menuButton = document.getElementById('btn-menu');
+const menuScrim = document.getElementById('sidebar-scrim');
+const closeMenu = () => {
+  appShell.classList.remove('nav-open');
+  menuButton.setAttribute('aria-expanded', 'false');
+};
+
 document.getElementById('nav').addEventListener('click', e => {
   const btn = e.target.closest('.nav-item');
-  if (btn) go(btn.dataset.page);
+  if (btn) { closeMenu(); go(btn.dataset.page); }
+});
+menuButton.addEventListener('click', () => {
+  const open = appShell.classList.toggle('nav-open');
+  menuButton.setAttribute('aria-expanded', String(open));
+});
+menuScrim.addEventListener('click', closeMenu);
+window.addEventListener('keydown', event => {
+  if (event.key === 'Escape') closeMenu();
 });
 document.getElementById('btn-refresh').addEventListener('click', () => go(current));
 
-// 退出：关窗口 ≠ 退程序（窗口是 --app 拉起的独立进程，后台服务还在跑），
-// 所以必须给一个明确的出口，并且把这件事说清楚。
+// 退出：点原生窗口 X 只会隐藏窗口，后台服务与托盘继续运行；
+// 所以必须给一个明确的完整退出入口，并且把这件事说清楚。
 document.getElementById('btn-quit').addEventListener('click', async () => {
   if (!confirm(t('common.quit_body') + '\n\n' + t('common.quit_note'))) return;
   await api('/api/quit', {});
@@ -2611,12 +2707,16 @@ function showDepsModal(st, missing) {
     }
 
     // 轮询进度。800ms 一次：下载是分钟级的事，查太勤没必要。
-    const timer = setInterval(async () => {
+    const timer = appLife.interval(async () => {
+      if (!box.isConnected) {
+        appLife.cancel(timer);
+        return;
+      }
       let p;
       try { p = await api('/api/deps/fetch'); } catch { return; }
       if (p && p.message) progEl.textContent = p.message;
       if (p && !p.running) {
-        clearInterval(timer);
+        appLife.cancel(timer);
         // 补完复查一遍：真的齐了才允许关窗，免得用户以为补上了其实还缺
         let after;
         try { after = await api('/api/deps'); } catch { after = null; }
@@ -2641,6 +2741,12 @@ function showDepsModal(st, missing) {
 }
 
 /* ---------------------------------------------------------------- 启动 */
+
+// WebView 真正销毁或页面导航时主动解绑全局监听与剩余轮询；正常切页则由 go() 处理。
+appLife.listen(window, 'pagehide', () => {
+  if (pageLife) pageLife.dispose();
+  appLife.dispose();
+}, { once: true });
 
 (async function boot() {
   try {

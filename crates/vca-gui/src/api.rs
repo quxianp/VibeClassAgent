@@ -1666,21 +1666,12 @@ fn bot_open_dir() -> Result<Value> {
 
 /// 退出程序。
 ///
-/// 为什么需要这个接口：浏览器窗口是 `--app` 拉起来的独立进程，把它关掉之后
-/// **后台服务还在跑** —— 用户看到窗口没了会以为程序退了，实际它还占着端口。
-/// 与其让人去任务管理器里杀进程，不如给一个明确的出口。
+/// 系统原生 X 的语义是隐藏窗口并保留后台；只有这个接口和托盘“退出”
+/// 会设置全进程退出标志，让窗口与无窗口模式都走正常收尾。
 fn quit() -> Result<Value> {
     tracing::info!("收到退出请求，界面服务即将关闭");
-    std::thread::spawn(|| {
-        // 留一点时间把响应发出去，否则浏览器那边看到的是连接被重置
-        std::thread::sleep(std::time::Duration::from_millis(300));
-        // 摘掉托盘图标再走：直接 exit 会把图标留在任务栏上（shell 不会因为
-        // 进程消失就立刻收回它），表现就是「退出了但图标还在、点它没反应」。
-        // 两个出口（这里的 /api/quit 和托盘菜单的「退出」）必须做同一件事。
-        crate::server::release_tray();
-        std::process::exit(0);
-    });
-    Ok(json!({ "ok": true }))
+    let window_notified = crate::server::request_shutdown();
+    Ok(json!({ "ok": true, "window_notified": window_notified }))
 }
 
 /// Unix 秒（给存档文件名用）。

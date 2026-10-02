@@ -3,72 +3,73 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#f4f6f1">
 <title>VibeClassAgent</title>
 <link rel="stylesheet" href="/style.css">
 </head>
 <body>
-<div class="app">
+<div class="app-shell">
   <aside class="sidebar">
     <div class="brand">
-      <!-- ASCII 字符画从语言文件读（web.logo）；取不到就退回纯文字 -->
-      <pre class="brand-mark" id="brand-logo"></pre>
-      <span class="brand-text" id="brand-text" style="display:none">VCA</span>
-      <span class="brand-sub" data-i18n="brand_sub">课堂录制与总结</span>
+      <div class="brand-badge" aria-hidden="true"><span></span><span></span><span></span></div>
+      <div class="brand-copy">
+        <span class="brand-name">VibeClassAgent</span>
+        <span class="brand-sub" data-i18n="brand_sub">课堂录制与总结</span>
+      </div>
+      <pre class="brand-mark" id="brand-logo" hidden></pre>
+      <span class="brand-text" id="brand-text" hidden>VCA</span>
     </div>
 
-    <nav class="nav" id="nav">
-      <button class="nav-item active" data-page="overview">
-        <span class="nav-ico">◈</span> <span data-i18n="nav.overview">概览</span>
-      </button>
-      <button class="nav-item" data-page="run">
-        <span class="nav-ico">▶</span> <span data-i18n="nav.run">运行</span>
-      </button>
-      <button class="nav-item" data-page="model">
-        <span class="nav-ico">✦</span> <span data-i18n="nav.model">模型 API</span>
-      </button>
-      <button class="nav-item" data-page="push">
-        <span class="nav-ico">⇪</span> <span data-i18n="nav.push">推送</span>
-      </button>
-      <button class="nav-item" data-page="timetable">
-        <span class="nav-ico">▤</span> <span data-i18n="nav.timetable">时间表</span>
-      </button>
-      <button class="nav-item" data-page="schedule">
-        <span class="nav-ico">▦</span> <span data-i18n="nav.schedule">课表</span>
-      </button>
-      <button class="nav-item" data-page="record">
-        <span class="nav-ico">●</span> <span data-i18n="nav.record">录制与文件</span>
-      </button>
-      <button class="nav-item" data-page="jobs">
-        <span class="nav-ico">≡</span> <span data-i18n="nav.jobs">作业</span>
-      </button>
-      <!-- 日志：控制台窗口已隐藏，程序的全部输出集中在这里 -->
-      <button class="nav-item" data-page="logs">
-        <span class="nav-ico">⌸</span> <span data-i18n="nav.logs">日志</span>
-      </button>
+    <nav class="nav" id="nav" data-i18n-aria="common.primary_nav" aria-label="主导航">
+      <div class="nav-group">
+        <span class="nav-label" data-i18n="nav.group_today">今日</span>
+        <button class="nav-item active" data-page="overview"><span class="nav-ico">◫</span><span data-i18n="nav.overview">概览</span></button>
+        <button class="nav-item" data-page="run"><span class="nav-ico">▶</span><span data-i18n="nav.run">运行</span></button>
+        <button class="nav-item" data-page="jobs"><span class="nav-ico">≡</span><span data-i18n="nav.jobs">作业</span></button>
+      </div>
+      <div class="nav-group">
+        <span class="nav-label" data-i18n="nav.group_plan">计划</span>
+        <button class="nav-item" data-page="timetable"><span class="nav-ico">◷</span><span data-i18n="nav.timetable">时间表</span></button>
+        <button class="nav-item" data-page="schedule"><span class="nav-ico">▦</span><span data-i18n="nav.schedule">课表</span></button>
+      </div>
+      <div class="nav-group">
+        <span class="nav-label" data-i18n="nav.group_connect">连接</span>
+        <button class="nav-item" data-page="model"><span class="nav-ico">✦</span><span data-i18n="nav.model">模型 API</span></button>
+        <button class="nav-item" data-page="push"><span class="nav-ico">↗</span><span data-i18n="nav.push">推送</span></button>
+        <button class="nav-item" data-page="record"><span class="nav-ico">●</span><span data-i18n="nav.record">录制与文件</span></button>
+      </div>
+      <div class="nav-group nav-group-last">
+        <button class="nav-item" data-page="logs"><span class="nav-ico">⌁</span><span data-i18n="nav.logs">日志</span></button>
+      </div>
     </nav>
 
     <div class="sidebar-foot">
-      <div class="dot-row"><span class="dot" id="dot-llm"></span> <span data-i18n="side.llm">模型</span></div>
-      <div class="dot-row"><span class="dot" id="dot-push"></span> <span data-i18n="side.push">推送</span></div>
-      <div class="dot-row"><span class="dot" id="dot-stt"></span> <span data-i18n="side.stt">本地转写</span></div>
+      <div class="system-health">
+        <span class="dot-row"><span class="dot" id="dot-llm"></span><span data-i18n="side.llm">模型</span></span>
+        <span class="dot-row"><span class="dot" id="dot-push"></span><span data-i18n="side.push">推送</span></span>
+        <span class="dot-row"><span class="dot" id="dot-stt"></span><span data-i18n="side.stt">本地转写</span></span>
+      </div>
+      <button class="sidebar-quit" id="btn-quit" data-i18n="common.quit">退出程序</button>
     </div>
   </aside>
 
   <main class="main">
     <header class="topbar">
-      <h1 id="page-title">概览</h1>
+      <button class="menu-btn" id="btn-menu" data-i18n-title="common.menu" aria-label="菜单" aria-expanded="false">☰</button>
+      <div class="page-heading">
+        <span class="page-eyebrow" data-i18n="common.workspace">VCA / 工作台</span>
+        <h1 id="page-title">概览</h1>
+      </div>
       <div class="topbar-right">
-        <span class="pill" id="pill-profile">default</span>
-        <button class="btn ghost" id="btn-refresh" data-i18n="common.refresh">刷新</button>
-        <button class="btn ghost" id="btn-quit" data-i18n="common.quit"
-                title="退出程序。注意：直接关掉这个窗口不会退出后台服务。">退出</button>
+        <span class="live-mark"><span></span><span data-i18n="common.local_service">本地服务</span></span>
+        <button class="icon-btn" id="btn-refresh" data-i18n-title="common.refresh" aria-label="刷新">↻</button>
       </div>
     </header>
-    <section class="content" id="view"></section>
+    <section class="content" id="view" aria-live="polite" aria-busy="true"></section>
   </main>
 </div>
-
-<div class="toast-wrap" id="toasts"></div>
+<button class="sidebar-scrim" id="sidebar-scrim" data-i18n-title="common.close_menu" aria-label="关闭菜单" tabindex="-1"></button>
+<div class="toast-wrap" id="toasts" aria-live="polite"></div>
 <script src="/app.js"></script>
 </body>
 </html>

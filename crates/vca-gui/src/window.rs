@@ -32,7 +32,10 @@ use std::sync::mpsc;
 /// 原生窗口发回主线程的事件。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WindowEvent {
-    /// 窗口被用户关掉了（点 X）。程序应当退出。
+    /// 程序正在彻底退出，窗口与 WebView 已销毁。
+    ///
+    /// 点系统原生 X 只会隐藏窗口，不会发送这个事件；只有主动执行
+    /// [`WindowControl::close`] 时才会发送。
     Closed,
     /// 窗口没能建起来。`String` 是给人看的失败原因。
     ///
@@ -47,25 +50,27 @@ pub enum WindowEvent {
     Shown,
 }
 
-/// 起一个原生窗口加载 `url`，**立即返回**可以查询/关闭的句柄。
+/// 起一个原生窗口加载 `url`，阻塞运行到收到显式退出命令。
 ///
 /// # 线程模型（重要）
 ///
 /// Win32 的窗口属于**创建它的那个线程**，消息也只能由那个线程抽取，
-/// 所以事件循环 `event_loop.run()` 会一直阻塞。因此这里在内部起一个
-/// 专属线程跑窗口，本函数**立刻返回**，调用方（`server.rs`）可以继续
-/// 在主线程上处理 HTTP 请求。
+/// 所以事件循环必须占用调用线程。调用方应先把 HTTP 服务放到后台线程，
+/// 再调用本函数把当前（主）线程交给 Tao 事件循环。
 ///
-/// 这也意味着 `serve()` 里那句"必须写这个函数"的顺序约束：
-/// 窗口线程和 HTTP 线程是并行的，谁先起都行。
+/// `on_ready` 会在窗口和 WebView 创建成功、进入事件循环之前调用。
+/// 调用方必须在这里发布 [`WindowControl`]，这样 HTTP、托盘和单实例
+/// Focus 才能在事件循环运行期间向窗口发送命令，而不是等事件循环退出后
+/// 才拿到已经失效的控制端。
 ///
 /// # 返回
 ///
-/// - `Ok(handle)`：窗口线程已启动。真正的创建结果是**异步**的 ——
-///   WebView2 缺失之类的错误会通过 [`WindowEvent::Failed`] 报回来，
-///   因为那些错误要到窗口线程里才知道。
-/// - `Err`：连线程都起不来（极罕见）。
-pub fn run(url: String) -> anyhow::Result<WindowHandle> {
+/// - `Ok(())`：窗口收到显式 [`WindowCmd::Close`]，事件循环正常结束；
+/// - `Err`：窗口创建、WebView 创建或事件循环发生异常。
+pub fn run<F>(url: String, on_ready: F) -> anyhow::Result<()>
+where
+    F: FnOnce(WindowControl),
+{
     let (tx, rx) = mpsc::channel::<WindowEvent>();
     // 反向通道：主线程让窗口线程聚焦/关闭自己
     let (cmd_tx, cmd_rx) = mpsc::channel::<WindowCmd>();
@@ -86,27 +91,35 @@ pub fn run(url: String) -> anyhow::Result<WindowHandle> {
     // 那 HTTP 服务怎么办？它必须已经在别的线程上跑着了。
     // `serve()` 里的顺序正是：先把服务丢到后台线程，主线程再进窗口。
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        run_blocking(url, tx.clone(), cmd_rx)
+        run_blocking(url, tx.clone(), cmd_rx, || {
+            on_ready(WindowControl { cmd: cmd_tx });
+            // 现有调用方通过 `Result` 接收初始化失败，不再轮询旧事件接收端；
+            // 就绪后释放它，窗口控制只通过 `WindowControl` 发送。
+            drop(rx);
+        })
     }));
 
     match result {
-        Ok(()) => Ok(WindowHandle {
-            cmd: cmd_tx,
-            probe: rx,
-        }),
-        Err(_) => {
-            // 事件循环跑完（窗口关闭）是正常路径；真 panic 时这里兜底报错。
-            anyhow::bail!("窗口事件循环异常退出")
-        }
+        Ok(result) => result,
+        Err(_) => anyhow::bail!("窗口事件循环异常退出"),
     }
 }
 
-/// 窗口线程本体：建窗口 + 跑事件循环（会阻塞到这个线程结束）。
-fn run_blocking(url: String, tx: mpsc::Sender<WindowEvent>, cmd_rx: mpsc::Receiver<WindowCmd>) {
+/// 窗口本体：建窗口 + 跑事件循环（会阻塞到显式退出）。
+fn run_blocking<F>(
+    url: String,
+    tx: mpsc::Sender<WindowEvent>,
+    cmd_rx: mpsc::Receiver<WindowCmd>,
+    on_ready: F,
+) -> anyhow::Result<()>
+where
+    F: FnOnce(),
+{
     use tao::event::{Event, WindowEvent as TaoWindowEvent};
     use tao::event_loop::{ControlFlow, EventLoopBuilder};
+    use tao::platform::run_return::EventLoopExtRunReturn;
     use tao::window::WindowBuilder;
-    let event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
+    let mut event_loop = EventLoopBuilder::<UserEvent>::with_user_event().build();
 
     let proxy = event_loop.create_proxy();
     // WebView 的页面加载回调也要往事件循环里发事件，所以留一份。
@@ -147,8 +160,8 @@ fn run_blocking(url: String, tx: mpsc::Sender<WindowEvent>, cmd_rx: mpsc::Receiv
             // 报回去让调用方退回系统浏览器，用户至少还能用。
             let msg = format!("创建窗口失败：{e}");
             tracing::warn!("{msg}");
-            let _ = tx.send(WindowEvent::Failed(msg));
-            return;
+            let _ = tx.send(WindowEvent::Failed(msg.clone()));
+            anyhow::bail!(msg);
         }
     };
 
@@ -163,53 +176,71 @@ fn run_blocking(url: String, tx: mpsc::Sender<WindowEvent>, cmd_rx: mpsc::Receiv
     //
     // 注意是 `new_with_web_context`，不是 `.with_web_context(...)`：
     // wry 0.57 把这个参数放在**构造函数**上。
+    // Debug 构建可跳过 WebView2，只用于真实 Win32 生命周期探针。这样探针验证
+    // WM_CLOSE / 单实例唤醒 / 显式退出时，不会被测试机上另一个 WebView2 宿主
+    // 对 profile 的占用干扰。Release 构建里该环境变量永远不起作用。
+    let lifecycle_probe =
+        cfg!(debug_assertions) && std::env::var_os("VCA_WINDOW_LIFECYCLE_PROBE").is_some();
     let mut web_context = wry::WebContext::new(Some(webview_data_dir()));
 
-    let webview = match wry::WebViewBuilder::new_with_web_context(&mut web_context)
-        .with_url(&url)
-        .with_initialization_script(INIT_SCRIPT)
-        // 深色底：即使在某台机器上还是漏出一帧，露的也是**深色**而不是刺眼的白。
-        // 界面的实际底色由 CSS 决定，这里管的是"页面还没画出来时"那层。
-        //
-        // 注意 `wry::RGBA` 就是个元组别名 `(u8,u8,u8,u8)`，
-        // 不是结构体（wry 0.57），别写成 `Color(...)`。
-        // 取值和界面深色主题的底色接近，过渡时看不出接缝。
-        .with_background_color((24, 26, 32, 255))
-        // 页面加载完成 → 这时才把窗口显示出来（见上面 with_visible(false)）。
-        //
-        // 用 `on_page_load` 而不是定时器：完成的时机由 WebView 自己报，
-        // 不用猜"加载要多久"。慢机器上不会提前显示空窗口，
-        // 快机器上也不会白等。
-        //
-        // 通过 `proxy` 发**用户事件**而不是直接调 `window.set_visible(true)` ——
-        // 回调可能不在事件循环那个线程上跑，直接碰窗口不安全。
-        // 绕一圈回到事件循环里执行才是正确姿势。
-        .with_on_page_load_handler({
-            let proxy = webview_proxy.clone();
-            let tx = tx.clone();
-            move |event, _url| {
-                if let wry::PageLoadEvent::Finished = event {
-                    // 先让事件循环亮窗口，再通知主线程"已经可见了"
-                    let _ = proxy.send_event(UserEvent::PageLoaded);
-                    let _ = tx.send(WindowEvent::Shown);
+    let webview = if lifecycle_probe {
+        tracing::info!("Win32 生命周期探针模式：跳过 WebView2 初始化");
+        None
+    } else {
+        let webview = match wry::WebViewBuilder::new_with_web_context(&mut web_context)
+            .with_url(&url)
+            .with_initialization_script(INIT_SCRIPT)
+            // 深色底：即使在某台机器上还是漏出一帧，露的也是**深色**而不是刺眼的白。
+            // 界面的实际底色由 CSS 决定，这里管的是"页面还没画出来时"那层。
+            //
+            // 注意 `wry::RGBA` 就是个元组别名 `(u8,u8,u8,u8)`，
+            // 不是结构体（wry 0.57），别写成 `Color(...)`。
+            // 取值和界面深色主题的底色接近，过渡时看不出接缝。
+            .with_background_color((24, 26, 32, 255))
+            // 页面加载完成 → 这时才把窗口显示出来（见上面 with_visible(false)）。
+            //
+            // 用 `on_page_load` 而不是定时器：完成的时机由 WebView 自己报，
+            // 不用猜"加载要多久"。慢机器上不会提前显示空窗口，
+            // 快机器上也不会白等。
+            //
+            // 通过 `proxy` 发**用户事件**而不是直接调 `window.set_visible(true)` ——
+            // 回调可能不在事件循环那个线程上跑，直接碰窗口不安全。
+            // 绕一圈回到事件循环里执行才是正确姿势。
+            .with_on_page_load_handler({
+                let proxy = webview_proxy.clone();
+                let tx = tx.clone();
+                move |event, _url| {
+                    if let wry::PageLoadEvent::Finished = event {
+                        // 先让事件循环亮窗口，再通知主线程"已经可见了"
+                        let _ = proxy.send_event(UserEvent::PageLoaded);
+                        let _ = tx.send(WindowEvent::Shown);
+                    }
                 }
+            })
+            .build(&window)
+        {
+            Ok(w) => w,
+            Err(e) => {
+                // 最常见的原因是没装 WebView2 运行时。
+                // **这条路径必须报出去** —— 否则用户看到的是一个空白窗口，
+                // 完全不知道缺什么。
+                let msg = format!("创建 WebView 失败（多半是缺少 WebView2 运行时）：{e}");
+                tracing::warn!("{msg}");
+                let _ = tx.send(WindowEvent::Failed(msg.clone()));
+                anyhow::bail!(msg);
             }
-        })
-        .build(&window)
-    {
-        Ok(w) => w,
-        Err(e) => {
-            // 最常见的原因是没装 WebView2 运行时。
-            // **这条路径必须报出去** —— 否则用户看到的是一个空白窗口，
-            // 完全不知道缺什么。
-            let msg = format!("创建 WebView 失败（多半是缺少 WebView2 运行时）：{e}");
-            tracing::warn!("{msg}");
-            let _ = tx.send(WindowEvent::Failed(msg));
-            return;
-        }
+        };
+        Some(webview)
     };
 
     tracing::info!("原生窗口已创建，正在加载 {url}");
+    on_ready();
+    if lifecycle_probe {
+        // 和真实 PageLoadEvent::Finished 走同一个用户事件分支，确保窗口显示
+        // 与后续关闭/唤醒行为完全复用生产代码。
+        let _ = webview_proxy.send_event(UserEvent::PageLoaded);
+        let _ = tx.send(WindowEvent::Shown);
+    }
 
     // ⚠️ 兜底：页面要是**加载不完**，窗口不能永远不显示。
     //
@@ -236,35 +267,28 @@ fn run_blocking(url: String, tx: mpsc::Sender<WindowEvent>, cmd_rx: mpsc::Receiv
     //
     // 用 `Option` 包着是为了能在关闭时**主动 drop**（见下面两个关闭分支），
     // 让控件在窗口还活着的时候正常拆除。
-    let mut webview = Some(webview);
+    let mut webview = webview;
     let mut shown = false;
 
     // 闭包末尾会读一次 `webview`（`black_box`），那是"保活"这件事的落点。
     // 没有那个读，编译器会认为这个变量只写不读 —— 警告只是表象，
     // 真正的风险是它可能被提前析构，于是窗口空白。**别删那次读。**
-    event_loop.run(move |event, _, control_flow| {
+    event_loop.run_return(move |event, _, control_flow| {
         *control_flow = ControlFlow::Wait;
         match event {
             Event::WindowEvent {
                 event: TaoWindowEvent::CloseRequested,
                 ..
-            } => {
-                // ⚠️ **先隐藏再销毁** —— 这是不闪白的关键（关闭方向）。
-                //
-                // 用户报「关闭时也会出现闪白」。根因是销毁顺序：
-                // 窗口开始销毁时 WebView 控件会先被摘掉，
-                // 露出底下那个空窗口（系统默认白底）—— 于是关的时候闪一下白。
-                //
-                // 先 `set_visible(false)` 把整个窗口藏起来，用户就看不到
-                // 后面的销毁过程了。这一帧的差别就是"闪白"和"干净关闭"。
-                window.set_visible(false);
-                // 显式 drop WebView，让它在窗口还活着的时候正常拆除 ——
-                // 比留给系统在窗口析构时粗暴回收更稳（WebView2 有 COM 引用计数，
-                // 顺序不对时可能报错或留下进程）。
-                webview = None;
-                let _ = tx.send(WindowEvent::Closed);
-                *control_flow = ControlFlow::Exit;
-            }
+            } => match close_action(CloseIntent::NativeRequest) {
+                CloseAction::Hide => {
+                    // 系统原生 X 的语义是「收起到后台」：只隐藏顶层窗口，
+                    // WebView、事件循环、HTTP 服务和托盘都继续存活。
+                    // 后续托盘或单实例 Focus 会把同一个窗口重新显示出来，
+                    // 不会重复创建 WebView，也不会重复注册监听。
+                    window.set_visible(false);
+                }
+                CloseAction::Exit => unreachable!("原生关闭请求只能隐藏窗口"),
+            },
             Event::UserEvent(UserEvent::PageLoaded) => {
                 // 页面画完了 → 亮出窗口。**用户第一眼就是渲染好的界面**，
                 // 中间那层空窗口（系统默认白底）从来没露过脸 ——
@@ -292,17 +316,27 @@ fn run_blocking(url: String, tx: mpsc::Sender<WindowEvent>, cmd_rx: mpsc::Receiv
                 window.request_redraw();
             }
             Event::UserEvent(UserEvent::Cmd(WindowCmd::Close)) => {
-                // 主动关闭时同样先隐藏（走同一条干净路径）
-                window.set_visible(false);
-                webview = None;
-                let _ = tx.send(WindowEvent::Closed);
-                *control_flow = ControlFlow::Exit;
+                match close_action(CloseIntent::Command) {
+                    CloseAction::Hide => unreachable!("主动关闭命令必须彻底退出"),
+                    CloseAction::Exit => {
+                        // ⚠️ **先隐藏再销毁** —— 这是不闪白的关键（关闭方向）。
+                        //
+                        // 主动退出时先隐藏整个窗口，再摘掉 WebView；用户看不到
+                        // WebView 销毁后露出的空窗口，因此不会在退出时闪白。
+                        window.set_visible(false);
+                        webview = None;
+                        let _ = tx.send(WindowEvent::Closed);
+                        *control_flow = ControlFlow::Exit;
+                    }
+                }
             }
             _ => {}
         }
         // 保活：确保 `webview` 真的被闭包持有到最后一刻。
         std::hint::black_box(&webview);
     });
+
+    Ok(())
 }
 
 /// 原生窗口的**控制端**：只能发命令（聚焦/关闭），不能收事件。
@@ -311,7 +345,7 @@ fn run_blocking(url: String, tx: mpsc::Sender<WindowEvent>, cmd_rx: mpsc::Receiv
 /// 供托盘线程和主线程共用 —— 不需要 `unsafe`，也不必破例
 /// `vca-gui` 的 `#![forbid(unsafe_code)]`。
 ///
-/// 由 [`WindowHandle::control_only`] 取得。
+/// 由 [`run`] 的 `on_ready` 回调取得并发布给 HTTP/托盘线程。
 #[derive(Clone)]
 pub struct WindowControl {
     cmd: mpsc::Sender<WindowCmd>,
@@ -337,8 +371,31 @@ impl WindowControl {
 enum WindowCmd {
     /// 把窗口唤到最前面（第二次启动、或点托盘「打开界面」时用）。
     Focus,
-    /// 关掉窗口。
+    /// 彻底关闭窗口并退出事件循环。
     Close,
+}
+
+/// 窗口收到的关闭意图。
+///
+/// 将平台事件与执行动作分开，纯逻辑测试无需创建真实 Win32 窗口，
+/// 也能固定「原生 X 只隐藏、程序关闭命令才退出」这一生命周期约定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseIntent {
+    NativeRequest,
+    Command,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CloseAction {
+    Hide,
+    Exit,
+}
+
+fn close_action(intent: CloseIntent) -> CloseAction {
+    match intent {
+        CloseIntent::NativeRequest => CloseAction::Hide,
+        CloseIntent::Command => CloseAction::Exit,
+    }
 }
 
 #[derive(Debug)]
@@ -396,82 +453,8 @@ const INIT_SCRIPT: &str = r#"
 })();
 "#;
 
-/// 正在运行的原生窗口的**控制端**。
-///
-/// 只装一个 `Sender`，因此天然是 `Send + Sync`、不需要 `unsafe`，
-/// 可以直接放进 `static` 让托盘线程和主线程共用。
-///
-/// # 为什么没有接收端
-///
-/// `mpsc::Receiver` 不是 `Sync`（只允许一个线程拿它），而 `static`
-/// 要求整个类型 `Sync`。接收端只在 [`run`] 返回时用过一次
-/// （等窗口建起来、或探测建失败），之后就不需要了 —— 所以不放进这里。
-///
-/// 窗口关没关我们是**从别处知道的**：`serve()` 的主循环会一直跑，
-/// 窗口关掉时窗口线程自己会退出，程序由单实例/退出路径收尾。
-/// 这也让这个类型足够小、足够安全，不必破例 `unsafe`。
-pub struct WindowHandle {
-    cmd: mpsc::Sender<WindowCmd>,
-    /// 只在 `serve()` 里探一次"窗口建起来没有"，之后就不再用了。
-    ///
-    /// 它让 `WindowHandle` 不是 `Sync`，所以**不能**把这个结构体直接放进
-    /// `static`。用法是：在 `serve()` 里先拿着完整的 handle 探测，
-    /// 探完了把 `cmd` 克隆一份存进 static，把 `probe` 丢掉。
-    probe: mpsc::Receiver<WindowEvent>,
-}
-
-/// 手写 `Clone`：`Receiver` 不是 `Clone`，但 `Sender` 是。
-///
-/// 克隆出来的副本**不带接收端**（`probe` 给一个全新的空 channel）——
-/// 事件只该被原来那个 handle 消费一次，克隆体拿不到也不该拿到。
-/// 这样既满足 `Clone`，又不会有两个地方抢同一条事件流。
-impl Clone for WindowHandle {
-    fn clone(&self) -> Self {
-        let (_, dummy_rx) = mpsc::channel::<WindowEvent>();
-        Self {
-            cmd: self.cmd.clone(),
-            probe: dummy_rx,
-        }
-    }
-}
-
-impl WindowHandle {
-    /// 把窗口唤到最前面。
-    ///
-    /// 用在两个地方：第二次双击程序时（单实例保护）、点托盘菜单的「打开界面」。
-    /// 都不该再开一个窗口 —— 那会让用户面对两个一模一样的界面。
-    pub fn focus(&self) {
-        let _ = self.cmd.send(WindowCmd::Focus);
-    }
-
-    /// 主动关掉窗口（程序要退出时用）。
-    pub fn close(&self) {
-        let _ = self.cmd.send(WindowCmd::Close);
-    }
-
-    /// 非阻塞地取一个事件（窗口建起来没有 / 关了没有）。
-    ///
-    /// 为什么是"非阻塞轮询"而不是"阻塞等"：调用方（`server.rs`）的主循环
-    /// 同时在处理 HTTP 请求，不能在这里挂住。轮询间隔由调用方决定，
-    /// 和托盘那边是同一套做法。
-    ///
-    /// 这个方法只在 `serve()` 探测窗口是否建成时用；探测完就可以
-    /// 通过 [`Self::control_only`] 取一个能放进 `static` 的纯控制端。
-    pub fn try_recv(&self) -> Option<WindowEvent> {
-        self.probe.try_recv().ok()
-    }
-
-    /// 取一个**只含控制端**的副本，可以放进 `static`。
-    ///
-    /// `WindowHandle` 本身因为含着 `Receiver` 而不是 `Sync`，进不了
-    /// `static`。而存进 `static` 只需要"发命令"这一个能力，
-    /// 所以探测完就换成这个轻量版。
-    pub fn control_only(&self) -> WindowControl {
-        WindowControl {
-            cmd: self.cmd.clone(),
-        }
-    }
-}
+/// 兼容旧公开名称；运行期句柄就是可跨线程发送命令的控制端。
+pub type WindowHandle = WindowControl;
 
 /// WebView2 的用户数据目录。
 ///
@@ -496,6 +479,16 @@ pub fn webview_data_dir() -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_close_request_only_hides_window() {
+        assert_eq!(close_action(CloseIntent::NativeRequest), CloseAction::Hide);
+    }
+
+    #[test]
+    fn close_command_exits_window_loop() {
+        assert_eq!(close_action(CloseIntent::Command), CloseAction::Exit);
+    }
 
     #[test]
     fn init_script_blocks_browser_affordances() {

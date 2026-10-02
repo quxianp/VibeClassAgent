@@ -417,6 +417,9 @@
   "web": {
     "brand_sub": "Recording & lesson reports",
     "nav": {
+      "group_today": "Today",
+      "group_plan": "Plan",
+      "group_connect": "Connect",
       "overview": "Overview",
       "run": "Run",
       "model": "Model API",
@@ -434,6 +437,11 @@
     },
     "common": {
       "refresh": "Refresh",
+      "local_service": "Local service",
+      "workspace": "VCA / Workspace",
+      "primary_nav": "Primary navigation",
+      "menu": "Menu",
+      "close_menu": "Close menu",
       "quit": "Quit",
       "save": "Save",
       "loading": "Loading...",

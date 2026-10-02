@@ -417,6 +417,9 @@
   "web": {
     "brand_sub": "课堂录制与总结",
     "nav": {
+      "group_today": "今日",
+      "group_plan": "计划",
+      "group_connect": "连接",
       "overview": "概览",
       "run": "运行",
       "model": "模型 API",
@@ -434,7 +437,12 @@
     },
     "common": {
       "refresh": "刷新",
-      "quit": "退出",
+      "local_service": "本地服务",
+      "workspace": "VCA / 工作台",
+      "primary_nav": "主导航",
+      "menu": "菜单",
+      "close_menu": "关闭菜单",
+      "quit": "退出程序",
       "save": "保存",
       "loading": "载入中…",
       "cancel": "取消",

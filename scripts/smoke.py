@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shutil
 import socket
 import subprocess
@@ -337,10 +338,70 @@ def run_checks(api: Api, base: str, mock: MockOneBot, cfg: Path) -> None:
     else:
         bad("GET /api/status", str(s))
     _, p = api.call("/api/providers")
-    if p and len(p.get("providers") or []) >= 5:
-        ok("GET /api/providers", f"{len(p['providers'])} 个预设")
+
+    # 下载镜像源跟状态/预设一样是界面启动时读取的基础数据。把完整往返并入
+    # 本项而不增加 PASS 数，既守住历史约定的 58/58，也确保新接口不是只靠单测。
+    mirror_error = ""
+    _, initial = api.call("/api/deps/mirrors")
+    if not initial or not initial.get("ok"):
+        mirror_error = f"初始读取失败：{initial}"
+    elif any(len(initial.get("builtin", {}).get(dep) or []) != 2
+             for dep in ("ffmpeg", "whisper", "model")):
+        mirror_error = f"默认公开源数量异常：{initial.get('builtin')}"
+
+    if not mirror_error:
+        _, saved = api.call("/api/deps/mirrors", {
+            "prefix": [" https://mirror.example/// ", "https://mirror.example/"],
+            "mirrors": {
+                "ffmpeg": [
+                    " https://files.example/ffmpeg.zip ",
+                    "",
+                    "https://files.example/ffmpeg.zip",
+                ],
+            },
+            "only_custom": False,
+        })
+        expected_mirrors = {"ffmpeg": ["https://files.example/ffmpeg.zip"]}
+        if (not saved or not saved.get("ok")
+                or saved.get("prefix") != ["https://mirror.example/"]
+                or saved.get("mirrors") != expected_mirrors):
+            mirror_error = f"保存/规范化失败：{saved}"
+
+    if not mirror_error:
+        _, live = api.call("/api/deps/mirrors")
+        if (not live or live.get("prefix") != ["https://mirror.example/"]
+                or live.get("mirrors") != expected_mirrors):
+            mirror_error = f"同进程回读未生效：{live}"
+
+    if not mirror_error:
+        invalid_cases = (
+            ({"mirrors": {"ffmpeg": ["ftp://bad/a.zip"]}}, "ffmpeg"),
+            ({"prefix": ["https://mirror.example/?url="]}, "prefix"),
+            ({"mirrors": {"unknown": ["https://x/a"]}}, "unknown"),
+            ({"prefix": [], "mirrors": {}, "only_custom": True}, "only_custom"),
+        )
+        for body, field in invalid_cases:
+            _, rejected = api.call("/api/deps/mirrors", body)
+            if (not rejected or rejected.get("ok") is not False
+                    or rejected.get("field") != field):
+                mirror_error = f"非法输入未正确拒绝（{field}）：{rejected}"
+                break
+
+    if not mirror_error:
+        _, reset = api.call("/api/deps/mirrors", {
+            "prefix": [], "mirrors": {}, "only_custom": False,
+        })
+        if (not reset or not reset.get("ok") or reset.get("prefix") != []
+                or reset.get("mirrors") != {}):
+            mirror_error = f"恢复默认源失败：{reset}"
+
+    if p and len(p.get("providers") or []) >= 5 and not mirror_error:
+        ok(
+            "GET /api/providers + 镜像配置往返",
+            f"{len(p['providers'])} 个预设；3 项默认源、4 类非法输入、即时回读均通过",
+        )
     else:
-        bad("GET /api/providers", str(p))
+        bad("GET /api/providers + 镜像配置往返", mirror_error or str(p))
 
     print("\n[4] 模型配置写入与回读", flush=True)
     r = api.call("/api/config/llm", {
@@ -362,10 +423,31 @@ def run_checks(api: Api, base: str, mock: MockOneBot, cfg: Path) -> None:
     # 关键回归：写 llm 段不能碰 push 段、也不能碰 transcriber 段
     sp = cfg / "profiles" / "default" / "settings.yaml"
     text = sp.read_text(encoding="utf-8") if sp.is_file() else ""
-    if 'provider: ""' in text and "model: tiny" in text:
+
+    # settings.yaml 经过 serde_yaml 的 Value 往返后，空字符串可能从 ""
+    # 等价地改写为 ''。不能拿引号风格判断配置被污染；按顶层段落检查语义。
+    def yaml_section(name: str) -> str:
+        match = re.search(
+            rf"(?ms)^{re.escape(name)}:\s*\n(.*?)(?=^[A-Za-z_][A-Za-z0-9_-]*:\s*(?:\n|$)|\Z)",
+            text,
+        )
+        return match.group(1) if match else ""
+
+    push_yaml = yaml_section("push")
+    transcriber_yaml = yaml_section("transcriber")
+    push_provider_empty = bool(re.search(
+        r"(?m)^  provider:\s*(?:''|\"\")\s*$", push_yaml,
+    ))
+    whisper_model_tiny = bool(re.search(
+        r"(?m)^  model:\s*tiny\s*$", transcriber_yaml,
+    ))
+    if push_provider_empty and whisper_model_tiny:
         ok("落盘未误伤其它段", "push.provider 仍为空、whisper 模型名未变")
     else:
-        bad("落盘误伤了其它段", "llm 段的写入污染了 push 或 transcriber")
+        bad(
+            "落盘误伤了其它段",
+            "llm 段写入后 push.provider 或 transcriber.model 语义发生变化",
+        )
 
     print("\n[5] 推送配置 + 真实发送", flush=True)
     r = api.call("/api/config/push", {

@@ -1805,8 +1805,205 @@ async function renderSchedule() {
 
 /* ---------------------------------------------------------- 录制与文件 */
 
+/**
+ * 下载源设置只消费 CONTRACT.md 中声明的字段：
+ * mirrors 是依赖专属的完整文件地址，prefix 是拼到内置地址前的全局前缀。
+ * 两者故意分开渲染，避免用户把「完整地址」误填到「前缀」里。
+ */
+function mirrorRows(depId, urls) {
+  const values = urls && urls.length ? urls : [''];
+  return values.map(url => `
+    <div class="mirror-url-row">
+      <input type="text" data-mirror-dep="${esc(depId)}" value="${esc(url)}"
+             placeholder="${esc(t('deps.mirror_url_ph'))}">
+      <button class="btn sm" type="button" data-mirror-test>${esc(t('deps.mirror_test'))}</button>
+      <span class="mirror-test-result" aria-live="polite"></span>
+    </div>`).join('');
+}
+
+function mirrorBuiltinList(urls) {
+  if (!urls || !urls.length) return '';
+  return `<ul class="mirror-builtin-list">${urls.map(url =>
+    `<li><code>${esc(url)}</code></li>`).join('')}</ul>`;
+}
+
+function paintMirrorSettings(initial) {
+  const root = document.getElementById('mirror-settings');
+  if (!root) return;
+  if (!initial || !initial.ok) {
+    root.innerHTML = `<div class="card"><h2>${esc(t('deps.mirror_title'))}</h2>` +
+      `<p class="hint">${esc((initial && initial.error) || t('common.unknown'))}</p></div>`;
+    return;
+  }
+
+  let cfg = initial;
+  const deps = Array.isArray(cfg.deps) ? cfg.deps : [];
+  const prefix = Array.isArray(cfg.prefix) ? cfg.prefix : [];
+  const mirrors = cfg.mirrors && typeof cfg.mirrors === 'object' ? cfg.mirrors : {};
+  const builtin = cfg.builtin && typeof cfg.builtin === 'object' ? cfg.builtin : {};
+  const mirrorDeps = deps.filter(dep => dep && dep.id);
+
+  root.innerHTML = `
+  <div class="card mirror-card">
+    <h2>${esc(t('deps.mirror_title'))}</h2>
+    <p class="hint">${esc(t('deps.mirror_lead'))}</p>
+    <details class="mirror-advanced">
+      <summary>${esc(t('deps.mirror_adv'))}</summary>
+      <label class="field mirror-prefix-field">
+        <span>${esc(t('deps.mirror_prefix'))}</span>
+        <textarea id="mirror-prefix" rows="2" placeholder="${esc(t('deps.mirror_prefix_ph'))}">${esc(prefix.join('\n'))}</textarea>
+        <p class="hint mirror-note">${esc(t('deps.mirror_prefix_note'))}</p>
+      </label>
+      <label class="check mirror-only">
+        <input type="checkbox" id="mirror-only" ${cfg.only_custom ? 'checked' : ''}>
+        <span>${esc(t('deps.mirror_only'))}</span>
+      </label>
+      <p class="hint mirror-note">${esc(t('deps.mirror_only_note'))}</p>
+    </details>
+
+    <div class="mirror-deps">
+      ${mirrorDeps.map(dep => `
+        <section class="mirror-dep" data-mirror-section="${esc(dep.id)}">
+          <div class="mirror-dep-title">${esc(dep.label || dep.id)}
+            ${dep.required ? `<span class="tag bad">${esc(t('deps.tag_required'))}</span>` : ''}
+          </div>
+          <div class="hint mirror-item-label">${esc(t('deps.mirror_item'))}</div>
+          <div class="mirror-url-list">${mirrorRows(dep.id, mirrors[dep.id])}</div>
+          <div class="mirror-builtin">
+            <div class="hint mirror-item-label">${esc(t('deps.mirror_builtin'))}</div>
+            ${mirrorBuiltinList(builtin[dep.id]) || `<span class="mirror-empty">${esc(t('deps.mirror_builtin_note'))}</span>`}
+          </div>
+        </section>`).join('')}
+    </div>
+
+    <div class="row wrap mirror-actions">
+      <button class="btn primary" type="button" id="btn-mirror-save">${esc(t('deps.mirror_save'))}</button>
+      <button class="btn" type="button" id="btn-mirror-reset">${esc(t('deps.mirror_reset'))}</button>
+      <span class="spacer"></span>
+      <span class="mirror-save-note" id="mirror-save-note" aria-live="polite"></span>
+    </div>
+  </div>`;
+
+  const note = document.getElementById('mirror-save-note');
+  const collect = () => {
+    const nextMirrors = {};
+    root.querySelectorAll('[data-mirror-dep]').forEach(input => {
+      const value = input.value.trim();
+      if (!value) return;
+      const id = input.dataset.mirrorDep;
+      (nextMirrors[id] || (nextMirrors[id] = [])).push(value);
+    });
+    const prefixInput = document.getElementById('mirror-prefix');
+    return {
+      prefix: (prefixInput ? prefixInput.value : '').split(/\r?\n/).map(s => s.trim()).filter(Boolean),
+      mirrors: nextMirrors,
+      only_custom: !!document.getElementById('mirror-only')?.checked,
+    };
+  };
+
+  const addMirrorRow = section => {
+    const list = section.querySelector('.mirror-url-list');
+    const row = document.createElement('div');
+    row.className = 'mirror-url-row';
+    row.innerHTML = `<input type="text" data-mirror-dep="${esc(section.dataset.mirrorSection)}"` +
+      ` placeholder="${esc(t('deps.mirror_url_ph'))}">` +
+      `<button class="btn sm" type="button" data-mirror-test>${esc(t('deps.mirror_test'))}</button>` +
+      `<span class="mirror-test-result" aria-live="polite"></span>`;
+    list.appendChild(row);
+    row.querySelector('input').focus();
+  };
+
+  root.oninput = event => {
+    const input = event.target.closest('[data-mirror-dep]');
+    if (!input || !input.value.trim()) return;
+    const list = input.closest('.mirror-url-list');
+    const last = list && list.querySelector('.mirror-url-row:last-child input');
+    if (last === input) addMirrorRow(input.closest('.mirror-dep'));
+  };
+
+  root.onkeydown = event => {
+    const input = event.target.closest('[data-mirror-dep]');
+    if (!input || event.key !== 'Enter') return;
+    event.preventDefault();
+    const section = input.closest('.mirror-dep');
+    const last = section && section.querySelector('.mirror-url-list .mirror-url-row:last-child input');
+    if (last === input) addMirrorRow(section);
+  };
+
+  root.onclick = async event => {
+    const testButton = event.target.closest('[data-mirror-test]');
+    if (testButton) {
+      const input = testButton.parentElement.querySelector('[data-mirror-dep]');
+      const result = testButton.parentElement.querySelector('.mirror-test-result');
+      const url = input && input.value.trim();
+      if (!url) { result.textContent = t('deps.mirror_need_url'); result.className = 'mirror-test-result bad'; return; }
+      testButton.disabled = true;
+      testButton.textContent = t('deps.mirror_testing');
+      result.textContent = '';
+      result.className = 'mirror-test-result';
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
+      try {
+        const response = await fetch(`/api/deps/mirrors/test?t=${TOKEN}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ url }), signal: controller.signal,
+        });
+        const tested = await response.json();
+        result.textContent = tested.ok
+          ? `${t('deps.mirror_test_ok')}${tested.message ? ` · ${tested.message}` : ''}`
+          : `${t('deps.mirror_test_fail')}${tested.error ? ` · ${tested.error}` : ''}`;
+        result.className = 'mirror-test-result ' + (tested.ok ? 'ok' : 'bad');
+      } catch {
+        result.textContent = t('deps.mirror_test_fail');
+        result.className = 'mirror-test-result bad';
+      } finally {
+        clearTimeout(timer);
+        testButton.disabled = false;
+        testButton.textContent = t('deps.mirror_test');
+      }
+      return;
+    }
+
+    const saveButton = event.target.closest('#btn-mirror-save, #btn-mirror-reset');
+    if (!saveButton) return;
+    const reset = saveButton.id === 'btn-mirror-reset';
+    const payload = reset ? { prefix: [], mirrors: {}, only_custom: false } : collect();
+    const hasCustomSource = payload.prefix.length > 0 ||
+      Object.values(payload.mirrors).some(list => list.length > 0);
+    if (!reset && payload.only_custom && !hasCustomSource) {
+      note.textContent = t('deps.mirror_only_bad') || t('deps.mirror_need_url');
+      note.className = 'mirror-save-note bad';
+      return;
+    }
+    saveButton.disabled = true;
+    note.textContent = '';
+    note.className = 'mirror-save-note';
+    try {
+      const saved = await api('/api/deps/mirrors', payload);
+      if (!saved.ok) {
+        note.textContent = `${t('deps.mirror_save_failed')}${saved.error ? ` · ${saved.error}` : ''}`;
+        note.className = 'mirror-save-note bad';
+        return;
+      }
+      cfg = Object.assign({}, cfg, saved);
+      paintMirrorSettings(cfg);
+      const savedNote = document.getElementById('mirror-save-note');
+      if (savedNote) {
+        savedNote.textContent = t('deps.mirror_saved');
+        savedNote.className = 'mirror-save-note ok';
+      }
+    } catch {
+      note.textContent = t('deps.mirror_save_failed');
+      note.className = 'mirror-save-note bad';
+    } finally {
+      const button = document.getElementById(saveButton.id);
+      if (button) button.disabled = false;
+    }
+  };
+}
+
 async function renderRecord() {
-  const d = await api('/api/config/general');
+  const [d, mirrors] = await Promise.all([api('/api/config/general'), api('/api/deps/mirrors')]);
   if (!d.ok) { view.innerHTML = `<div class="empty">${esc(d.error)}</div>`; return; }
 
   view.innerHTML = `
@@ -1879,7 +2076,11 @@ async function renderRecord() {
       <span class="spacer"></span>
     </div>
     <div class="note" id="clean-note" style="display:none"></div>
-  </div>`;
+  </div>
+
+  <section id="mirror-settings" aria-live="polite"></section>`;
+
+  paintMirrorSettings(mirrors);
 
   document.getElementById('btn-save').addEventListener('click', async () => {
     const payload = {

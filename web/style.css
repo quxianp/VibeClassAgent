@@ -114,6 +114,33 @@ html, body {
 
 /* ---------------------------------------------------------------- 组件 */
 
+/* 下载源设置：保持信息密度，完整地址与全局前缀视觉分层。 */
+.mirror-card { padding-bottom: 16px; }
+.mirror-advanced { margin: 14px 0 16px; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+.mirror-advanced summary { padding: 10px 0; color: var(--text-dim); font-size: 12px; cursor: pointer; user-select: none; }
+.mirror-advanced summary:hover { color: var(--text); }
+.mirror-prefix-field { margin: 0 0 8px; }
+.mirror-note { margin-bottom: 8px !important; }
+.mirror-only { padding-top: 2px !important; }
+.mirror-deps { display: grid; gap: 12px; }
+.mirror-dep { padding: 12px; border: 1px solid var(--line-soft); border-radius: 8px; background: #121212; }
+.mirror-dep-title { display: flex; align-items: center; gap: 7px; margin-bottom: 9px; font-size: 13px; color: var(--text); }
+.mirror-item-label { margin-bottom: 6px !important; }
+.mirror-url-list { display: grid; gap: 7px; }
+.mirror-url-row { display: grid; grid-template-columns: minmax(0, 1fr) auto minmax(130px, .45fr); gap: 7px; align-items: center; }
+.mirror-url-row input { min-width: 0; }
+.mirror-url-row .btn { white-space: nowrap; }
+.mirror-test-result { min-height: 18px; color: var(--text-dim2); font-size: 11px; line-height: 18px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mirror-test-result.ok, .mirror-save-note.ok { color: var(--accent); }
+.mirror-test-result.bad, .mirror-save-note.bad { color: var(--err); }
+.mirror-builtin { margin-top: 11px; padding-top: 9px; border-top: 1px solid var(--line-soft); }
+.mirror-builtin-list { margin: 0; padding-left: 18px; color: var(--text-dim2); }
+.mirror-builtin-list li + li { margin-top: 4px; }
+.mirror-builtin-list code { font-family: var(--mono); font-size: 10.5px; overflow-wrap: anywhere; }
+.mirror-empty { color: var(--text-dim2); font-size: 11px; }
+.mirror-actions { margin-top: 14px; }
+.mirror-save-note { color: var(--text-dim); font-size: 12px; }
+
 .card {
   background: var(--panel); border: 1px solid var(--line);
   border-radius: var(--radius); padding: 18px 20px;

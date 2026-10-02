@@ -265,6 +265,16 @@ def main() -> int:
 
     # ---- 主程序与启动脚本 ----
     shutil.copy2(exe, out / "vca.exe")
+    # Native WebView2 窗口启动时由 wry 动态加载这个 DLL。build.rs 会把它
+    # 放到 exe 旁边；发布包也必须保持同样布局，否则目标机双击后会以
+    # STATUS_DLL_NOT_FOUND (0xc0000135) 直接退出，连错误窗口都来不及显示。
+    webview_loader = exe.parent / "WebView2Loader.dll"
+    if not webview_loader.is_file():
+        raise SystemExit(
+            f"没有找到 {webview_loader}；请重新执行 release 构建，"
+            "确认 vca-cli/build.rs 已复制 WebView2Loader.dll"
+        )
+    shutil.copy2(webview_loader, out / webview_loader.name)
     (out / "启动.cmd").write_text(LAUNCH_CMD, encoding="utf-8")
     (out / "首次设置.cmd").write_text(SETUP_CMD, encoding="utf-8")
     (out / "README.txt").write_text(README_TXT, encoding="utf-8")
@@ -344,8 +354,23 @@ def main() -> int:
     # ---- 汇总 ----
     total = sum(f.stat().st_size for f in out.rglob("*") if f.is_file())
     n = sum(1 for f in out.rglob("*") if f.is_file())
+    # 同时生成一个可直接传输的 zip。先写临时文件再替换，避免打包中断后
+    # 留下一个看似正常、实际损坏的旧压缩包。
+    archive = Path(args.out) / f"{APP_NAME}-windows-x64.zip"
+    tmp_archive = archive.with_suffix(".tmp.zip")
+    tmp_archive.unlink(missing_ok=True)
+    archive.unlink(missing_ok=True)
+    made = Path(shutil.make_archive(
+        str(tmp_archive.with_suffix("")),
+        "zip",
+        root_dir=out.parent,
+        base_dir=out.name,
+    ))
+    made.replace(archive)
+
     log(f"[4/4] 完成：{out}")
     log(f"      {n} 个文件，合计 {total / 1048576:.1f} MB")
+    log(f"      压缩包：{archive}（{archive.stat().st_size / 1048576:.1f} MB）")
     log("")
     log("把整个文件夹拷到一体机上，双击「首次设置.cmd」即可。")
     log("数据默认落在该文件夹的 data\\ 下，不碰 C 盘用户目录。")

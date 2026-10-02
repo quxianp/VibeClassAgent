@@ -92,6 +92,9 @@ target\release\vca.exe gui --port 4970
 | POST | `/api/deps/fetch` | 触发下载补齐。body 可带 `{"only":["ffmpeg"]}` 只补指定项 |
 | GET | `/api/deps/fetch` | 查询下载进度（前端轮询这个） |
 | POST | `/api/deps/dismiss` | 用户点「稍后」——可选项从此不再提示 |
+| GET | `/api/deps/mirrors` | 读**下载源（镜像）**配置。见 4.1.1 |
+| POST | `/api/deps/mirrors` | 保存下载源配置 |
+| POST | `/api/deps/mirrors/test` | 测一个地址通不通（轻量探测，不下载文件） |
 
 `/api/deps` 返回：
 
@@ -127,6 +130,99 @@ target\release\vca.exe gui --port 4970
 ```
 
 前端轮询间隔建议 **800ms**，`running` 变 `false` 后重新拉一次 `/api/deps` 看真实结果。
+
+#### 4.1.1 下载源（镜像）自定义
+
+用户已确认的默认策略是：**未填写时保留现有公开源列表**，不新增单一强制镜像：
+
+- ffmpeg：gyan.dev → GitHub；
+- whisper.cpp：GitHub → ghfast；
+- tiny 模型：hf-mirror → HuggingFace。
+
+校园网 / 单位内网里这些公开地址可能一个都连不上，因此用户可以在界面上填自己的
+镜像地址。**实际下载顺序严格是：依赖专属自定义地址 → 全局前缀拼接地址 → 默认公开源**；
+勾选 `only_custom` 后不再追加最后一组默认公开源。后端不会用硬编码地址覆盖用户输入。
+
+配置入口采用“前端表单 + profile 配置文件”组合，不另设环境变量：URL 不是凭据，且
+按教师 profile 持久化更符合本项目多用户隔离。对应文件：
+`<config_root>/profiles/<profile>/settings.yaml`。
+
+| 方法 | 路径 | 说明 |
+|---|---|---|
+| GET | `/api/deps/mirrors` | 读当前配置 + 内置源（只读展示） |
+| POST | `/api/deps/mirrors` | 保存配置 |
+| POST | `/api/deps/mirrors/test` | 测一个地址通不通 |
+
+`GET /api/deps/mirrors` 返回：
+
+```jsonc
+{
+  "ok": true,
+  "prefix": ["https://ghfast.top/"],          // 全局加速前缀，可空
+  "mirrors": { "ffmpeg": ["https://my.mirror/ffmpeg.zip"] }, // 每个依赖自己的地址
+  "only_custom": false,                        // true = 不试内置地址
+  "builtin": { "ffmpeg": ["https://www.gyan.dev/..."], "whisper": [], "model": [] },
+  "deps": [                                    // 拿它渲染表单：一项一组输入框
+    { "id": "ffmpeg", "label": "ffmpeg", "required": true, "consequence": "缺少它无法录制" }
+  ]
+}
+```
+
+> `mirrors` 的键必须是 `deps[].id`（`ffmpeg` / `whisper` / `model`）。**没填的依赖不要写进
+> 请求体**，写了空数组等价于没填。未知 id、非数组、数组内非字符串都会返回 `ok:false`，
+> 不会静默保存成一个下载器永远不读取的“假成功”配置。
+>
+> `mirrors` 里填的是**完整文件 URL**；`prefix` 才是拼在默认 URL 前的加速前缀。
+> `prefix` 带不带结尾 `/` 都可，保存时会规范为恰好一个 `/`；前缀不能带 `?` 或 `#`，
+> 这类特殊镜像请改为给每个依赖填写完整 URL。
+
+`POST /api/deps/mirrors` 请求体（**整体覆盖式保存**，不是增量）：
+
+```jsonc
+{
+  "prefix": ["https://ghfast.top/"],
+  "mirrors": { "ffmpeg": ["https://my.mirror/ffmpeg.zip"] },
+  "only_custom": false
+}
+```
+
+三种结果，**都用 `ok` 判断，不要用 HTTP 状态码**：
+
+```jsonc
+{ "ok": true,  "message": "下载源已保存", "prefix": [], "mirrors": {}, "only_custom": false }
+```
+
+```jsonc
+{ "ok": false, "error": "前缀镜像「xxx」不合法：必须以 http:// 或 https:// 开头", "field": "prefix" }
+```
+
+```jsonc
+{ "ok": false, "error": "勾了「只用自定义源」但一个地址都没填，这样必然下载失败。请取消勾选，或至少填一个地址。" }
+```
+
+`field` 会等于不合法的那个字段名（`prefix` 或依赖 id），可以拿来把出错那一格标红。
+保存成功后返回的是**回读磁盘的真实值**，请用它刷新界面，不要沿用本地状态
+（YAML 可能把空值吃掉）。
+
+`POST /api/deps/mirrors/test` 请求 `{"url": "https://my.mirror/ffmpeg.zip"}`：
+
+```jsonc
+{ "ok": true,  "status": 200, "kind": "file", "size": 102906624, "message": "文件，98.1 MB" }
+```
+
+```jsonc
+{
+  "ok": false,
+  "error": "连不上：connection refused",
+  "hint": "确认地址能在浏览器里直接下载文件（不是网页）。如果是内网镜像，确认这台机器能访问它。"
+}
+```
+
+> **测一个地址是网络请求，会阻塞最多 8 秒**。界面上要给出「正在连…」的反馈，
+> 别让按钮点了没动静。它是轻量探测（HEAD，拿不到就退化成极小范围 GET），
+> **不会下载整个文件**。
+
+保存后**无需重启程序**：下载时会重新读配置。但已经发起的那次下载不受影响。
 
 ### 4.2 配置
 
@@ -218,6 +314,24 @@ Pending → Recorded → Transcribed → Extracted → Linked → DocReady → P
 
 现有语言文件顶层分组：`web.` 前缀会被剥掉，所以 JS 里看到的是 `deps.title`
 而不是 `web.deps.title`。
+
+**已为「下载源（镜像）」预置好文案**（在 `deps.*` 下，英文版同步有了），直接用：
+
+| 键 | 用途 |
+|---|---|
+| `deps.mirror_title` | 面板标题「下载源（镜像）」 |
+| `deps.mirror_lead` | 面板说明（为什么需要填） |
+| `deps.mirror_adv` | 折叠「展开高级设置」 |
+| `deps.mirror_item` | 每个依赖下面的字段名「下载地址（一行一个，按顺序试）」 |
+| `deps.mirror_url_ph` | 地址输入框 placeholder |
+| `deps.mirror_prefix` / `deps.mirror_prefix_ph` / `deps.mirror_prefix_note` | 全局加速前缀那一格 |
+| `deps.mirror_test` / `deps.mirror_testing` | 「测一下」按钮与进行中 |
+| `deps.mirror_test_ok` / `deps.mirror_test_fail` | 探测结果的短标签 |
+| `deps.mirror_only` / `deps.mirror_only_note` / `deps.mirror_only_bad` | 「只用我填的地址」复选框 |
+| `deps.mirror_builtin` / `deps.mirror_builtin_note` | 只读的内置地址展示区 |
+| `deps.mirror_save` / `deps.mirror_saved` / `deps.mirror_save_failed` | 保存按钮与结果 |
+| `deps.mirror_reset` | 「清空（用默认）」 |
+| `deps.mirror_need_url` | 一个都没填时的本地提示 |
 
 ---
 

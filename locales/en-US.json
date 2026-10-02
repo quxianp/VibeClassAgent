@@ -839,7 +839,29 @@
       "retry": "Retry",
       "done": "All components ready",
       "done_note": "Everything is in place now.",
-      "still_missing": "Some components are still missing. Check your connection and retry, or set a proxy and restart."
+      "still_missing": "Some components are still missing. Check your connection and retry, or set a proxy and restart.",
+      "mirror_title": "Download sources (mirrors)",
+      "mirror_lead": "By default the app downloads its dependencies from a few public URLs. If your network cannot reach them (campus network, intranet, slow GitHub), enter your own mirror URLs here — **yours are tried first**, and the defaults are used as a fallback.",
+      "mirror_adv": "Show advanced settings",
+      "mirror_item": "Download URLs (one per line, tried in order)",
+      "mirror_url_ph": "https://example.com/path/ffmpeg.zip",
+      "mirror_prefix": "Global accelerator prefix",
+      "mirror_prefix_ph": "https://ghfast.top/",
+      "mirror_prefix_note": "For when you know a GitHub accelerator: it is prepended to the default URLs, so you do not have to fill in every dependency.",
+      "mirror_test": "Test",
+      "mirror_testing": "Connecting…",
+      "mirror_test_ok": "Reachable",
+      "mirror_test_fail": "Unreachable",
+      "mirror_only": "Use only my URLs (skip the defaults)",
+      "mirror_only_note": "Only for networks that cannot reach the internet at all. No default URL will be tried, so at least one address is required.",
+      "mirror_only_bad": "\"Use only my URLs\" is checked but no address was entered — downloads would always fail.",
+      "mirror_builtin": "Addresses used when you leave this empty",
+      "mirror_builtin_note": "Read-only. Your URLs are tried before these public ones.",
+      "mirror_save": "Save download sources",
+      "mirror_saved": "Download sources saved",
+      "mirror_save_failed": "Save failed",
+      "mirror_reset": "Clear (use defaults)",
+      "mirror_need_url": "Enter at least one address, or press Clear to use the defaults."
     }
   }
 }

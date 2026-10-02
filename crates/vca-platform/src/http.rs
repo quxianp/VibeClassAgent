@@ -207,6 +207,118 @@ pub fn request(
     }
 }
 
+/// 一个地址的探测结果（给"测试镜像通不通"用）。
+#[derive(Debug, Clone)]
+pub struct ProbeInfo {
+    /// HTTP 状态码（0 表示没拿到有效响应）。
+    pub status: u32,
+    /// 判定出来的类型：`文件` / `网页` / `不存在` / `需要授权` / `其他`。
+    pub kind: &'static str,
+    /// 响应里声明的大小（字节）；拿不到是 0。
+    pub size: u64,
+}
+
+impl ProbeInfo {
+    /// 一句给人看的结论。
+    pub fn describe(&self) -> String {
+        let size = if self.size > 0 {
+            format!("，约 {} MB", self.size / 1048576)
+        } else {
+            String::new()
+        };
+        format!(
+            "连通正常（HTTP {}，判定为{}{}）",
+            self.status, self.kind, size
+        )
+    }
+}
+
+/// 轻量探测一个地址是否可用。
+///
+/// # 为什么只发 HEAD，拿不到再退化成极小范围 GET
+///
+/// 目的只是回答"这个地址通不通、是不是一个文件"。**绝不能下载整个文件** ——
+/// 镜像测试的对象是几十到上百 MB 的安装包，真下完用户要等好几分钟，
+/// 那这个"测试"按钮就没人会点第二次了。
+///
+/// HEAD 是最省的（只要响应头）。但有些自建镜像/CDN 不支持 HEAD
+/// （返回 405 或直接断连），这时用 `Range: bytes=0-0` 只取 1 个字节 ——
+/// 依然几乎不耗流量，但能拿到状态码和 `Content-Length`。
+///
+/// # 判据
+///
+/// - 2xx → 通过
+/// - 206 → 通过（说明支持 Range，正是我们要的效果）
+/// - 404 / 403 → **明确报错**，这类是"填错地址"最常见的表现，
+///   必须和"网络不通"区分开：前者改地址就好，后者要查网络。
+pub fn probe(url: &str, timeout_ms: i32) -> Result<ProbeInfo, HttpError> {
+    let agent = agent_for(timeout_ms)?;
+
+    // 先试 HEAD。ureq 自动跟随重定向；拿到的是最终响应。
+    let head = agent.head(url).call();
+    let resp = match head {
+        Ok(r) if r.status().as_u16() != 405 && r.status().as_u16() != 501 => r,
+        // HEAD 不被支持，或者网络层就失败了 —— 退化成 Range GET。
+        // 这里只拿响应头，**不读取 body**：即使服务器无视 Range 返回 200 + 100MB，
+        // drop 响应也不会把整包读进内存。这是“测试按钮”绝不能破坏的边界。
+        _ => agent
+            .get(url)
+            .header("Range", "bytes=0-0")
+            .call()
+            .map_err(|e| HttpError::Network(e.to_string()))?,
+    };
+
+    let status = resp.status().as_u16() as u32;
+    let kind = match status {
+        200 | 206 => "文件",
+        301 | 302 | 303 | 307 | 308 => "跳转",
+        401 => "需要授权",
+        403 => "拒绝访问",
+        404 => "不存在",
+        _ if (200..300).contains(&status) => "文件",
+        _ => "其他",
+    };
+
+    // 4xx/5xx 在这里当成"探测失败"报出去：对用户来说这是同一个问题
+    // （"这个地址不能用"），分成两种结果反而让人不知道该怎么办。
+    if !(200..300).contains(&status) {
+        return Err(HttpError::Network(format!(
+            "服务器返回 HTTP {status}（{kind}）"
+        )));
+    }
+
+    let headers = resp.headers();
+    let content_type = headers
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    // 镜像必须是**文件直链**。校园网登录页/404 美化页经常返回 200 + HTML；
+    // 只看状态码会把它误判为可用，真正下载后才因体积不足失败。
+    if content_type.contains("text/html") || content_type.contains("application/xhtml+xml") {
+        return Err(HttpError::BadUrl(
+            "服务器返回的是网页，不是可直接下载的文件".to_string(),
+        ));
+    }
+
+    let content_len = headers
+        .get("content-length")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    // 206 的 Content-Length 往往只是 1（Range 取到的那个字节），
+    // 真正文件大小在 `Content-Range: bytes 0-0/12345` 的斜杠后面。
+    let range_total = headers
+        .get("content-range")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.rsplit_once('/').map(|(_, total)| total))
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(0);
+    let size = range_total.max(content_len);
+
+    Ok(ProbeInfo { status, kind, size })
+}
+
 /// 把响应体**流式**写入文件，返回写入的字节数。
 ///
 /// 为什么不复用 [`request`]：那条路会把整个响应体读成一个 `String`。
@@ -374,6 +486,10 @@ pub fn parse_url(url: &str) -> Result<ParsedUrl, HttpError> {
 mod tests {
     use super::*;
 
+    // `set_proxy` / Agent 缓存是进程级全局状态。凡是会真的发本地 HTTP 请求
+    // 或修改代理的测试共用这把锁，避免并行测试互相把 Agent 清掉/换代理。
+    static HTTP_STATE_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn parse_https_with_path() {
         let u = parse_url("https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=abc").unwrap();
@@ -455,6 +571,7 @@ mod tests {
 
     #[test]
     fn proxy_is_global_and_validated() {
+        let _guard = HTTP_STATE_TEST_LOCK.lock().expect("HTTP 测试锁");
         // 合成一个测试：proxy 是进程级全局状态，拆成多个测试并行跑会互相干扰。
         set_proxy(Some("http://127.0.0.1:9999".into()));
         assert_eq!(proxy().as_deref(), Some("http://127.0.0.1:9999"));
@@ -470,5 +587,84 @@ mod tests {
 
         set_proxy(None);
         assert_eq!(proxy(), None);
+    }
+
+    /// 镜像探测要读响应头、识别 HTML 登录页，并在 HEAD 不支持时只发 Range GET。
+    #[test]
+    fn probe_detects_files_html_and_head_fallback() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let _guard = HTTP_STATE_TEST_LOCK.lock().expect("HTTP 测试锁");
+        set_proxy(None);
+
+        // 1) HEAD 直接返回文件元数据：大小必须从 Content-Length 读出来。
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定文件探测端口");
+        let port = listener.local_addr().expect("文件探测地址").port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().expect("文件探测请求");
+            let mut req = [0u8; 1024];
+            let n = s.read(&mut req).unwrap_or(0);
+            assert!(String::from_utf8_lossy(&req[..n]).starts_with("HEAD /file.bin "));
+            s.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: 12345\r\nConnection: close\r\n\r\n",
+            )
+            .expect("写文件响应");
+        });
+        let info =
+            probe(&format!("http://127.0.0.1:{port}/file.bin"), 3_000).expect("文件地址应通过");
+        server.join().expect("文件服务器结束");
+        assert_eq!(info.status, 200);
+        assert_eq!(info.kind, "文件");
+        assert_eq!(info.size, 12_345);
+
+        // 2) 校园网登录页常见 200 + text/html，不能误报“镜像可用”。
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定 HTML 探测端口");
+        let port = listener.local_addr().expect("HTML 探测地址").port();
+        let server = std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().expect("HTML 探测请求");
+            let mut req = [0u8; 1024];
+            let _ = s.read(&mut req);
+            s.write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: 20\r\nConnection: close\r\n\r\n",
+            )
+            .expect("写 HTML 响应");
+        });
+        let err = probe(&format!("http://127.0.0.1:{port}/login"), 3_000)
+            .expect_err("HTML 登录页必须被拒绝");
+        server.join().expect("HTML 服务器结束");
+        assert!(err.to_string().contains("网页"), "错误不够明确：{err}");
+
+        // 3) HEAD=405 时退化为 Range GET；真实大小取 Content-Range 的总数，
+        // 不能拿 Content-Length=1 当文件只有 1 字节。
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定 Range 探测端口");
+        let port = listener.local_addr().expect("Range 探测地址").port();
+        let server = std::thread::spawn(move || {
+            let (mut head, _) = listener.accept().expect("HEAD 请求");
+            let mut req = [0u8; 1024];
+            let n = head.read(&mut req).unwrap_or(0);
+            assert!(String::from_utf8_lossy(&req[..n]).starts_with("HEAD /range.bin "));
+            head.write_all(
+                b"HTTP/1.1 405 Method Not Allowed\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )
+            .expect("写 405");
+            drop(head);
+
+            let (mut get, _) = listener.accept().expect("Range GET 请求");
+            let mut req = [0u8; 2048];
+            let n = get.read(&mut req).unwrap_or(0);
+            let text = String::from_utf8_lossy(&req[..n]).to_ascii_lowercase();
+            assert!(text.starts_with("get /range.bin "), "不是 GET：{text}");
+            assert!(text.contains("range: bytes=0-0"), "没带 Range：{text}");
+            get.write_all(
+                b"HTTP/1.1 206 Partial Content\r\nContent-Type: application/octet-stream\r\nContent-Length: 1\r\nContent-Range: bytes 0-0/98765\r\nConnection: close\r\n\r\nx",
+            )
+            .expect("写 Range 响应");
+        });
+        let info =
+            probe(&format!("http://127.0.0.1:{port}/range.bin"), 3_000).expect("Range 回退应通过");
+        server.join().expect("Range 服务器结束");
+        assert_eq!(info.status, 206);
+        assert_eq!(info.size, 98_765);
     }
 }

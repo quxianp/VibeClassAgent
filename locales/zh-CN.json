@@ -839,7 +839,29 @@
       "retry": "重试",
       "done": "全部补齐完成",
       "done_note": "组件已就绪，可以正常使用了。",
-      "still_missing": "仍有组件缺失，可以检查网络后重试；也可以设置代理后重启程序。"
+      "still_missing": "仍有组件缺失，可以检查网络后重试；也可以设置代理后重启程序。",
+      "mirror_title": "下载源（镜像）",
+      "mirror_lead": "程序默认从几个公开地址下载依赖。如果你的网络连不上它们（校园网、内网、GitHub 慢），可以在这里填自己的镜像地址 —— **填了会优先用你的**，不通时自动退回默认地址。",
+      "mirror_adv": "展开高级设置",
+      "mirror_item": "下载地址（一行一个，按顺序试）",
+      "mirror_url_ph": "https://example.com/path/ffmpeg.zip",
+      "mirror_prefix": "全局加速前缀",
+      "mirror_prefix_ph": "https://ghfast.top/",
+      "mirror_prefix_note": "给「我知道一个 GitHub 加速站」的情况用：填了它会拼在默认地址前面重试一遍，不用给每个依赖单独填。",
+      "mirror_test": "测一下",
+      "mirror_testing": "正在连…",
+      "mirror_test_ok": "通了",
+      "mirror_test_fail": "连不上",
+      "mirror_only": "只用我填的地址（不试默认地址）",
+      "mirror_only_note": "内网完全出不去时才勾。勾了之后默认地址一个都不会试，所以至少要填一个地址。",
+      "mirror_only_bad": "勾了「只用我填的地址」却一个都没填，这样必然下载失败。",
+      "mirror_builtin": "不填会用这些地址",
+      "mirror_builtin_note": "只读。程序从这些公开地址下载，你填的地址会排在最前面先试。",
+      "mirror_save": "保存下载源",
+      "mirror_saved": "下载源已保存",
+      "mirror_save_failed": "保存失败",
+      "mirror_reset": "清空（用默认）",
+      "mirror_need_url": "至少填一个地址，或者点「清空」全部用默认。"
     }
   }
 }

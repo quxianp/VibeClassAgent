@@ -160,6 +160,32 @@ pub fn fetch_missing(
     progress: Option<ProgressFn>,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Vec<DepState> {
+    fetch_missing_with_mirrors(
+        tools_root,
+        only,
+        progress,
+        cancel,
+        &vca_core::config::DownloadSettings::default(),
+    )
+}
+
+/// 同 [`fetch_missing`]，但可以指定自定义下载源（镜像）。
+///
+/// # 为什么要单独一个函数而不是给上面加参数
+///
+/// `fetch_missing` 的调用点有好几处（接口、成品脚本、测试），
+/// 加参数会把每一处都改一遍；而"没配镜像"是最常见的情况，
+/// 让它保持原签名可以少碰很多代码。
+///
+/// 自定义源的合并规则在
+/// [`vca_core::config::merge_sources`] —— 那里有完整的顺序说明和测试。
+pub fn fetch_missing_with_mirrors(
+    tools_root: &Path,
+    only: Option<&[String]>,
+    progress: Option<ProgressFn>,
+    cancel: Option<Arc<AtomicBool>>,
+    mirrors: &vca_core::config::DownloadSettings,
+) -> Vec<DepState> {
     let ev = |e: FetchEvent| {
         if let Some(p) = &progress {
             p(e);
@@ -198,7 +224,7 @@ pub fn fetch_missing(
             label: t.spec.label.to_string(),
         });
 
-        match fetch_one(t, tools_root, &ev, &cancel) {
+        match fetch_one(t, tools_root, &ev, &cancel, mirrors) {
             Ok(path) => {
                 let bytes = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
                 ev(FetchEvent::Done {
@@ -226,12 +252,25 @@ pub fn fetch_missing(
     deps::check_all(tools_root)
 }
 
+/// 内置下载源清单（只读，给界面展示"不填会用什么"）。
+///
+/// 为什么要暴露出来：用户有权知道程序会去哪些地址下载东西，
+/// 否则他没法判断自己该不该填镜像 —— 也不知道填了之后
+/// "保底"的那几个是什么。这是透明度问题，不是功能问题。
+pub fn builtin_urls() -> Vec<(&'static str, Vec<&'static str>)> {
+    TARGETS
+        .iter()
+        .map(|t| (t.spec.id, t.urls.to_vec()))
+        .collect()
+}
+
 /// 补齐一项。
 fn fetch_one(
     t: &Target,
     tools_root: &Path,
     ev: &dyn Fn(FetchEvent),
     cancel: &Option<Arc<AtomicBool>>,
+    mirrors: &vca_core::config::DownloadSettings,
 ) -> Result<PathBuf> {
     let spec = t.spec;
     let final_path = tools_root.join(spec.rel_path);
@@ -251,9 +290,21 @@ fn fetch_one(
     }
 
     // ---- 逐个源尝试 ----
+    //
+    // 这里用**合并后**的源列表，而不是 `t.urls` 本身：
+    // 用户填的镜像排在最前面（他最清楚哪个通），内置地址保底。
+    // 合并规则见 `vca_core::config::merge_sources`。
+    let sources = vca_core::config::merge_sources(spec.id, t.urls, mirrors);
+    if sources.is_empty() {
+        return Err(anyhow!(
+            "没有可用下载源：已启用「只用自定义源」，但 {} 没有合法地址。\
+             请在下载源设置里填写 http(s) 地址，或关闭该选项",
+            spec.label
+        ));
+    }
     let mut errs: Vec<String> = Vec::new();
     let mut got = false;
-    for (i, url) in t.urls.iter().enumerate() {
+    for (i, url) in sources.iter().enumerate() {
         if let Some(c) = cancel {
             if c.load(Ordering::Relaxed) {
                 return Err(anyhow!("用户取消"));
@@ -261,15 +312,15 @@ fn fetch_one(
         }
         ev(FetchEvent::Trying {
             id: spec.id.to_string(),
-            url: (*url).to_string(),
+            url: url.clone(),
             index: i + 1,
-            total: t.urls.len(),
+            total: sources.len(),
         });
 
         // 上一次尝试失败可能留下残file，先清掉再下。
         let _ = std::fs::remove_file(&tmp_file);
 
-        match crate::http::download(url, &tmp_file, FILE_TIMEOUT_MS) {
+        match crate::http::download(url.as_str(), &tmp_file, FILE_TIMEOUT_MS) {
             Ok(n) if n >= spec.min_bytes => {
                 got = true;
                 ev(FetchEvent::Downloaded {
@@ -654,5 +705,82 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// 用户配置的地址必须**真的传到下载器**，不能只在 API/config 层看起来保存成功。
+    ///
+    /// 这条用本地 HTTP 服务器完整走 `merge_sources -> http::download -> 就位`，
+    /// 并把内置源故意设成一个必然失败的端口。如果后端偷偷覆盖/忽略用户值，
+    /// 测试就会失败。
+    #[test]
+    fn custom_source_reaches_the_real_downloader_first() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        static SPEC: deps::DepSpec = deps::DepSpec {
+            id: "mirror-e2e",
+            label: "镜像透传测试",
+            consequence: "仅测试",
+            required: false,
+            rel_path: "mirror-e2e/payload.bin",
+            min_bytes: 16,
+        };
+        static BAD_BUILTIN: &[&str] = &["http://127.0.0.1:1/never-used.bin"];
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("绑定本地测试端口");
+        let port = listener.local_addr().expect("本地地址").port();
+        let custom = format!("http://127.0.0.1:{port}/custom.bin");
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("收到下载请求");
+            let mut req = [0u8; 1024];
+            let n = stream.read(&mut req).unwrap_or(0);
+            let head = String::from_utf8_lossy(&req[..n]);
+            assert!(
+                head.starts_with("GET /custom.bin "),
+                "真实下载器没有请求用户地址：{head}"
+            );
+            let body = vec![b'M'; 64];
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            )
+            .expect("写响应头");
+            stream.write_all(&body).expect("写响应体");
+        });
+
+        let root = tmpdir("mirror-e2e");
+        let target = Target {
+            spec: &SPEC,
+            urls: BAD_BUILTIN,
+            is_zip: false,
+            pick_exe: None,
+        };
+        let mut cfg = vca_core::config::DownloadSettings::default();
+        cfg.mirrors
+            .insert(SPEC.id.to_string(), vec![custom.clone()]);
+
+        let events = std::sync::Mutex::new(Vec::<String>::new());
+        let progress = |e: FetchEvent| {
+            if let FetchEvent::Trying { url, .. } = e {
+                events.lock().expect("事件锁").push(url);
+            }
+        };
+        let out = fetch_one(&target, &root, &progress, &None, &cfg).expect("自定义源下载成功");
+
+        server.join().expect("本地服务器正常结束");
+        assert_eq!(std::fs::read(&out).expect("读下载文件"), vec![b'M'; 64]);
+        let tried = events.lock().expect("事件锁");
+        assert_eq!(
+            tried.as_slice(),
+            &[custom],
+            "用户源没有排在第一位：{tried:?}"
+        );
+        assert!(
+            !tried.iter().any(|u| u == BAD_BUILTIN[0]),
+            "用户源成功后仍去试了内置源：{tried:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(root);
     }
 }

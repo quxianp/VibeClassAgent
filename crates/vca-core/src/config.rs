@@ -54,6 +54,408 @@ pub struct Settings {
     /// 插件路由：把某个处理步骤交给插件执行。
     #[serde(default)]
     pub plugins: PluginRouting,
+    /// 依赖下载源（镜像）自定义。
+    ///
+    /// 为什么要让用户自己填：程序要下载 ffmpeg / whisper / 模型（约 125 MB），
+    /// 而**没有任何一组内置地址能在所有网络里都通** —— 教育网、单位内网、
+    /// 只有自建镜像的环境各不相同。写死地址的后果是"在某些学校永远装不上"，
+    /// 而用户明明知道哪个地址是通的。
+    #[serde(default)]
+    pub download: DownloadSettings,
+}
+
+/// 依赖下载源设置。
+///
+/// 语义是**覆盖**而不是替换：用户填的源会排在内置源**前面**先试，
+/// 内置源仍然保底。这样填错了也只是"多等一会儿"，不会把程序弄成
+/// 完全下不动 —— 用户填错地址是很常见的（手抖、复制少一段）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DownloadSettings {
+    /// 各依赖的自定义下载地址，键是依赖 id（`ffmpeg` / `whisper` / `model`）。
+    ///
+    /// 允许填多个（界面里一行一个）：按顺序试，第一个通了就用。
+    /// 用 `BTreeMap` 而不是 `HashMap` 是为了序列化后键序稳定 ——
+    /// 配置文件给人看、也进版本管理，每次打开顺序都在变很烦。
+    #[serde(default)]
+    pub mirrors: std::collections::BTreeMap<String, Vec<String>>,
+    /// 全局前置镜像（前缀形式），会拼在内置地址前面。
+    ///
+    /// 这是给"我知道一个 GitHub 加速域名"的场景准备的：不想给每个依赖
+    /// 单独填地址，只想让所有 GitHub 直链都过一遍加速。
+    /// 例：填 `https://ghfast.top/` 就会生成
+    /// `https://ghfast.top/https://github.com/...`。
+    #[serde(default)]
+    pub prefix: Vec<String>,
+    /// 是否只用自定义源（true = 不试内置地址）。
+    ///
+    /// 默认 false。给"内网完全出不去、只有自建镜像通"的环境用 ——
+    /// 那种网络里试内置地址要等到超时才换下一个，白等很久。
+    #[serde(default)]
+    pub only_custom: bool,
+}
+
+impl DownloadSettings {
+    /// 这个依赖有没有自定义源。
+    pub fn custom_for(&self, dep_id: &str) -> &[String] {
+        self.mirrors
+            .get(dep_id)
+            .map(|v| v.as_slice())
+            .unwrap_or(&[])
+    }
+
+    /// 是否什么都没配（用来跳过处理、少几次分配）。
+    pub fn is_empty(&self) -> bool {
+        self.mirrors.values().all(|v| v.is_empty()) && self.prefix.is_empty()
+    }
+}
+
+/// 自定义下载源是否可用（非空、是 http(s)、没有明显的手抖）。
+///
+/// # 为什么要校验
+///
+/// 用户填错地址是**大概率事件**（少个斜杠、复制到一半、把页面地址当直链）。
+/// 不校验的话表现是"点了下载，进度条不动，等十分钟超时"，用户不知道
+/// 是自己填错了还是网络问题。
+///
+/// # 为什么校验要宽松
+///
+/// 只挡**明显不可能工作**的：不是 http(s)、有空格、没有主机名。
+/// 不挡"看起来对但实际不通"的 —— 那只能靠真的去连（见 `probe_mirror`），
+/// 而且自建镜像的路径形态千奇百怪，收窄规则只会误伤。
+pub fn validate_mirror_url(url: &str) -> Result<(), String> {
+    let u = url.trim();
+    if u.is_empty() {
+        return Err("地址是空的".to_string());
+    }
+    if u.contains(char::is_whitespace) {
+        return Err("地址里有空格（多半是复制时带进来的）".to_string());
+    }
+    if u.contains('\\') {
+        return Err("地址里不能有反斜杠，请使用 /".to_string());
+    }
+
+    let Some((scheme, rest)) = u.split_once("://") else {
+        return Err("必须以 http:// 或 https:// 开头".to_string());
+    };
+    if !scheme.eq_ignore_ascii_case("http") && !scheme.eq_ignore_ascii_case("https") {
+        return Err("只支持 http:// 或 https:// 协议".to_string());
+    }
+
+    // authority 到第一个 / ? # 为止。只按 '/' 切会把 `https://?x=1`
+    // 错当成“主机名是 ?x=1”，保存后才在下载时失败。
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let authority = &rest[..authority_end];
+    if authority.is_empty() {
+        return Err("缺少主机名".to_string());
+    }
+    // URL 里的 user:password@host 会被进度日志与错误信息原样显示，
+    // 很容易泄露凭据；镜像鉴权应走代理/网络层，不把密码塞进 URL。
+    if authority.contains('@') {
+        return Err("地址不能包含账号或密码".to_string());
+    }
+
+    // IPv6 必须写成 [::1]:8080；裸 IPv6 与 host:port 无法可靠区分。
+    if authority.starts_with('[') {
+        let Some(close) = authority.find(']') else {
+            return Err("IPv6 地址缺少右方括号 ]".to_string());
+        };
+        if close == 1 {
+            return Err("IPv6 主机名是空的".to_string());
+        }
+        let tail = &authority[close + 1..];
+        if !tail.is_empty()
+            && (!tail.starts_with(':')
+                || tail[1..].is_empty()
+                || !tail[1..].chars().all(|c| c.is_ascii_digit()))
+        {
+            return Err("端口必须是数字".to_string());
+        }
+    } else {
+        if authority.matches(':').count() > 1 {
+            return Err("IPv6 地址请使用 [地址]:端口 的写法".to_string());
+        }
+        let (host, port) = authority
+            .rsplit_once(':')
+            .map_or((authority, None), |(h, p)| (h, Some(p)));
+        if host.is_empty() {
+            return Err("主机名是空的（只有一个端口号）".to_string());
+        }
+        if let Some(port) = port {
+            if port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
+                return Err("端口必须是数字".to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// 校验“全局加速前缀”。
+///
+/// 前缀会继续拼接完整的默认 URL，所以不能带查询串或锚点；例如
+/// `https://mirror.example/?url=` 会被拼成 `...?url=/https://...`，语义不确定。
+/// 需要这类特殊镜像时，应在 `mirrors` 里为每个依赖填写完整下载地址。
+pub fn validate_mirror_prefix(url: &str) -> Result<(), String> {
+    validate_mirror_url(url)?;
+    if url.contains('?') || url.contains('#') {
+        return Err("全局前缀不能带 ? 查询参数或 # 锚点；请改填完整下载地址".to_string());
+    }
+    Ok(())
+}
+
+/// 把前缀规范成**恰好一个**结尾斜杠。
+///
+/// 用户填 `https://mirror.example`、`.../` 或 `...///` 都得到同一结果，
+/// 避免拼接成 `examplehttps://...` 或产生重复候选。
+pub fn normalize_mirror_prefix(url: &str) -> String {
+    format!("{}/", url.trim().trim_end_matches('/'))
+}
+
+/// 把自定义源和内置源合成最终要试的列表。
+///
+/// # 顺序规则（这是本函数唯一重要的地方）
+///
+/// 1. 用户给这个依赖单独填的地址（最优先 —— 他最清楚哪个能用）
+/// 2. 前缀镜像 + 内置地址（用户说"所有 GitHub 都走这个加速"）
+/// 3. 内置地址原样（保底）
+///
+/// `only_custom` 为 true 时**只保留第 1、2 步**，并且把前缀镜像也保留 ——
+/// 那是用户明确要求的方式，不是"内置源"。
+///
+/// 去重后返回：用户可能既填了具体地址又填了前缀，撞车时没必要试两遍。
+pub fn merge_sources(dep_id: &str, builtin: &[&str], cfg: &DownloadSettings) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let push = |s: String, out: &mut Vec<String>| {
+        let s = s.trim().to_string();
+        if !s.is_empty() && !out.contains(&s) {
+            out.push(s);
+        }
+    };
+
+    // 1) 该依赖的自定义地址。
+    // settings.yaml 允许用户手工编辑，所以即使 API 已校验，这里仍再守一道：
+    // 非 http(s) / 明显畸形的值绝不能进入真实下载器。
+    for u in cfg.custom_for(dep_id) {
+        if validate_mirror_url(u).is_ok() {
+            push(u.clone(), &mut out);
+        }
+    }
+
+    for b in builtin {
+        // 2) 前缀镜像 + 内置地址。
+        // 结尾有没有斜杠都统一规范；非法手工配置安静跳过，继续走保底源。
+        for pfx in &cfg.prefix {
+            if validate_mirror_prefix(pfx).is_ok() {
+                push(format!("{}{}", normalize_mirror_prefix(pfx), b), &mut out);
+            }
+        }
+
+        // 3) 内置原样。用户明确勾了 only_custom 才不加。
+        if !cfg.only_custom {
+            push((*b).to_string(), &mut out);
+        }
+    }
+
+    out
+}
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+
+    fn cfg_with(pairs: &[(&str, &[&str])], prefix: &[&str], only: bool) -> DownloadSettings {
+        let mut mirrors = std::collections::BTreeMap::new();
+        for (k, v) in pairs {
+            mirrors.insert(
+                (*k).to_string(),
+                v.iter().map(|s| (*s).to_string()).collect::<Vec<_>>(),
+            );
+        }
+        DownloadSettings {
+            mirrors,
+            prefix: prefix.iter().map(|s| (*s).to_string()).collect(),
+            only_custom: only,
+        }
+    }
+
+    /// 用户填的源必须**排在最前面**。
+    ///
+    /// 这是整个功能的立足点：用户填这个地址，就是因为**只有它通**。
+    /// 排在后面等于没填 —— 程序还是会先去试那个不通的内置地址等到超时。
+    #[test]
+    fn custom_source_comes_first() {
+        let cfg = cfg_with(&[("ffmpeg", &["https://my.mirror/ff.zip"])], &[], false);
+        let got = merge_sources("ffmpeg", &["https://builtin/a.zip"], &cfg);
+        assert_eq!(
+            got[0], "https://my.mirror/ff.zip",
+            "自定义源没排第一：{got:?}"
+        );
+        assert!(
+            got.contains(&"https://builtin/a.zip".to_string()),
+            "内置源被弄丢了"
+        );
+    }
+
+    /// 没填自定义源时，行为必须和以前**一模一样**。
+    ///
+    /// 这是个向后兼容的开关，不能让没填的人受影响。
+    #[test]
+    fn empty_config_keeps_builtin_order() {
+        let cfg = DownloadSettings::default();
+        let got = merge_sources("ffmpeg", &["https://a/1.zip", "https://b/2.zip"], &cfg);
+        assert_eq!(got, vec!["https://a/1.zip", "https://b/2.zip"]);
+    }
+
+    /// `only_custom` = true 时不能出现内置原始地址。
+    ///
+    /// 内网环境用这个：试不通的地址要等到超时才换，白等很久。
+    #[test]
+    fn only_custom_drops_builtin() {
+        let cfg = cfg_with(&[("ffmpeg", &["https://my/ff.zip"])], &[], true);
+        let got = merge_sources("ffmpeg", &["https://builtin/a.zip"], &cfg);
+        assert_eq!(got, vec!["https://my/ff.zip"]);
+        assert!(!got.contains(&"https://builtin/a.zip".to_string()));
+    }
+
+    /// 前缀镜像要正确拼接（这是最容易写错的一处）。
+    #[test]
+    fn prefix_is_joined_with_slash() {
+        // 带斜杠的
+        let cfg = cfg_with(&[], &["https://ghfast.top/"], false);
+        let got = merge_sources("whisper", &["https://github.com/x/y.zip"], &cfg);
+        assert!(
+            got.contains(&"https://ghfast.top/https://github.com/x/y.zip".to_string()),
+            "带斜杠前缀拼错了：{got:?}"
+        );
+
+        // 不带斜杠的也必须能拼对（用户很常见地会漏掉）
+        let cfg2 = cfg_with(&[], &["https://ghfast.top"], false);
+        let got2 = merge_sources("whisper", &["https://github.com/x/y.zip"], &cfg2);
+        assert!(
+            got2.contains(&"https://ghfast.top/https://github.com/x/y.zip".to_string()),
+            "不带斜杠前缀拼错了（漏斜杠会拼成 ghfast.tophttps://）：{got2:?}"
+        );
+    }
+
+    /// 前缀镜像下，内置原样地址也要保留（保底还是要有的）。
+    #[test]
+    fn prefix_keeps_builtin_too() {
+        let cfg = cfg_with(&[], &["https://p/"], false);
+        let got = merge_sources("model", &["https://h/a.bin"], &cfg);
+        assert_eq!(got.len(), 2, "应当既有前缀版也有原版：{got:?}");
+        assert!(got.contains(&"https://h/a.bin".to_string()));
+    }
+
+    /// 重复地址只试一次。
+    #[test]
+    fn duplicates_are_removed() {
+        let cfg = cfg_with(&[("ffmpeg", &["https://same/a.zip"])], &[], false);
+        let got = merge_sources("ffmpeg", &["https://same/a.zip"], &cfg);
+        assert_eq!(got, vec!["https://same/a.zip"], "重复没去掉：{got:?}");
+    }
+
+    /// 校验要挡住明显填错的，但不能误伤正常的。
+    #[test]
+    fn url_validation_blocks_obvious_mistakes() {
+        // 该挡的
+        for bad in [
+            "",
+            "ftp://x/a.zip",
+            "example.com/a.zip",
+            "https://a b/c.zip",
+            "https://",
+            "https://?file=x.zip",
+            "https://:8080/a.zip",
+            "https://host:abc/a.zip",
+            "https://user:password@host/a.zip",
+            r"https://host\path\a.zip",
+        ] {
+            assert!(
+                validate_mirror_url(bad).is_err(),
+                "明显非法的地址被放过了：{bad}"
+            );
+        }
+
+        // 不该挡的（自建镜像形态很多，别误伤）
+        for good in [
+            "https://my.mirror/a.zip",
+            "http://192.168.1.10:8080/files/a.zip",
+            "https://hf-mirror.com/x/y/resolve/main/z.bin",
+            "HTTP://intranet.local:8080/a.zip",
+            "http://[::1]:8080/a.zip",
+        ] {
+            assert!(
+                validate_mirror_url(good).is_ok(),
+                "合法镜像被误伤了：{good}"
+            );
+        }
+    }
+
+    /// 前缀可带或不带结尾斜杠，保存/拼接后都规范成一个斜杠。
+    #[test]
+    fn prefix_normalization_handles_trailing_slashes() {
+        assert_eq!(
+            normalize_mirror_prefix("https://mirror.example"),
+            "https://mirror.example/"
+        );
+        assert_eq!(
+            normalize_mirror_prefix(" https://mirror.example/// "),
+            "https://mirror.example/"
+        );
+        assert!(validate_mirror_prefix("https://mirror.example/").is_ok());
+        assert!(
+            validate_mirror_prefix("https://mirror.example/?url=").is_err(),
+            "带查询串的值不是可安全拼接的前缀"
+        );
+    }
+
+    /// 用户手改 settings.yaml 可能绕过 API；真实下载合并时仍要丢掉非法源。
+    #[test]
+    fn merge_drops_invalid_manually_edited_sources() {
+        let cfg = cfg_with(
+            &[("ffmpeg", &["ftp://bad/a.zip", "https://good/a.zip"])],
+            &["file:///bad"],
+            false,
+        );
+        let got = merge_sources("ffmpeg", &["https://builtin/a.zip"], &cfg);
+        assert_eq!(
+            got,
+            vec!["https://good/a.zip", "https://builtin/a.zip"],
+            "非法手工配置不应进入下载器：{got:?}"
+        );
+    }
+
+    /// 没配置时要能被识别为"空"，方便调用方跳过处理。
+    #[test]
+    fn empty_detection() {
+        assert!(DownloadSettings::default().is_empty());
+        let c = cfg_with(&[("ffmpeg", &["https://a/b"])], &[], false);
+        assert!(!c.is_empty());
+        let c2 = cfg_with(&[], &["https://p/"], false);
+        assert!(!c2.is_empty(), "只填前缀也算配置过");
+    }
+
+    /// 键顺序稳定（配置文件给人看，顺序乱跳很烦）。
+    #[test]
+    fn serialization_order_is_stable() {
+        let mut c = DownloadSettings::default();
+        c.mirrors.insert("whisper".into(), vec!["https://w".into()]);
+        c.mirrors.insert("ffmpeg".into(), vec!["https://f".into()]);
+        c.mirrors.insert("model".into(), vec!["https://m".into()]);
+
+        let y1 = serde_yaml::to_string(&c).expect("序列化");
+        let y2 = serde_yaml::to_string(&c).expect("序列化");
+        assert_eq!(y1, y2, "两次序列化结果不同，说明键顺序不稳定");
+
+        // BTreeMap 应当是按字母序
+        let fi = y1.find("ffmpeg").expect("有 ffmpeg");
+        let mi = y1.find("model").expect("有 model");
+        let wi = y1.find("whisper").expect("有 whisper");
+        assert!(
+            fi < mi && mi < wi,
+            "顺序不是字母序：
+{y1}"
+        );
+    }
 }
 
 /// 录制参数。

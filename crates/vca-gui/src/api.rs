@@ -100,6 +100,14 @@ pub fn dispatch(
         ("POST", "/api/daemon/start") => daemon_start(opts, &body),
         ("POST", "/api/daemon/stop") => crate::daemon::stop(),
         ("GET", "/api/deps") => Ok(deps_status(opts)),
+        // 下载源自定义：让用户自己填镜像。
+        // 没有一组内置地址能在所有网络里都通（教育网/内网/自建镜像），
+        // 写死地址的后果是"在某些学校永远装不上"。
+        ("GET", "/api/deps/mirrors") => Ok(deps_mirrors_get(opts)),
+        ("POST", "/api/deps/mirrors") => deps_mirrors_set(opts, &body),
+        // 测一个地址通不通：填完就能立刻知道对不对，
+        // 不用等真的下载到一半才发现（那样要等超时，很难判断是自己填错还是网络差）。
+        ("POST", "/api/deps/mirrors/test") => deps_mirrors_test(&body),
         ("POST", "/api/deps/fetch") => deps_fetch(opts, &body),
         ("GET", "/api/deps/fetch") => Ok(deps_fetch_json()),
         ("POST", "/api/deps/dismiss") => Ok(deps_dismiss(opts, &body)),
@@ -1895,6 +1903,8 @@ fn deps_fetch(opts: &ServeOptions, body: &str) -> Result<Value> {
 
     let root = tools_root();
     let config_root = opts.config_root.clone();
+    // 线程里要用，先读出来（`opts` 不能整个 move 进去，还要留给别处）。
+    let mirrors = load_download_settings(opts);
 
     if let Ok(mut s) = deps_state().lock() {
         s.running = true;
@@ -1945,11 +1955,13 @@ fn deps_fetch(opts: &ServeOptions, body: &str) -> Result<Value> {
         });
 
         let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let result = vca_platform::fetch::fetch_missing(
+        // 用带镜像的版本：用户填的源排在最前面，内置地址保底。
+        let result = vca_platform::fetch::fetch_missing_with_mirrors(
             &root,
             only.as_deref(),
             Some(progress),
             Some(cancel),
+            &mirrors,
         );
 
         // 补完再看一遍：如果可选项现在齐了，顺手把"已提醒"标记写上，
@@ -1973,4 +1985,457 @@ fn deps_fetch(opts: &ServeOptions, body: &str) -> Result<Value> {
     });
 
     Ok(json!({"ok": true, "message": "已开始补齐，进度会显示在这里"}))
+}
+
+// ============================================================================
+// 下载源（镜像）自定义
+// ============================================================================
+
+/// 读出用户配置的下载源设置。
+///
+/// 读不到就返回默认值（=不用自定义源）。**不报错** ——
+/// 配置文件坏了不该让"下载"这个功能整个不可用，
+/// 退化成"只用内置源"是个合理的降级。
+fn load_download_settings(opts: &ServeOptions) -> vca_core::config::DownloadSettings {
+    let path = settings_path(opts);
+    match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_yaml::from_str::<vca_core::config::Settings>(&text) {
+            Ok(s) => s.download,
+            Err(e) => {
+                tracing::warn!("读下载源配置失败（用内置源）：{e}");
+                Default::default()
+            }
+        },
+        Err(_) => Default::default(),
+    }
+}
+
+/// 把下载源设置写回去。
+///
+/// 走"读整个 settings.yaml → 只改 download 字段 → 写回"，
+/// 而不是重新拼一个文件：**用户的其他配置必须原样保留**。
+/// 用 `serde_yaml::Value` 中转是为了不因为 `Settings` 结构里
+/// 将来加字段而把用户已有的配置吃掉。
+fn save_download_settings(
+    opts: &ServeOptions,
+    d: &vca_core::config::DownloadSettings,
+) -> Result<()> {
+    let path = settings_path(opts);
+    let mut root: serde_yaml::Value = match std::fs::read_to_string(&path) {
+        Ok(text) => serde_yaml::from_str(&text).map_err(|e| {
+            anyhow::anyhow!(
+                "现有配置 {} 格式有误，为避免覆盖其它设置，未保存下载源：{e}",
+                path.display()
+            )
+        })?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_yaml::Value::Null,
+        Err(e) => {
+            return Err(anyhow::anyhow!("读取 {} 失败：{e}", path.display()));
+        }
+    };
+    if !root.is_mapping() {
+        root = serde_yaml::Value::Mapping(Default::default());
+    }
+    let dl = serde_yaml::to_value(d).map_err(|e| anyhow::anyhow!("序列化下载源失败：{e}"))?;
+    root.as_mapping_mut()
+        .expect("上面刚确认过是 mapping")
+        .insert(serde_yaml::Value::from("download"), dl);
+
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).ok();
+    }
+    let text = serde_yaml::to_string(&root).map_err(|e| anyhow::anyhow!("写下载源失败：{e}"))?;
+    std::fs::write(&path, text).map_err(|e| anyhow::anyhow!("写 {} 失败：{e}", path.display()))?;
+    Ok(())
+}
+
+/// GET /api/deps/mirrors —— 读当前下载源配置。
+///
+/// 同时把**内置源**一并返回：界面要让用户看到"不填会用什么"，
+/// 否则他没法判断自己该不该填。这也是"透明"的一部分 ——
+/// 用户有权知道程序会去哪些地址下东西。
+fn deps_mirrors_get(opts: &ServeOptions) -> Value {
+    let d = load_download_settings(opts);
+    json!({
+        "ok": true,
+        "prefix": d.prefix,
+        "mirrors": d.mirrors,
+        "only_custom": d.only_custom,
+        // 内置源：只读，给界面展示用
+        "builtin": builtin_sources(),
+        // 依赖清单（含名称/是否必需），界面拿它渲染表单
+        "deps": vca_platform::deps::DEPS.iter().map(|s| json!({
+            "id": s.id,
+            "label": s.label,
+            "required": s.required,
+            "consequence": s.consequence,
+        })).collect::<Vec<_>>(),
+    })
+}
+
+/// 内置的下载源（只读展示）。
+fn builtin_sources() -> Value {
+    let mut m = serde_json::Map::new();
+    for (id, urls) in vca_platform::fetch::builtin_urls() {
+        m.insert(id.to_string(), json!(urls));
+    }
+    Value::Object(m)
+}
+
+/// POST /api/deps/mirrors —— 保存下载源配置。
+///
+/// 保存前**逐条校验**：填错的地址要让用户当场知道，
+/// 而不是等到下载失败才猜"是我填错了还是网络问题"。
+fn deps_mirrors_set(opts: &ServeOptions, body: &str) -> Result<Value> {
+    let v: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(json!({
+                "ok": false,
+                "error": format!("请求 JSON 格式不合法：{e}"),
+                "field": "body",
+            }));
+        }
+    };
+    if !v.is_object() {
+        return Ok(json!({
+            "ok": false,
+            "error": "请求体必须是 JSON 对象",
+            "field": "body",
+        }));
+    }
+
+    let mut d = vca_core::config::DownloadSettings::default();
+
+    // prefix：缺省/空数组 = 不设置全局前缀。带不带结尾斜杠都接受，
+    // 保存时统一规范成恰好一个斜杠，避免拼接歧义。
+    if let Some(raw) = v.get("prefix") {
+        let Some(arr) = raw.as_array() else {
+            return Ok(json!({
+                "ok": false,
+                "error": "prefix 必须是字符串数组",
+                "field": "prefix",
+            }));
+        };
+        for item in arr {
+            let Some(s) = item.as_str() else {
+                return Ok(json!({
+                    "ok": false,
+                    "error": "prefix 数组里的每一项都必须是字符串",
+                    "field": "prefix",
+                }));
+            };
+            let s = s.trim();
+            if s.is_empty() {
+                continue;
+            }
+            if let Err(e) = vca_core::config::validate_mirror_prefix(s) {
+                return Ok(json!({
+                    "ok": false,
+                    "error": format!("前缀镜像「{s}」不合法：{e}"),
+                    "field": "prefix",
+                }));
+            }
+            let normalized = vca_core::config::normalize_mirror_prefix(s);
+            if !d.prefix.contains(&normalized) {
+                d.prefix.push(normalized);
+            }
+        }
+    }
+
+    // mirrors: { depId: [url, ...] }。
+    // 未知 id 必须报错而不是静默保存：否则 UI 看起来“保存成功”，真实下载器
+    // 却永远不会读取那个键，这是最难发现的一类假成功。
+    if let Some(raw) = v.get("mirrors") {
+        let Some(obj) = raw.as_object() else {
+            return Ok(json!({
+                "ok": false,
+                "error": "mirrors 必须是对象",
+                "field": "mirrors",
+            }));
+        };
+        for (k, arr) in obj {
+            if !vca_platform::deps::DEPS.iter().any(|dep| dep.id == k) {
+                return Ok(json!({
+                    "ok": false,
+                    "error": format!("未知的依赖 id：{k}"),
+                    "field": k,
+                }));
+            }
+            let Some(list) = arr.as_array() else {
+                return Ok(json!({
+                    "ok": false,
+                    "error": format!("{k} 的下载地址必须是字符串数组"),
+                    "field": k,
+                }));
+            };
+            let mut urls = Vec::new();
+            for item in list {
+                let Some(s) = item.as_str() else {
+                    return Ok(json!({
+                        "ok": false,
+                        "error": format!("{k} 的每个下载地址都必须是字符串"),
+                        "field": k,
+                    }));
+                };
+                let s = s.trim();
+                if s.is_empty() {
+                    continue;
+                }
+                if let Err(e) = vca_core::config::validate_mirror_url(s) {
+                    return Ok(json!({
+                        "ok": false,
+                        "error": format!("{k} 的地址「{s}」不合法：{e}"),
+                        "field": k,
+                    }));
+                }
+                let s = s.to_string();
+                if !urls.contains(&s) {
+                    urls.push(s);
+                }
+            }
+            if !urls.is_empty() {
+                d.mirrors.insert(k.clone(), urls);
+            }
+        }
+    }
+
+    // only_custom：缺省 = false；传了就必须真的是 bool，不能把字符串 "true"
+    // 静默当 false（那会违背用户“只走内网源”的明确选择）。
+    if let Some(raw) = v.get("only_custom") {
+        let Some(b) = raw.as_bool() else {
+            return Ok(json!({
+                "ok": false,
+                "error": "only_custom 必须是布尔值",
+                "field": "only_custom",
+            }));
+        };
+        d.only_custom = b;
+    }
+
+    // 开了"只用自定义源"却一个源都没填 —— 那是**必然下不动**的配置，
+    // 必须拦住。否则用户会得到一个"点了没反应"的程序。
+    if d.only_custom && d.is_empty() {
+        return Ok(json!({
+            "ok": false,
+            "error": "勾了「只用自定义源」但一个地址都没填，这样必然下载失败。\
+                      请取消勾选，或至少填一个地址。",
+            "field": "only_custom",
+        }));
+    }
+
+    save_download_settings(opts, &d)?;
+    tracing::info!(
+        "下载源已更新：prefix={:?} mirrors={} only_custom={}",
+        d.prefix,
+        d.mirrors.len(),
+        d.only_custom
+    );
+
+    // 回读一遍返回"真正存下去的东西"：写盘可能和内存里的不同
+    // （比如 YAML 的空值处理），让界面显示实际生效的配置。
+    let saved = load_download_settings(opts);
+    Ok(json!({
+        "ok": true,
+        "message": "下载源已保存",
+        "prefix": saved.prefix,
+        "mirrors": saved.mirrors,
+        "only_custom": saved.only_custom,
+    }))
+}
+
+/// POST /api/deps/mirrors/test —— 测一个地址能不能连上。
+///
+/// # 为什么要这个
+///
+/// 用户填了地址之后最需要知道的就是"它到底通不通"。没有这个，
+/// 他只能去点下载、等失败、再猜原因 —— 而下载失败要等超时，很慢，
+/// 而且失败原因混着"地址错"和"网络差"两种可能，说不清。
+///
+/// 这里只做**轻量探测**：发 HEAD（拿不到就退化成极小范围 GET），
+/// 只看能不能连上、HTTP 状态是什么。**不下载整个文件** ——
+/// 那要好几十 MB，测一次等半天就没人用了。
+fn deps_mirrors_test(body: &str) -> Result<Value> {
+    let v: Value = match serde_json::from_str(body) {
+        Ok(v) => v,
+        Err(e) => {
+            return Ok(json!({
+                "ok": false,
+                "error": format!("请求 JSON 格式不合法：{e}"),
+                "field": "body",
+            }));
+        }
+    };
+    let Some(url) = v.get("url").and_then(|x| x.as_str()) else {
+        return Ok(json!({"ok": false, "error": "没给地址", "field": "url"}));
+    };
+    let url = url.trim();
+
+    if let Err(e) = vca_core::config::validate_mirror_url(url) {
+        return Ok(json!({
+            "ok": false,
+            "error": format!("地址不合法：{e}"),
+            "field": "url",
+        }));
+    }
+
+    match vca_platform::http::probe(url, 8000) {
+        Ok(info) => Ok(json!({
+            "ok": true,
+            "status": info.status,
+            "kind": info.kind,
+            "size": info.size,
+            "message": info.describe(),
+        })),
+        Err(e) => Ok(json!({
+            "ok": false,
+            "error": format!("连不上：{e}"),
+            "field": "url",
+            // 给一句人话建议，别让用户对着错误码发呆
+            "hint": "确认地址能在浏览器里直接下载文件（不是网页）。\
+                     如果是内网镜像，确认这台机器能访问它。",
+        })),
+    }
+}
+
+#[cfg(test)]
+mod mirror_tests {
+    use super::*;
+
+    fn opts(tag: &str) -> ServeOptions {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let root = std::env::temp_dir().join(format!(
+            "vca-mirror-api-{tag}-{}-{stamp}",
+            std::process::id()
+        ));
+        ServeOptions {
+            config_root: root.join("config"),
+            data_root: root.join("data"),
+            profile: "teacher-a".to_string(),
+            open_browser: false,
+            port: 0,
+            web_dir: None,
+        }
+    }
+
+    fn cleanup(opts: &ServeOptions) {
+        if let Some(root) = opts.config_root.parent() {
+            let _ = std::fs::remove_dir_all(root);
+        }
+    }
+
+    #[test]
+    fn empty_config_uses_confirmed_builtin_defaults() {
+        let o = opts("defaults");
+        let got = deps_mirrors_get(&o);
+        assert_eq!(got["ok"], true);
+        assert_eq!(got["prefix"], json!([]));
+        assert_eq!(got["mirrors"], json!({}));
+        assert_eq!(got["only_custom"], false);
+        for id in ["ffmpeg", "whisper", "model"] {
+            assert!(
+                got["builtin"][id].as_array().is_some_and(|a| !a.is_empty()),
+                "{id} 没有默认公开源：{got}"
+            );
+        }
+        cleanup(&o);
+    }
+
+    #[test]
+    fn save_normalizes_persists_and_applies_without_restart() {
+        let o = opts("save");
+        let path = settings_path(&o);
+        std::fs::create_dir_all(path.parent().expect("配置父目录")).unwrap();
+        // 模拟未来版本/插件写入的未知字段：保存 download 时不能把它吃掉。
+        std::fs::write(&path, "profile: teacher-a\nfuture_field: keep-me\n").unwrap();
+
+        let first = deps_mirrors_set(
+            &o,
+            r#"{
+                "prefix": [" https://mirror.example/// ", "https://mirror.example/"],
+                "mirrors": {
+                    "ffmpeg": [" https://files.example/ffmpeg.zip ", "", "https://files.example/ffmpeg.zip"]
+                },
+                "only_custom": false
+            }"#,
+        )
+        .expect("保存成功");
+        assert_eq!(first["ok"], true, "{first}");
+        assert_eq!(first["prefix"], json!(["https://mirror.example/"]));
+        assert_eq!(
+            first["mirrors"]["ffmpeg"],
+            json!(["https://files.example/ffmpeg.zip"])
+        );
+
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(yaml["future_field"].as_str(), Some("keep-me"));
+
+        // 同一进程内再改一次并立刻回读，证明配置不需要重新编译/重启。
+        let second = deps_mirrors_set(
+            &o,
+            r#"{
+                "prefix": [],
+                "mirrors": {"model": ["https://files.example/tiny.bin"]},
+                "only_custom": true
+            }"#,
+        )
+        .expect("第二次保存成功");
+        assert_eq!(second["ok"], true, "{second}");
+        let live = load_download_settings(&o);
+        assert!(live.prefix.is_empty());
+        assert!(live.only_custom);
+        assert_eq!(
+            live.custom_for("model"),
+            &["https://files.example/tiny.bin".to_string()]
+        );
+
+        cleanup(&o);
+    }
+
+    #[test]
+    fn malformed_existing_yaml_is_never_overwritten() {
+        let o = opts("bad-yaml");
+        let path = settings_path(&o);
+        std::fs::create_dir_all(path.parent().expect("配置父目录")).unwrap();
+        let broken = "profile: [这不是完整 YAML\n";
+        std::fs::write(&path, broken).unwrap();
+
+        let result = deps_mirrors_set(&o, r#"{"prefix":[],"mirrors":{},"only_custom":false}"#);
+        assert!(result.is_err(), "损坏配置上不应继续覆盖：{result:?}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            broken,
+            "损坏配置被覆盖，用户其它设置会丢失"
+        );
+        cleanup(&o);
+    }
+
+    #[test]
+    fn invalid_shapes_urls_and_unknown_ids_are_rejected() {
+        let o = opts("invalid");
+        let cases = [
+            ("{", "body"),
+            (r#"{"prefix":"https://x/"}"#, "prefix"),
+            (r#"{"prefix":["https://x/?url="]}"#, "prefix"),
+            (r#"{"mirrors":[]}"#, "mirrors"),
+            (r#"{"mirrors":{"unknown":["https://x/a"]}}"#, "unknown"),
+            (r#"{"mirrors":{"ffmpeg":["ftp://x/a.zip"]}}"#, "ffmpeg"),
+            (r#"{"mirrors":{"ffmpeg":[123]}}"#, "ffmpeg"),
+            (r#"{"only_custom":"true"}"#, "only_custom"),
+            (
+                r#"{"prefix":[],"mirrors":{},"only_custom":true}"#,
+                "only_custom",
+            ),
+        ];
+        for (body, field) in cases {
+            let got = deps_mirrors_set(&o, body).expect("接口正常返回");
+            assert_eq!(got["ok"], false, "非法输入被放过：{body} -> {got}");
+            assert_eq!(got["field"], field, "字段定位不对：{body} -> {got}");
+        }
+        cleanup(&o);
+    }
 }
